@@ -1,45 +1,86 @@
 #!/usr/bin/env bash
-# Argon setup script — run once on a fresh server.
+# Argon setup script — run once on a fresh Linux server.
 # Usage: bash setup.sh
 set -e
 
 BOLD='\033[1m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
+DIM='\033[2m'
 RESET='\033[0m'
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 echo -e "${BOLD}Argon setup${RESET}"
-echo "----------------------------"
+echo "=================================="
 
-# ── 1. Install Python package ────────────────────────────────────────────────
-echo -e "\n${BOLD}Installing Argon...${RESET}"
-pip install -e ".[discord]" --quiet
-echo -e "${GREEN}✓ Installed${RESET}"
+# ── 0. Prerequisites ──────────────────────────────────────────────────────────
+echo -e "\n${BOLD}Checking prerequisites...${RESET}"
 
-# ── 2. WhatsApp bridge (Node.js) ─────────────────────────────────────────────
-echo -e "\n${BOLD}WhatsApp bridge setup${RESET}"
-if ! command -v node &> /dev/null; then
-    echo -e "${YELLOW}Node.js not found. Installing via NodeSource (LTS)...${RESET}"
-    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-    sudo apt-get install -y nodejs
+PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "0.0")
+PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
+PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
+if [[ "$PY_MAJOR" -lt 3 || ("$PY_MAJOR" -eq 3 && "$PY_MINOR" -lt 10) ]]; then
+    echo -e "${RED}Python 3.10+ required (found $PY_VER). Install it and retry.${RESET}"
+    exit 1
 fi
-NODE_VER=$(node --version 2>/dev/null)
-echo -e "Node.js: ${NODE_VER}"
+echo -e "  Python $PY_VER ${GREEN}✓${RESET}"
 
-echo -e "Installing whatsapp-web.js dependencies..."
-(cd "$(dirname "$0")/whatsapp_bridge" && npm install --silent)
+if ! command -v systemctl &>/dev/null; then
+    echo -e "${YELLOW}Warning: systemctl not found — services won't be created.${RESET}"
+    NO_SYSTEMD=1
+fi
+
+# ── 1. Install Python package ─────────────────────────────────────────────────
+echo -e "\n${BOLD}Installing Argon...${RESET}"
+pip install -e "$SCRIPT_DIR/.[discord]" --quiet
+export PATH="$HOME/.local/bin:$PATH"
+NANOBOT_BIN=$(which nanobot 2>/dev/null || echo "$HOME/.local/bin/nanobot")
+echo -e "${GREEN}✓ Installed${RESET} ${DIM}($NANOBOT_BIN)${RESET}"
+
+# ── 2. Node.js + WhatsApp bridge ──────────────────────────────────────────────
+echo -e "\n${BOLD}WhatsApp bridge setup${RESET}"
+if ! command -v node &>/dev/null; then
+    echo -e "${YELLOW}Node.js not found — installing via NodeSource (LTS)...${RESET}"
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - 2>/dev/null
+    sudo apt-get install -y nodejs -qq
+fi
+NODE_BIN=$(which node)
+echo -e "  Node.js $(node --version) ${GREEN}✓${RESET}"
+(cd "$SCRIPT_DIR/whatsapp_bridge" && npm install --silent)
 echo -e "${GREEN}✓ WhatsApp bridge ready${RESET}"
 
-# ── 2. Collect secrets ───────────────────────────────────────────────────────
+# ── 3. Collect secrets ────────────────────────────────────────────────────────
 echo -e "\n${BOLD}Configuration${RESET}"
+echo -e "${DIM}Press Enter to skip optional fields.${RESET}\n"
 
-read -rp "NIM API key: " NIM_API_KEY
-read -rp "Discord bot token: " DISCORD_TOKEN
-read -rp "Your Discord user ID (allowFrom): " DISCORD_USER_ID
-read -rp "Your WhatsApp phone number (digits only, with country code, e.g. 16265551234): " WA_PHONE
+while [[ -z "$NIM_API_KEY" ]]; do
+    read -rp "NIM API key: " NIM_API_KEY
+done
 
-# ── 3. Write config ──────────────────────────────────────────────────────────
+while [[ -z "$DISCORD_TOKEN" ]]; do
+    read -rp "Discord bot token: " DISCORD_TOKEN
+done
+
+while [[ -z "$DISCORD_USER_ID" ]]; do
+    read -rp "Your Discord user ID: " DISCORD_USER_ID
+done
+
+while [[ -z "$WA_PHONE" ]]; do
+    read -rp "Your WhatsApp phone number (digits + country code, e.g. 16265551234): " WA_PHONE
+done
+
+read -rp "Brave Search API key ${DIM}(optional — free tier at brave.com/search/api)${RESET}: " BRAVE_API_KEY
+
+# ── 4. Write config ───────────────────────────────────────────────────────────
 mkdir -p ~/.nanobot
+
+if [[ -n "$BRAVE_API_KEY" ]]; then
+    SEARCH_BLOCK='"provider": "brave", "apiKey": "'"$BRAVE_API_KEY"'"'
+else
+    SEARCH_BLOCK='"provider": "duckduckgo"'
+fi
 
 cat > ~/.nanobot/config.json <<EOF
 {
@@ -71,62 +112,137 @@ cat > ~/.nanobot/config.json <<EOF
   },
   "tools": {
     "exec": { "enable": false },
-    "web": { "enable": true }
+    "web": {
+      "enable": true,
+      "search": { ${SEARCH_BLOCK} }
+    }
   }
 }
 EOF
-
 echo -e "${GREEN}✓ Config written to ~/.nanobot/config.json${RESET}"
 
-# ── 4. Google API setup ──────────────────────────────────────────────────────
+# ── 5. Workspace directories ──────────────────────────────────────────────────
+mkdir -p ~/.nanobot/workspace/google
+mkdir -p ~/.nanobot/workspace/daily
+mkdir -p ~/.nanobot/workspace/habits
+echo -e "${GREEN}✓ Workspace directories created${RESET}"
+
+# ── 6. Google OAuth ───────────────────────────────────────────────────────────
 echo -e "\n${BOLD}Google API Setup${RESET}"
-echo -e "You need a ${BOLD}client_secrets.json${RESET} from Google Cloud Console."
-echo -e "Steps:"
-echo -e "  1. Go to console.cloud.google.com → New Project"
-echo -e "  2. Enable: Calendar API, Tasks API, Classroom API, Drive API, Gmail API"
-echo -e "  3. APIs & Services → Credentials → Create OAuth 2.0 Client ID (Desktop app)"
-echo -e "  4. Download the JSON and place it at:"
-echo -e "     ${BOLD}~/.nanobot/workspace/google/client_secrets.json${RESET}"
-echo ""
+echo -e "To use Google Calendar, Classroom, and Tasks you need a ${BOLD}client_secrets.json${RESET}"
+echo -e "from Google Cloud Console:\n"
+echo -e "  1. console.cloud.google.com → New Project (or pick existing)"
+echo -e "  2. Enable these APIs: Calendar, Tasks, Classroom, Drive, Gmail"
+echo -e "  3. APIs & Services → Credentials → Create OAuth 2.0 Client ID"
+echo -e "     Application type: ${BOLD}Desktop app${RESET}"
+echo -e "  4. Download the JSON and copy it to:"
+echo -e "     ${BOLD}~/.nanobot/workspace/google/client_secrets.json${RESET}\n"
+
 read -rp "Have you placed client_secrets.json? (y/N): " HAS_SECRETS
-
 if [[ "$HAS_SECRETS" =~ ^[Yy]$ ]]; then
-    mkdir -p ~/.nanobot/workspace/google
-    echo -e "\nAuthenticating Google accounts (browser will open for each)..."
-    echo -e "${YELLOW}Authenticate in the order prompted. Each opens a browser tab.${RESET}\n"
-
-    read -rp "Authenticate 'personal' account (Drive)? (y/N): " DO_PERSONAL
-    [[ "$DO_PERSONAL" =~ ^[Yy]$ ]] && nanobot google-auth personal
-
-    read -rp "Authenticate 'work' account (Calendar, Tasks, Drive, Gmail)? (y/N): " DO_WORK
-    [[ "$DO_WORK" =~ ^[Yy]$ ]] && nanobot google-auth work
-
+    echo ""
     read -rp "Authenticate 'school' account (Classroom, Drive, Gmail)? (y/N): " DO_SCHOOL
-    [[ "$DO_SCHOOL" =~ ^[Yy]$ ]] && nanobot google-auth school
+    [[ "$DO_SCHOOL" =~ ^[Yy]$ ]] && "$NANOBOT_BIN" google-auth school
+
+    read -rp "Authenticate 'personal' account (Calendar, Drive, Gmail)? (y/N): " DO_PERSONAL
+    [[ "$DO_PERSONAL" =~ ^[Yy]$ ]] && "$NANOBOT_BIN" google-auth personal
 else
-    echo -e "${YELLOW}Skipping Google auth. Run 'nanobot google-auth <account>' later.${RESET}"
+    echo -e "${YELLOW}Skipping — run these later:${RESET}"
+    echo -e "  nanobot google-auth school"
+    echo -e "  nanobot google-auth personal"
 fi
 
-# ── 5. Done ──────────────────────────────────────────────────────────────────
-echo -e "\n${GREEN}${BOLD}Setup complete.${RESET}"
-echo -e "Run ${BOLD}nanobot gateway${RESET} to start."
-echo -e "Dashboard will be at ${BOLD}http://localhost:3995${RESET}"
-echo -e "\n${BOLD}First-time WhatsApp setup:${RESET}"
-echo -e "  1. Run ${BOLD}nanobot gateway${RESET}"
-echo -e "  2. A QR code will appear in the terminal."
-echo -e "  3. Open WhatsApp on your phone → Settings → Linked Devices → Link a Device."
-echo -e "  4. Scan the QR code. Done — session is saved for future restarts."
-echo -e "\n${BOLD}iPhone Shortcuts for lockdown/unlock:${RESET}"
-echo -e "  1. Create a Focus mode called 'Lock Down' with your distracting apps restricted."
-echo -e "  2. In Shortcuts → Automation → New → Message Received:"
-echo -e "     - From: [your Argon WhatsApp contact]"
-echo -e "     - Message Contains: lockdown"
-echo -e "     - Action: Set Focus → Lock Down → On"
-echo -e "     - Run immediately (disable 'Ask Before Running')"
-echo -e "  3. Repeat for 'unlock' → Set Focus → Lock Down → Off"
-echo -e "  4. In Shortcuts → Automation → New → Personal (iPhone shortcut):"
-echo -e "     - When you arrive home → send 'Neon is home' to your Argon WhatsApp contact"
-echo -e "\nGoogle auth can be run at any time:"
-echo -e "  nanobot google-auth personal"
-echo -e "  nanobot google-auth work"
+# ── 7. WhatsApp QR scan ───────────────────────────────────────────────────────
+echo -e "\n${BOLD}WhatsApp QR scan${RESET}"
+echo -e "The bridge will start and print a QR code. Scan it with your phone:"
+echo -e "  ${BOLD}WhatsApp → Settings → Linked Devices → Link a Device${RESET}"
+echo -e "${DIM}Press Ctrl+C once you see '✓ WhatsApp connected and ready.'${RESET}\n"
+read -rp "Ready to scan? (y/N): " DO_QR
+if [[ "$DO_QR" =~ ^[Yy]$ ]]; then
+    (cd "$SCRIPT_DIR/whatsapp_bridge" && node index.js) || true
+    echo -e "\n${GREEN}✓ WhatsApp session saved${RESET}"
+else
+    echo -e "${YELLOW}Skipping — the bridge will start with the service but you'll need to check logs for the QR.${RESET}"
+fi
+
+# ── 8. Systemd services ───────────────────────────────────────────────────────
+if [[ -z "$NO_SYSTEMD" ]]; then
+    echo -e "\n${BOLD}Creating systemd services...${RESET}"
+
+    sudo tee /etc/systemd/system/argon-whatsapp.service > /dev/null <<EOF
+[Unit]
+Description=Argon WhatsApp Bridge
+After=network.target
+
+[Service]
+User=$USER
+WorkingDirectory=$SCRIPT_DIR/whatsapp_bridge
+ExecStart=$NODE_BIN index.js
+Restart=always
+RestartSec=5
+Environment=HOME=$HOME
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    sudo tee /etc/systemd/system/argon.service > /dev/null <<EOF
+[Unit]
+Description=Argon AI Assistant
+After=network.target argon-whatsapp.service
+
+[Service]
+User=$USER
+WorkingDirectory=$SCRIPT_DIR
+ExecStart=$NANOBOT_BIN gateway
+Restart=always
+RestartSec=5
+Environment=HOME=$HOME
+Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable argon-whatsapp argon
+    echo -e "${GREEN}✓ Services created and enabled (start on boot)${RESET}"
+
+    echo -e "\n${BOLD}Starting services...${RESET}"
+    sudo systemctl start argon-whatsapp
+    sleep 2
+    sudo systemctl start argon
+    sleep 3
+
+    if systemctl is-active --quiet argon; then
+        echo -e "${GREEN}✓ Argon is running${RESET}"
+    else
+        echo -e "${RED}Argon failed to start. Check logs: journalctl -u argon -n 30${RESET}"
+    fi
+
+    if systemctl is-active --quiet argon-whatsapp; then
+        echo -e "${GREEN}✓ WhatsApp bridge is running${RESET}"
+    else
+        echo -e "${YELLOW}WhatsApp bridge not running. Check: journalctl -u argon-whatsapp -n 30${RESET}"
+    fi
+fi
+
+# ── 9. Done ───────────────────────────────────────────────────────────────────
+echo -e "\n${GREEN}${BOLD}Setup complete.${RESET}\n"
+echo -e "  Dashboard   http://localhost:3995"
+echo -e "  Argon logs  journalctl -u argon -f"
+echo -e "  WA logs     journalctl -u argon-whatsapp -f"
+echo -e ""
+echo -e "${BOLD}To update:${RESET}"
+echo -e "  cd $SCRIPT_DIR && git pull && pip install -e '.[discord]' --quiet && sudo systemctl restart argon"
+echo -e ""
+echo -e "${BOLD}Google auth (run any time):${RESET}"
 echo -e "  nanobot google-auth school"
+echo -e "  nanobot google-auth personal"
+echo -e ""
+echo -e "${BOLD}iPhone Shortcuts (one-time setup):${RESET}"
+echo -e "  1. Create a Focus mode called 'Lock Down' with distracting apps blocked"
+echo -e "  2. Shortcuts → Automation → Message Received from [Argon's number]:"
+echo -e "       Contains 'lockdown' → Set Focus: Lock Down On  (run immediately)"
+echo -e "       Contains 'unlock'   → Set Focus: Lock Down Off (run immediately)"
+echo -e "  3. Shortcuts → Automation → When I arrive home → send 'Neon is home' to Argon"
