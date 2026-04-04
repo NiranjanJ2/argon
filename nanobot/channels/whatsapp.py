@@ -1,15 +1,28 @@
-"""WhatsApp channel implementation using Node.js bridge."""
+"""WhatsApp channel — bridges whatsapp-web.js subprocess to the nanobot MessageBus.
+
+Setup (one-time):
+  1. cd whatsapp_bridge && npm install
+  2. nanobot gateway  (bridge auto-starts; scan QR code with phone)
+  3. Session is saved — subsequent starts reconnect silently.
+
+Config keys (under channels.whatsapp in config.json):
+  enabled       bool    false
+  phoneNumber   str     ""       Your phone number, digits only, with country code.
+                                 e.g. "16265551234"  (US +1 626-555-1234)
+  bridgePort    int     3996     Port the Node.js bridge listens on.
+  bridgeDir     str     ""       Override path to whatsapp_bridge/ directory.
+                                 Defaults to auto-detected repo location.
+"""
+
+from __future__ import annotations
 
 import asyncio
-import json
-import mimetypes
-import os
-import shutil
 import subprocess
-from collections import OrderedDict
+import sys
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
+import httpx
 from loguru import logger
 from pydantic import Field
 
@@ -18,284 +31,308 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import Base
 
+# ── Module-level state for Flask→asyncio bridge ───────────────────────────────
+# Flask runs in a daemon thread; we hand messages to the async channel via these.
+# Wrapped in a list so _enqueue_from_flask always sees the current value.
+_wa_state: list = [None, None]  # [loop, queue]
+
+
+def _enqueue_from_flask(payload: dict) -> None:
+    """Called by the Flask webhook route (sync thread) to push a message into the async channel."""
+    loop, queue = _wa_state
+    if loop is None or queue is None:
+        logger.warning("WhatsApp: received message but channel not running yet — dropped.")
+        return
+    loop.call_soon_threadsafe(queue.put_nowait, payload)
+
+
+# ── Config ────────────────────────────────────────────────────────────────────
 
 class WhatsAppConfig(Base):
     """WhatsApp channel configuration."""
 
     enabled: bool = False
-    bridge_url: str = "ws://localhost:3001"
-    bridge_token: str = ""
-    allow_from: list[str] = Field(default_factory=list)
-    group_policy: Literal["open", "mention"] = "open"  # "open" responds to all, "mention" only when @mentioned
+    phone_number: str = Field(default="", alias="phoneNumber")
+    bridge_port: int = Field(default=3996, alias="bridgePort")
+    bridge_dir: str = Field(default="", alias="bridgeDir")
 
+    # allow_from mirrors the base-class pattern; defaults to phone_number when set.
+    allow_from: list[str] = Field(default_factory=list, alias="allowFrom")
+
+    model_config = {"populate_by_name": True}
+
+    def effective_allow_from(self) -> list[str]:
+        if self.allow_from:
+            return self.allow_from
+        if self.phone_number:
+            return [self.phone_number]
+        return []
+
+
+# ── Channel ───────────────────────────────────────────────────────────────────
 
 class WhatsAppChannel(BaseChannel):
-    """
-    WhatsApp channel that connects to a Node.js bridge.
-
-    The bridge uses @whiskeysockets/baileys to handle the WhatsApp Web protocol.
-    Communication between Python and Node.js is via WebSocket.
-    """
+    """WhatsApp channel via whatsapp-web.js bridge subprocess."""
 
     name = "whatsapp"
     display_name = "WhatsApp"
 
+    # How long to wait for bridge to start before giving up (seconds)
+    _BRIDGE_STARTUP_TIMEOUT = 30
+    # Seconds between bridge health checks / restart attempts
+    _BRIDGE_RESTART_DELAY = 5
+
     @classmethod
     def default_config(cls) -> dict[str, Any]:
-        return WhatsAppConfig().model_dump(by_alias=True)
+        return {
+            "enabled": False,
+            "phoneNumber": "",
+            "bridgePort": 3996,
+            "bridgeDir": "",
+            "allowFrom": [],
+        }
 
-    def __init__(self, config: Any, bus: MessageBus):
+    def __init__(self, config: Any, bus: MessageBus) -> None:
         if isinstance(config, dict):
             config = WhatsAppConfig.model_validate(config)
         super().__init__(config, bus)
-        self._ws = None
-        self._connected = False
-        self._processed_message_ids: OrderedDict[str, None] = OrderedDict()
+        self.config: WhatsAppConfig = config
+        self._bridge_proc: subprocess.Popen | None = None
+        self._http: httpx.AsyncClient | None = None
 
-    async def login(self, force: bool = False) -> bool:
-        """
-        Set up and run the WhatsApp bridge for QR code login.
-
-        This spawns the Node.js bridge process which handles the WhatsApp
-        authentication flow. The process blocks until the user scans the QR code
-        or interrupts with Ctrl+C.
-        """
-        from nanobot.config.paths import get_runtime_subdir
-
-        try:
-            bridge_dir = _ensure_bridge_setup()
-        except RuntimeError as e:
-            logger.error("{}", e)
-            return False
-
-        env = {**os.environ}
-        if self.config.bridge_token:
-            env["BRIDGE_TOKEN"] = self.config.bridge_token
-        env["AUTH_DIR"] = str(get_runtime_subdir("whatsapp-auth"))
-
-        logger.info("Starting WhatsApp bridge for QR login...")
-        try:
-            subprocess.run(
-                [shutil.which("npm"), "start"], cwd=bridge_dir, check=True, env=env
-            )
-        except subprocess.CalledProcessError:
-            return False
-
-        return True
+    # ── Public interface ──────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Start the WhatsApp channel by connecting to the bridge."""
-        import websockets
+        if not self.config.phone_number and not self.config.allow_from:
+            logger.error("WhatsApp: phoneNumber not set — channel disabled.")
+            return
 
-        bridge_url = self.config.bridge_url
+        # Register ourselves with the Flask app so the webhook route can reach us.
+        try:
+            from nanobot.dashboard.app import register_whatsapp_handler
+            register_whatsapp_handler(_enqueue_from_flask)
+        except Exception as e:
+            logger.warning("WhatsApp: could not register Flask webhook: {}", e)
 
-        logger.info("Connecting to WhatsApp bridge at {}...", bridge_url)
+        # Set up the asyncio bridge for the Flask thread.
+        _wa_state[0] = asyncio.get_running_loop()
+        _wa_state[1] = asyncio.Queue()
 
+        self._http = httpx.AsyncClient(timeout=10)
         self._running = True
 
-        while self._running:
-            try:
-                async with websockets.connect(bridge_url) as ws:
-                    self._ws = ws
-                    # Send auth token if configured
-                    if self.config.bridge_token:
-                        await ws.send(
-                            json.dumps({"type": "auth", "token": self.config.bridge_token})
-                        )
-                    self._connected = True
-                    logger.info("Connected to WhatsApp bridge")
-
-                    # Listen for messages
-                    async for message in ws:
-                        try:
-                            await self._handle_bridge_message(message)
-                        except Exception as e:
-                            logger.error("Error handling bridge message: {}", e)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self._connected = False
-                self._ws = None
-                logger.warning("WhatsApp bridge connection error: {}", e)
-
-                if self._running:
-                    logger.info("Reconnecting in 5 seconds...")
-                    await asyncio.sleep(5)
-
-    async def stop(self) -> None:
-        """Stop the WhatsApp channel."""
-        self._running = False
-        self._connected = False
-
-        if self._ws:
-            await self._ws.close()
-            self._ws = None
-
-    async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through WhatsApp."""
-        if not self._ws or not self._connected:
-            logger.warning("WhatsApp bridge not connected")
-            return
-
-        chat_id = msg.chat_id
-
-        if msg.content:
-            try:
-                payload = {"type": "send", "to": chat_id, "text": msg.content}
-                await self._ws.send(json.dumps(payload, ensure_ascii=False))
-            except Exception as e:
-                logger.error("Error sending WhatsApp message: {}", e)
-                raise
-
-        for media_path in msg.media or []:
-            try:
-                mime, _ = mimetypes.guess_type(media_path)
-                payload = {
-                    "type": "send_media",
-                    "to": chat_id,
-                    "filePath": media_path,
-                    "mimetype": mime or "application/octet-stream",
-                    "fileName": media_path.rsplit("/", 1)[-1],
-                }
-                await self._ws.send(json.dumps(payload, ensure_ascii=False))
-            except Exception as e:
-                logger.error("Error sending WhatsApp media {}: {}", media_path, e)
-                raise
-
-    async def _handle_bridge_message(self, raw: str) -> None:
-        """Handle a message from the bridge."""
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning("Invalid JSON from bridge: {}", raw[:100])
-            return
-
-        msg_type = data.get("type")
-
-        if msg_type == "message":
-            # Incoming message from WhatsApp
-            # Deprecated by whatsapp: old phone number style typically: <phone>@s.whatspp.net
-            pn = data.get("pn", "")
-            # New LID sytle typically:
-            sender = data.get("sender", "")
-            content = data.get("content", "")
-            message_id = data.get("id", "")
-
-            if message_id:
-                if message_id in self._processed_message_ids:
-                    return
-                self._processed_message_ids[message_id] = None
-                while len(self._processed_message_ids) > 1000:
-                    self._processed_message_ids.popitem(last=False)
-
-            # Extract just the phone number or lid as chat_id
-            is_group = data.get("isGroup", False)
-            was_mentioned = data.get("wasMentioned", False)
-
-            if is_group and getattr(self.config, "group_policy", "open") == "mention":
-                if not was_mentioned:
-                    return
-
-            user_id = pn if pn else sender
-            sender_id = user_id.split("@")[0] if "@" in user_id else user_id
-            logger.info("Sender {}", sender)
-
-            # Handle voice transcription if it's a voice message
-            if content == "[Voice Message]":
-                logger.info(
-                    "Voice message received from {}, but direct download from bridge is not yet supported.",
-                    sender_id,
-                )
-                content = "[Voice Message: Transcription not available for WhatsApp yet]"
-
-            # Extract media paths (images/documents/videos downloaded by the bridge)
-            media_paths = data.get("media") or []
-
-            # Build content tags matching Telegram's pattern: [image: /path] or [file: /path]
-            if media_paths:
-                for p in media_paths:
-                    mime, _ = mimetypes.guess_type(p)
-                    media_type = "image" if mime and mime.startswith("image/") else "file"
-                    media_tag = f"[{media_type}: {p}]"
-                    content = f"{content}\n{media_tag}" if content else media_tag
-
-            await self._handle_message(
-                sender_id=sender_id,
-                chat_id=sender,  # Use full LID for replies
-                content=content,
-                media=media_paths,
-                metadata={
-                    "message_id": message_id,
-                    "timestamp": data.get("timestamp"),
-                    "is_group": data.get("isGroup", False),
-                },
+        bridge_dir = self._resolve_bridge_dir()
+        if bridge_dir is None:
+            logger.error(
+                "WhatsApp: whatsapp_bridge/ not found. "
+                "Run 'cd whatsapp_bridge && npm install' first."
             )
+            return
 
-        elif msg_type == "status":
-            # Connection status update
-            status = data.get("status")
-            logger.info("WhatsApp status: {}", status)
-
-            if status == "connected":
-                self._connected = True
-            elif status == "disconnected":
-                self._connected = False
-
-        elif msg_type == "qr":
-            # QR code for authentication
-            logger.info("Scan QR code in the bridge terminal to connect WhatsApp")
-
-        elif msg_type == "error":
-            logger.error("WhatsApp bridge error: {}", data.get("error"))
-
-
-def _ensure_bridge_setup() -> Path:
-    """
-    Ensure the WhatsApp bridge is set up and built.
-
-    Returns the bridge directory. Raises RuntimeError if npm is not found
-    or bridge cannot be built.
-    """
-    from nanobot.config.paths import get_bridge_install_dir
-
-    user_bridge = get_bridge_install_dir()
-
-    if (user_bridge / "dist" / "index.js").exists():
-        return user_bridge
-
-    npm_path = shutil.which("npm")
-    if not npm_path:
-        raise RuntimeError("npm not found. Please install Node.js >= 18.")
-
-    # Find source bridge
-    current_file = Path(__file__)
-    pkg_bridge = current_file.parent.parent / "bridge"
-    src_bridge = current_file.parent.parent.parent / "bridge"
-
-    source = None
-    if (pkg_bridge / "package.json").exists():
-        source = pkg_bridge
-    elif (src_bridge / "package.json").exists():
-        source = src_bridge
-
-    if not source:
-        raise RuntimeError(
-            "WhatsApp bridge source not found. "
-            "Try reinstalling: pip install --force-reinstall nanobot"
+        # Run bridge + message-consumer concurrently.
+        await asyncio.gather(
+            self._run_bridge(bridge_dir),
+            self._consume_queue(_wa_state[1]),
         )
 
-    logger.info("Setting up WhatsApp bridge...")
-    user_bridge.parent.mkdir(parents=True, exist_ok=True)
-    if user_bridge.exists():
-        shutil.rmtree(user_bridge)
-    shutil.copytree(source, user_bridge, ignore=shutil.ignore_patterns("node_modules", "dist"))
+    async def stop(self) -> None:
+        self._running = False
+        self._kill_bridge()
+        if self._http:
+            await self._http.aclose()
+            self._http = None
 
-    logger.info("  Installing dependencies...")
-    subprocess.run([npm_path, "install"], cwd=user_bridge, check=True, capture_output=True)
+    async def send(self, msg: OutboundMessage) -> None:
+        if self._http is None:
+            logger.warning("WhatsApp: not running — cannot send.")
+            return
 
-    logger.info("  Building...")
-    subprocess.run([npm_path, "run", "build"], cwd=user_bridge, check=True, capture_output=True)
+        # Resolve destination: use chat_id from the message (the sender's @c.us id)
+        to = msg.chat_id
+        if not to:
+            logger.warning("WhatsApp: outbound message has no chat_id — dropped.")
+            return
 
-    logger.info("Bridge ready")
-    return user_bridge
+        content = msg.content or ""
+        if not content:
+            return
+
+        port = self.config.bridge_port
+        try:
+            resp = await self._http.post(
+                f"http://127.0.0.1:{port}/send",
+                json={"to": to, "body": content},
+            )
+            if resp.status_code != 200:
+                logger.warning("WhatsApp bridge /send returned {}: {}", resp.status_code, resp.text)
+        except Exception as e:
+            logger.error("WhatsApp send failed: {}", e)
+
+    # ── allow_from override (strips @c.us suffix) ─────────────────────────────
+
+    def is_allowed(self, sender_id: str) -> bool:
+        allow_list = self.config.effective_allow_from()
+        if not allow_list:
+            logger.warning("WhatsApp: allowFrom/phoneNumber not set — all access denied.")
+            return False
+        if "*" in allow_list:
+            return True
+        # Normalize: strip @c.us / @g.us so users can put bare digits in config
+        bare = sender_id.split("@")[0]
+        return bare in allow_list or sender_id in allow_list
+
+    # ── Internal: bridge subprocess ───────────────────────────────────────────
+
+    async def _run_bridge(self, bridge_dir: Path) -> None:
+        """Start the Node.js bridge and restart it if it dies."""
+        while self._running:
+            logger.info("WhatsApp: starting bridge subprocess in {}", bridge_dir)
+            self._bridge_proc = await asyncio.get_running_loop().run_in_executor(
+                None, self._launch_bridge, bridge_dir
+            )
+            if self._bridge_proc is None:
+                logger.error("WhatsApp: bridge failed to launch — retrying in {}s.", self._BRIDGE_RESTART_DELAY)
+                await asyncio.sleep(self._BRIDGE_RESTART_DELAY)
+                continue
+
+            # Wait for bridge to become healthy
+            if not await self._wait_for_bridge():
+                logger.warning("WhatsApp: bridge didn't become healthy — restarting.")
+                self._kill_bridge()
+                await asyncio.sleep(self._BRIDGE_RESTART_DELAY)
+                continue
+
+            logger.info("WhatsApp: bridge healthy.")
+
+            # Monitor until it dies
+            while self._running:
+                ret = self._bridge_proc.poll()
+                if ret is not None:
+                    logger.warning("WhatsApp: bridge exited with code {} — restarting.", ret)
+                    break
+                await asyncio.sleep(2)
+
+            self._kill_bridge()
+            if self._running:
+                await asyncio.sleep(self._BRIDGE_RESTART_DELAY)
+
+    def _launch_bridge(self, bridge_dir: Path) -> subprocess.Popen | None:
+        """Synchronous: spawn the bridge process."""
+        node_script = bridge_dir / "index.js"
+        if not node_script.exists():
+            logger.error("WhatsApp: {} not found.", node_script)
+            return None
+
+        node_exe = self._find_node()
+        if node_exe is None:
+            logger.error("WhatsApp: node not found in PATH. Install Node.js >= 18.")
+            return None
+
+        auth_dir = str(bridge_dir / "wwebjs_auth")
+        env_extras = {
+            "WA_BRIDGE_PORT": str(self.config.bridge_port),
+            "WA_DATA_PATH": auth_dir,
+            "NANOBOT_WEBHOOK_URL": "http://127.0.0.1:3995/whatsapp/incoming",
+        }
+        import os
+        env = {**os.environ, **env_extras}
+
+        try:
+            proc = subprocess.Popen(
+                [node_exe, str(node_script)],
+                cwd=str(bridge_dir),
+                env=env,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+            )
+            return proc
+        except Exception as e:
+            logger.error("WhatsApp: failed to start bridge: {}", e)
+            return None
+
+    async def _wait_for_bridge(self) -> bool:
+        """Wait for the bridge HTTP server to come up (not for WA connection — that may wait on QR).
+
+        Returns True once the HTTP server responds to /health.
+        WA connection itself is async: the bridge stays in 'initializing' until the user
+        scans the QR code (first run) or auto-reconnects (subsequent runs).
+        We don't time out on that — messages simply won't arrive until WA is connected.
+        """
+        port = self.config.bridge_port
+        deadline = asyncio.get_running_loop().time() + self._BRIDGE_STARTUP_TIMEOUT
+        while asyncio.get_running_loop().time() < deadline:
+            if not self._running:
+                return False
+            try:
+                resp = await self._http.get(f"http://127.0.0.1:{port}/health")
+                if resp.status_code == 200:
+                    return True  # HTTP server is up; WA connection state doesn't matter here
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+        return False
+
+    def _kill_bridge(self) -> None:
+        if self._bridge_proc and self._bridge_proc.poll() is None:
+            try:
+                self._bridge_proc.terminate()
+                self._bridge_proc.wait(timeout=5)
+            except Exception:
+                try:
+                    self._bridge_proc.kill()
+                except Exception:
+                    pass
+        self._bridge_proc = None
+
+    # ── Internal: message consumer ────────────────────────────────────────────
+
+    async def _consume_queue(self, queue: asyncio.Queue) -> None:
+        """Read incoming WhatsApp messages from the Flask-bridged queue."""
+        while self._running:
+            try:
+                payload = await asyncio.wait_for(queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+
+            sender_raw: str = payload.get("from", "")
+            body: str = payload.get("body", "")
+
+            if not sender_raw or not body:
+                continue
+
+            # Group chats end in @g.us — ignore them (private channel only)
+            if sender_raw.endswith("@g.us"):
+                continue
+
+            logger.debug("WhatsApp inbound from {}: {!r}", sender_raw, body[:60])
+
+            await self._handle_message(
+                sender_id=sender_raw,
+                chat_id=sender_raw,    # reply to the same chat
+                content=body,
+                metadata={"timestamp": payload.get("timestamp"), "type": payload.get("type")},
+            )
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _resolve_bridge_dir(self) -> Path | None:
+        """Return path to whatsapp_bridge/ directory, or None if not found."""
+        if self.config.bridge_dir:
+            p = Path(self.config.bridge_dir).expanduser()
+            return p if (p / "index.js").exists() else None
+
+        # Auto-detect: walk up from this file to find the repo root.
+        # Works for editable installs (pip install -e .) where __file__ is the real source.
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            candidate = parent / "whatsapp_bridge"
+            if (candidate / "index.js").exists():
+                return candidate
+
+        return None
+
+    @staticmethod
+    def _find_node() -> str | None:
+        """Return the path to the node executable, or None."""
+        import shutil
+        return shutil.which("node")

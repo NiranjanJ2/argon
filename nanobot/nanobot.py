@@ -110,7 +110,8 @@ class Nanobot:
             self._loop._extra_hooks = prev
 
         content = (response.content if response else None) or ""
-        return RunResult(content=content, tools_used=[], messages=[])
+        tools_used = [tc.name for tc in getattr(response, "tool_calls", None) or []] if response else []
+        return RunResult(content=content, tools_used=tools_used, messages=[])
 
 
 def _make_provider(config: Any) -> Any:
@@ -118,16 +119,14 @@ def _make_provider(config: Any) -> Any:
     from nanobot.providers.base import GenerationSettings
     from nanobot.providers.registry import find_by_name
 
-    model = config.agents.defaults.model
+    defaults = config.agents.defaults
+    model = defaults.model
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
     spec = find_by_name(provider_name) if provider_name else None
     backend = spec.backend if spec else "openai_compat"
 
-    if backend == "azure_openai":
-        if not p or not p.api_key or not p.api_base:
-            raise ValueError("Azure OpenAI requires api_key and api_base in config.")
-    elif backend == "openai_compat" and not model.startswith("bedrock/"):
+    if backend == "openai_compat" and not model.startswith("bedrock/"):
         needs_key = not (p and p.api_key)
         exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
         if needs_key and not exempt:
@@ -141,12 +140,6 @@ def _make_provider(config: Any) -> Any:
         from nanobot.providers.github_copilot_provider import GitHubCopilotProvider
 
         provider = GitHubCopilotProvider(default_model=model)
-    elif backend == "azure_openai":
-        from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
-
-        provider = AzureOpenAIProvider(
-            api_key=p.api_key, api_base=p.api_base, default_model=model
-        )
     elif backend == "anthropic":
         from nanobot.providers.anthropic_provider import AnthropicProvider
 
@@ -163,11 +156,11 @@ def _make_provider(config: Any) -> Any:
             api_key=p.api_key if p else None,
             api_base=config.get_api_base(model),
             default_model=model,
+            fallback_model=defaults.fallback_model or None,
             extra_headers=p.extra_headers if p else None,
             spec=spec,
         )
 
-    defaults = config.agents.defaults
     provider.generation = GenerationSettings(
         temperature=defaults.temperature,
         max_tokens=defaults.max_tokens,

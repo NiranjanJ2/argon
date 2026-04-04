@@ -1,0 +1,14 @@
+{
+  "name": "argon-whatsapp-bridge",
+  "version": "1.0.0",
+  "description": "WhatsApp Web bridge for Argon — connects whatsapp-web.js to the Python nanobot.",
+  "main": "index.js",
+  "dependencies": {
+    "express": "^4.18.0",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.26.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

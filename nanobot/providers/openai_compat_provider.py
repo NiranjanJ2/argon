@@ -113,11 +113,13 @@ class OpenAICompatProvider(LLMProvider):
         api_key: str | None = None,
         api_base: str | None = None,
         default_model: str = "gpt-4o",
+        fallback_model: str | None = None,
         extra_headers: dict[str, str] | None = None,
         spec: ProviderSpec | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
+        self.fallback_model = fallback_model
         self.extra_headers = extra_headers or {}
         self._spec = spec
 
@@ -598,6 +600,17 @@ class OpenAICompatProvider(LLMProvider):
     # Public API
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_model_unavailable(e: Exception) -> bool:
+        """True when the error suggests the model itself is unavailable (not a transient rate limit)."""
+        status = getattr(e, "status_code", None) or getattr(
+            getattr(e, "response", None), "status_code", None
+        )
+        if status in (404, 422):
+            return True
+        msg = str(e).lower()
+        return any(k in msg for k in ("model not found", "no such model", "not available", "does not exist"))
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -615,6 +628,14 @@ class OpenAICompatProvider(LLMProvider):
         try:
             return self._parse(await self._client.chat.completions.create(**kwargs))
         except Exception as e:
+            if self.fallback_model and model is None and self._is_model_unavailable(e):
+                from loguru import logger
+                logger.warning("Primary model unavailable, falling back to {}", self.fallback_model)
+                kwargs["model"] = self.fallback_model
+                try:
+                    return self._parse(await self._client.chat.completions.create(**kwargs))
+                except Exception as e2:
+                    return self._handle_error(e2)
             return self._handle_error(e)
 
     async def chat_stream(
@@ -637,6 +658,7 @@ class OpenAICompatProvider(LLMProvider):
         idle_timeout_s = int(os.environ.get("NANOBOT_STREAM_IDLE_TIMEOUT_S", "90"))
         try:
             stream = await self._client.chat.completions.create(**kwargs)
+
             chunks: list[Any] = []
             stream_iter = stream.__aiter__()
             while True:
@@ -665,6 +687,17 @@ class OpenAICompatProvider(LLMProvider):
                 finish_reason="error",
             )
         except Exception as e:
+            if self.fallback_model and model is None and self._is_model_unavailable(e):
+                from loguru import logger
+                logger.warning("Primary model unavailable, falling back to {}", self.fallback_model)
+                kwargs["model"] = self.fallback_model
+                try:
+                    return await self.chat_stream(
+                        messages, tools, self.fallback_model, max_tokens,
+                        temperature, reasoning_effort, tool_choice, on_content_delta,
+                    )
+                except Exception as e2:
+                    return self._handle_error(e2)
             return self._handle_error(e)
 
     def get_default_model(self) -> str:

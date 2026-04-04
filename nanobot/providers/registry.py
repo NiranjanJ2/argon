@@ -34,7 +34,7 @@ class ProviderSpec:
     display_name: str = ""  # shown in `nanobot status`
 
     # which provider implementation to use
-    # "openai_compat" | "anthropic" | "azure_openai" | "openai_codex" | "github_copilot"
+    # "openai_compat" | "anthropic" | "openai_codex" | "github_copilot"
     backend: str = "openai_compat"
 
     # extra env vars, e.g. (("ZHIPUAI_API_KEY", "{api_key}"),)
@@ -83,15 +83,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         is_direct=True,
     ),
 
-    # === Azure OpenAI (direct API calls with API version 2024-10-21) =====
-    ProviderSpec(
-        name="azure_openai",
-        keywords=("azure", "azure-openai"),
-        env_key="",
-        display_name="Azure OpenAI",
-        backend="azure_openai",
-        is_direct=True,
-    ),
     # === Gateways (detected by api_key / api_base, not model name) =========
     # Gateways can route any model, so they win in fallback.
     # OpenRouter: global gateway, keys start with "sk-or-"
@@ -319,7 +310,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
     # Ollama (local, OpenAI-compatible)
     ProviderSpec(
         name="ollama",
-        keywords=("ollama", "nemotron"),
+        keywords=("ollama",),
         env_key="OLLAMA_API_KEY",
         display_name="Ollama",
         backend="openai_compat",

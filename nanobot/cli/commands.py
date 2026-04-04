@@ -388,20 +388,15 @@ def _make_provider(config: Config):
     from nanobot.providers.base import GenerationSettings
     from nanobot.providers.registry import find_by_name
 
-    model = config.agents.defaults.model
+    defaults = config.agents.defaults
+    model = defaults.model
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
     spec = find_by_name(provider_name) if provider_name else None
     backend = spec.backend if spec else "openai_compat"
 
     # --- validation ---
-    if backend == "azure_openai":
-        if not p or not p.api_key or not p.api_base:
-            console.print("[red]Error: Azure OpenAI requires api_key and api_base.[/red]")
-            console.print("Set them in ~/.nanobot/config.json under providers.azure_openai section")
-            console.print("Use the model field to specify the deployment name.")
-            raise typer.Exit(1)
-    elif backend == "openai_compat" and not model.startswith("bedrock/"):
+    if backend == "openai_compat" and not model.startswith("bedrock/"):
         needs_key = not (p and p.api_key)
         exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
         if needs_key and not exempt:
@@ -413,13 +408,6 @@ def _make_provider(config: Config):
     if backend == "openai_codex":
         from nanobot.providers.openai_codex_provider import OpenAICodexProvider
         provider = OpenAICodexProvider(default_model=model)
-    elif backend == "azure_openai":
-        from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
-        provider = AzureOpenAIProvider(
-            api_key=p.api_key,
-            api_base=p.api_base,
-            default_model=model,
-        )
     elif backend == "github_copilot":
         from nanobot.providers.github_copilot_provider import GitHubCopilotProvider
         provider = GitHubCopilotProvider(default_model=model)
@@ -437,11 +425,11 @@ def _make_provider(config: Config):
             api_key=p.api_key if p else None,
             api_base=config.get_api_base(model),
             default_model=model,
+            fallback_model=defaults.fallback_model or None,
             extra_headers=p.extra_headers if p else None,
             spec=spec,
         )
 
-    defaults = config.agents.defaults
     provider.generation = GenerationSettings(
         temperature=defaults.temperature,
         max_tokens=defaults.max_tokens,
@@ -591,6 +579,32 @@ def serve(
 # ============================================================================
 
 
+def _register_reminder_cron(cron_service: Any, workspace: "Path") -> None:
+    """Register productivity cron jobs if not already present."""
+    from nanobot.cron.service import CronService
+    from nanobot.cron.types import CronSchedule
+
+    if not isinstance(cron_service, CronService):
+        return
+
+    existing_names = {j.name for j in cron_service.list_jobs(include_disabled=True)}
+
+    # ── Active-session reminder (every 5 min) ────────────────────────────────
+    if "Argon Productivity Reminder" not in existing_names:
+        cron_service.add_job(
+            name="Argon Productivity Reminder",
+            schedule=CronSchedule(kind="every", every_ms=5 * 60 * 1000),
+            message=(
+                "Periodic awareness check. Call `daily` get_state, then `daily` get_todo. "
+                "Use the current time and day (LA timezone) to decide what, if anything, to do. "
+                "Your personality and SKILL instructions define the full rules — use your judgment. "
+                "Do not send anything unless there is a clear reason to."
+            ),
+            deliver=True,
+            channel="discord",
+        )
+
+
 @app.command()
 def gateway(
     port: int | None = typer.Option(None, "--port", "-p", help="Gateway port"),
@@ -647,6 +661,7 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
+        google_enabled=config.google.enabled,
     )
 
     # Set cron callback (needs agent)
@@ -760,6 +775,10 @@ def gateway(
         timezone=config.agents.defaults.timezone,
     )
 
+    from nanobot.dashboard.app import start_dashboard, register_chat_handler
+    start_dashboard(workspace=config.workspace_path)
+    console.print("[green]✓[/green] Dashboard: http://0.0.0.0:3995")
+
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
@@ -770,6 +789,35 @@ def gateway(
         console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
 
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
+
+    # Register adaptive productivity reminder cron job
+    _register_reminder_cron(cron, config.workspace_path)
+    console.print("[green]✓[/green] Productivity reminder cron registered")
+
+    # Create the event loop explicitly so the dashboard chat handler can
+    # bridge synchronous Flask threads into the async agent via run_coroutine_threadsafe.
+    _loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_loop)
+
+    def _dashboard_chat_handler(message: str) -> str:
+        fut = asyncio.run_coroutine_threadsafe(
+            agent.process_direct(
+                message,
+                session_key="dashboard:chat",
+                channel="dashboard",
+                chat_id="web",
+            ),
+            _loop,
+        )
+        try:
+            resp = fut.result(timeout=120)
+            return resp.content if resp else "…"
+        except TimeoutError:
+            return "timed out — try again"
+        except Exception as e:
+            return f"error: {e}"
+
+    register_chat_handler(_dashboard_chat_handler)
 
     async def run():
         try:
@@ -792,9 +840,59 @@ def gateway(
             agent.stop()
             await channels.stop_all()
 
-    asyncio.run(run())
+    _loop.run_until_complete(run())
 
 
+
+
+# ============================================================================
+# Google Auth Command
+# ============================================================================
+
+
+@app.command("google-auth")
+def google_auth(
+    account: str = typer.Argument(help="Account to authenticate: personal, work, or school"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Authenticate a Google account for Argon (opens browser OAuth flow)."""
+    from nanobot.config.loader import get_config_path, load_config, save_config, set_config_path
+    from nanobot.google.auth import GoogleAuth, ACCOUNT_SCOPES
+
+    if account not in ACCOUNT_SCOPES:
+        console.print(f"[red]Unknown account '{account}'. Must be one of: {', '.join(ACCOUNT_SCOPES)}[/red]")
+        raise typer.Exit(1)
+
+    if config:
+        from nanobot.config.loader import set_config_path
+        set_config_path(Path(config).expanduser().resolve())
+
+    cfg = load_config()
+    auth = GoogleAuth(cfg.workspace_path)
+
+    secrets_path = cfg.workspace_path / "google" / "client_secrets.json"
+    if not secrets_path.exists():
+        console.print(f"[red]client_secrets.json not found at {secrets_path}[/red]")
+        console.print(
+            "Download it from: [bold]Google Cloud Console → APIs & Services → Credentials → OAuth 2.0 Client IDs → Download JSON[/bold]"
+        )
+        console.print(f"Then place it at: [bold]{secrets_path}[/bold]")
+        raise typer.Exit(1)
+
+    console.print(f"Authenticating [bold]{account}[/bold] account...")
+    console.print("[dim]A browser window will open. Complete the OAuth consent flow.[/dim]")
+    try:
+        auth.authenticate(account)
+        console.print(f"[green]✓[/green] {account} account authenticated.")
+
+        # Auto-enable google in config
+        cfg.google.enabled = True
+        config_path = get_config_path()
+        save_config(cfg, config_path)
+        console.print("[green]✓[/green] google.enabled set to true in config.")
+    except Exception as e:
+        console.print(f"[red]✗[/red] Authentication failed: {e}")
+        raise typer.Exit(1)
 
 
 # ============================================================================

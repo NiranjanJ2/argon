@@ -180,6 +180,7 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
         hooks: list[AgentHook] | None = None,
+        google_enabled: bool = False,
     ):
         from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -208,6 +209,7 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self.google_enabled = google_enabled
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
@@ -277,6 +279,52 @@ class AgentLoop:
             self.tools.register(
                 CronTool(self.cron_service, default_timezone=self.context.timezone or "UTC")
             )
+        self._register_productivity_tools()
+        if self.google_enabled:
+            self._register_google_tools()
+
+    def _register_productivity_tools(self) -> None:
+        """Register schedule and daily productivity tools."""
+        from nanobot.schedule.tool import ScheduleTool
+        from nanobot.daily.tool import DailyTool
+
+        # Extract phone number from WhatsApp channel config if present
+        wa_phone: str | None = None
+        if self.channels_config:
+            wa_cfg = (self.channels_config.model_extra or {}).get("whatsapp", {})
+            if isinstance(wa_cfg, dict):
+                wa_phone = wa_cfg.get("phoneNumber") or wa_cfg.get("phone_number")
+
+        self.tools.register(ScheduleTool(self.workspace))
+        self.tools.register(DailyTool(self.workspace, phone_number=wa_phone))
+
+    def _register_google_tools(self) -> None:
+        """Register Google API tools (only those whose accounts are authenticated)."""
+        from nanobot.google.auth import GoogleAuth
+        from nanobot.google.calendar_tool import CalendarTool
+        from nanobot.google.tasks_tool import TasksTool
+        from nanobot.google.classroom_tool import ClassroomTool
+        from nanobot.google.drive_tool import DriveTool
+        from nanobot.google.gmail_tool import GmailTool
+
+        auth = GoogleAuth(self.workspace)
+
+        def _authed(account: str) -> bool:
+            try:
+                auth.get_credentials(account)
+                return True
+            except Exception:
+                return False
+
+        if _authed("work"):
+            self.tools.register(CalendarTool(self.workspace))
+            self.tools.register(TasksTool(self.workspace))
+        if _authed("school"):
+            self.tools.register(ClassroomTool(self.workspace))
+        if any(_authed(a) for a in ("personal", "work", "school")):
+            self.tools.register(DriveTool(self.workspace))
+        if _authed("work") or _authed("school"):
+            self.tools.register(GmailTool(self.workspace))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -613,7 +661,7 @@ class AgentLoop:
         self,
         content: list[dict[str, Any]],
         *,
-        truncate_text: bool = False,
+        do_truncate_text: bool = False,
         drop_runtime: bool = False,
     ) -> list[dict[str, Any]]:
         """Strip volatile multimodal payloads before writing session history."""
@@ -641,7 +689,7 @@ class AgentLoop:
 
             if block.get("type") == "text" and isinstance(block.get("text"), str):
                 text = block["text"]
-                if truncate_text and len(text) > self.max_tool_result_chars:
+                if do_truncate_text and len(text) > self.max_tool_result_chars:
                     text = truncate_text(text, self.max_tool_result_chars)
                 filtered.append({**block, "text": text})
                 continue
@@ -662,7 +710,7 @@ class AgentLoop:
                 if isinstance(content, str) and len(content) > self.max_tool_result_chars:
                     entry["content"] = truncate_text(content, self.max_tool_result_chars)
                 elif isinstance(content, list):
-                    filtered = self._sanitize_persisted_blocks(content, truncate_text=True)
+                    filtered = self._sanitize_persisted_blocks(content, do_truncate_text=True)
                     if not filtered:
                         continue
                     entry["content"] = filtered
