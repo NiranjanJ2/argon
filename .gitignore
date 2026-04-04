@@ -17,6 +17,8 @@ build/
 *.pyzz
 .venv/
 venv/
+whatsapp_bridge/node_modules/
+whatsapp_bridge/wwebjs_auth/
 __pycache__/
 poetry.lock
 .pytest_cache/

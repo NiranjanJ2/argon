@@ -27,16 +27,30 @@ if [[ "$PY_MAJOR" -lt 3 || ("$PY_MAJOR" -eq 3 && "$PY_MINOR" -lt 10) ]]; then
 fi
 echo -e "  Python $PY_VER ${GREEN}✓${RESET}"
 
+# Ensure python3-venv is available (needed on Debian/Ubuntu)
+if ! python3 -m venv --help &>/dev/null; then
+    echo -e "${YELLOW}python3-venv not found — installing...${RESET}"
+    sudo apt-get install -y python3-venv -qq
+fi
+
 if ! command -v systemctl &>/dev/null; then
     echo -e "${YELLOW}Warning: systemctl not found — services won't be created.${RESET}"
     NO_SYSTEMD=1
 fi
 
-# ── 1. Install Python package ─────────────────────────────────────────────────
-echo -e "\n${BOLD}Installing Argon...${RESET}"
-pip install -e "$SCRIPT_DIR/.[discord]" --quiet
-export PATH="$HOME/.local/bin:$PATH"
-NANOBOT_BIN=$(which nanobot 2>/dev/null || echo "$HOME/.local/bin/nanobot")
+# ── 1. Virtual environment + install ─────────────────────────────────────────
+echo -e "\n${BOLD}Setting up virtual environment...${RESET}"
+
+VENV_DIR="$SCRIPT_DIR/.venv"
+if [[ ! -d "$VENV_DIR" ]]; then
+    python3 -m venv "$VENV_DIR"
+    echo -e "  Created venv at $VENV_DIR"
+else
+    echo -e "  Venv already exists — reusing"
+fi
+
+"$VENV_DIR/bin/pip" install -e "$SCRIPT_DIR/.[discord]" --quiet
+NANOBOT_BIN="$VENV_DIR/bin/nanobot"
 echo -e "${GREEN}✓ Installed${RESET} ${DIM}($NANOBOT_BIN)${RESET}"
 
 # ── 2. Node.js + WhatsApp bridge ──────────────────────────────────────────────
