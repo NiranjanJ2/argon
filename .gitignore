@@ -27,3 +27,4 @@ nano.*.save
 .DS_Store
 uv.lock
 config.json
+config.sample.json
