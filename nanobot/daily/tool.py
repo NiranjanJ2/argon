@@ -106,6 +106,31 @@ class DailyTool(Tool):
             "required": ["action"],
         }
 
+    def build_context_snapshot(self) -> str:
+        """Return a compact daily context string for pre-injection into the runtime context."""
+        state = self._state.get()
+        work_min = self._state.get_work_session_duration_minutes()
+        lock_min = self._state.get_lock_in_duration_minutes()
+        tasks = self._todo.get_all()
+        pending = [t for t in tasks if not t["done"]]
+        memory = self._memory.recall()
+        habits = self._habits.get_summary()
+        log = self._log.read()
+
+        parts = ["[Daily Context]"]
+        parts.append(f"Mode: {state.get('mode', 'idle')} | Current task: {state.get('current_task') or 'none'}")
+        if work_min:
+            parts.append(f"Work session: {work_min}min | Lock-in: {lock_min}min")
+        parts.append(f"Todo ({len(pending)} pending): " + ", ".join(
+            f"{t['title']} [{t.get('priority','?')}]" for t in pending[:10]
+        ) or "none")
+        if memory:
+            parts.append(f"Memory: {memory}")
+        if habits:
+            parts.append(f"Habits: {json.dumps(habits)}")
+        parts.append(f"Log:\n{log}")
+        return "\n".join(parts)
+
     def _push(self, event: str) -> None:
         try:
             from nanobot.dashboard.app import push_update

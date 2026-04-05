@@ -610,11 +610,20 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=0)
+        daily_context: str | None = None
+        if daily_tool := self.tools.get("daily"):
+            try:
+                from nanobot.daily.tool import DailyTool
+                if isinstance(daily_tool, DailyTool):
+                    daily_context = daily_tool.build_context_snapshot()
+            except Exception:
+                pass
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
+            extra_context=daily_context,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
