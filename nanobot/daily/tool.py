@@ -36,7 +36,9 @@ class DailyTool(Tool):
     def description(self) -> str:
         return (
             "Manage Niranjan's daily productivity session. "
-            "Actions: get_todo, add_task, complete_task, start_task, carry_over_task, update_priority, "
+            "ALWAYS start a conversation by calling get_context ONCE — it returns memory, state, todo, habits, and log together. "
+            "Do NOT call recall/get_state/get_todo/get_habits/read_daily_log individually if you haven't called get_context yet. "
+            "Actions: get_context (startup snapshot), get_todo, add_task, complete_task, start_task, carry_over_task, update_priority, "
             "get_state, set_mode, set_current_task, log_home_arrival, log_note, "
             "get_habits, add_from_classroom, read_daily_log, sync_google_tasks, schedule_study_blocks, "
             "send_phone_keyword, remember, recall, forget. "
@@ -56,6 +58,7 @@ class DailyTool(Tool):
                 "action": {
                     "type": "string",
                     "enum": [
+                        "get_context",
                         "get_todo", "add_task", "complete_task", "start_task",
                         "carry_over_task", "update_priority",
                         "get_state", "set_mode", "set_current_task",
@@ -65,6 +68,7 @@ class DailyTool(Tool):
                         "send_phone_keyword",
                         "remember", "recall", "forget",
                     ],
+                    "description": "Use get_context first at the start of every conversation.",
                 },
                 # Task fields
                 "task_id": {"type": "string", "description": "Task ID or partial title match."},
@@ -111,6 +115,22 @@ class DailyTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         action = kwargs["action"]
+
+        # ── Startup context snapshot (replaces recall+get_state+get_todo+get_habits+read_daily_log) ──
+        if action == "get_context":
+            state = self._state.get()
+            work_min = self._state.get_work_session_duration_minutes()
+            lock_min = self._state.get_lock_in_duration_minutes()
+            tasks = self._todo.get_all()
+            pending = [t for t in tasks if not t["done"]]
+            done = [t for t in tasks if t["done"]]
+            return json.dumps({
+                "memory": self._memory.recall(),
+                "state": {**state, "work_session_duration_minutes": work_min, "lock_in_duration_minutes": lock_min},
+                "todo": {"pending": pending, "done": done, "total": len(tasks)},
+                "habits": self._habits.get_summary(),
+                "daily_log": self._log.read(),
+            }, indent=2)
 
         # ── Todo operations ──────────────────────────────────────────────
         if action == "get_todo":
