@@ -101,10 +101,13 @@ class GoogleAuth:
         flow = InstalledAppFlow.from_client_secrets_file(
             str(self._secrets_path),
             scopes=ACCOUNT_SCOPES[account],
+            redirect_uri="urn:ietf:wg:oauth:2.0:oob",
         )
-        # run_console prints a URL — visit it in any browser, paste the code back.
-        # Works on headless servers (no browser required on the machine).
-        creds = flow.run_console()
+        auth_url, _ = flow.authorization_url(prompt="consent")
+        print(f"\nOpen this URL in your browser:\n\n  {auth_url}\n")
+        code = input("Paste the authorization code here: ").strip()
+        flow.fetch_token(code=code)
+        creds = flow.credentials
         self._save(account, creds)
         return creds
 
