@@ -51,9 +51,7 @@ def build_finalization_retry_message() -> dict[str, str]:
     return {"role": "user", "content": FINALIZATION_RETRY_PROMPT}
 
 
-_DAILY_READ_ACTIONS = frozenset({
-    "get_context", "get_state", "get_todo", "get_habits", "read_daily_log", "recall",
-})
+_DAILY_READ_ACTIONS = frozenset({"get_context"})
 
 
 def external_lookup_signature(tool_name: str, arguments: dict[str, Any]) -> str | None:
