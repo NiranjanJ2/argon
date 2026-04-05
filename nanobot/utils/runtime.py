@@ -51,6 +51,11 @@ def build_finalization_retry_message() -> dict[str, str]:
     return {"role": "user", "content": FINALIZATION_RETRY_PROMPT}
 
 
+_DAILY_READ_ACTIONS = frozenset({
+    "get_context", "get_state", "get_todo", "get_habits", "read_daily_log", "recall",
+})
+
+
 def external_lookup_signature(tool_name: str, arguments: dict[str, Any]) -> str | None:
     """Stable signature for repeated external lookups we want to throttle."""
     if tool_name == "web_fetch":
@@ -61,6 +66,10 @@ def external_lookup_signature(tool_name: str, arguments: dict[str, Any]) -> str 
         query = str(arguments.get("query") or arguments.get("search_term") or "").strip()
         if query:
             return f"web_search:{query.lower()}"
+    if tool_name == "daily":
+        action = str(arguments.get("action") or "").strip()
+        if action in _DAILY_READ_ACTIONS:
+            return f"daily:{action}"
     return None
 
 
@@ -82,6 +91,11 @@ def repeated_external_lookup_error(
         signature[:160],
         count,
     )
+    if signature and signature.startswith("daily:"):
+        return (
+            "Error: you already called this action — do not call it again. "
+            "Use the data already returned to respond to the user now."
+        )
     return (
         "Error: repeated external lookup blocked. "
         "Use the results you already have to answer, or try a meaningfully different source."
