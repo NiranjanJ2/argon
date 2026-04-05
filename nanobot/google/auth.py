@@ -102,7 +102,9 @@ class GoogleAuth:
             str(self._secrets_path),
             scopes=ACCOUNT_SCOPES[account],
         )
-        creds = flow.run_local_server(port=0)
+        # run_console prints a URL — visit it in any browser, paste the code back.
+        # Works on headless servers (no browser required on the machine).
+        creds = flow.run_console()
         self._save(account, creds)
         return creds
 
