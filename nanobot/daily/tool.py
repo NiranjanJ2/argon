@@ -36,8 +36,9 @@ class DailyTool(Tool):
     def description(self) -> str:
         return (
             "Manage Niranjan's daily productivity session. "
-            "Call get_context ONCE at the start of every conversation to get all state, todo, habits, log, and memory. "
-            "Actions: get_context, add_task, complete_task, start_task, carry_over_task, update_priority, "
+            "Call get_context ONCE at conversation start to get all state, todo, habits, log, and memory. "
+            "To check or import Google Classroom assignments, call sync_classroom — it fetches all courses and assignments automatically. "
+            "Actions: get_context, sync_classroom, add_task, complete_task, start_task, carry_over_task, update_priority, "
             "set_mode, set_current_task, log_home_arrival, log_note, "
             "add_from_classroom, sync_google_tasks, schedule_study_blocks, "
             "send_phone_keyword, remember, forget. "
@@ -57,6 +58,7 @@ class DailyTool(Tool):
                     "type": "string",
                     "enum": [
                         "get_context",
+                        "sync_classroom",
                         "add_task", "complete_task", "start_task",
                         "carry_over_task", "update_priority",
                         "set_mode", "set_current_task",
@@ -66,7 +68,7 @@ class DailyTool(Tool):
                         "send_phone_keyword",
                         "remember", "forget",
                     ],
-                    "description": "Use get_context once at conversation start. It returns everything — do not call individual read actions.",
+                    "description": "Use get_context once at conversation start. Use sync_classroom to fetch and import Google Classroom assignments.",
                 },
                 # Task fields
                 "task_id": {"type": "string", "description": "Task ID or partial title match."},
@@ -282,6 +284,9 @@ class DailyTool(Tool):
             self._push("todo")
             return f"Added {added} new assignments from Google Classroom."
 
+        if action == "sync_classroom":
+            return await self._sync_classroom_to_todo()
+
         # ── Log ──────────────────────────────────────────────────────────
         if action == "read_daily_log":
             return self._log.read()
@@ -346,6 +351,56 @@ class DailyTool(Tool):
             return await self._send_whatsapp_keyword(self._phone_number, keyword)
 
         return f"Error: Unknown action '{action}'."
+
+    async def _sync_classroom_to_todo(self) -> str:
+        """Fetch all Google Classroom coursework and import new items into todo."""
+        import asyncio
+        return await asyncio.get_running_loop().run_in_executor(None, self._sync_classroom_sync)
+
+    def _sync_classroom_sync(self) -> str:
+        from googleapiclient.discovery import build
+        from nanobot.google.auth import GoogleAuth
+
+        try:
+            auth = GoogleAuth(self._workspace)
+            creds = auth.get_credentials("school")
+            svc = build("classroom", "v1", credentials=creds)
+        except Exception as e:
+            return f"Error: Google Classroom not authenticated — {e}"
+
+        try:
+            courses_result = svc.courses().list(pageSize=20, studentId="me").execute()
+            courses = courses_result.get("courses", [])
+        except Exception as e:
+            return f"Error fetching courses: {e}"
+
+        all_assignments = []
+        for course in courses:
+            try:
+                cw_result = svc.courses().courseWork().list(
+                    courseId=course["id"], pageSize=30
+                ).execute()
+                for cw in cw_result.get("courseWork", []):
+                    all_assignments.append({
+                        "id": cw.get("id"),
+                        "title": cw.get("title"),
+                        "description": cw.get("description"),
+                        "dueDate": cw.get("dueDate"),
+                        "dueTime": cw.get("dueTime"),
+                        "maxPoints": cw.get("maxPoints"),
+                        "workType": cw.get("workType"),
+                        "state": cw.get("state"),
+                        "course_name": course.get("name"),
+                    })
+            except Exception:
+                continue
+
+        if not all_assignments:
+            return "No assignments found in Google Classroom."
+
+        added = self._todo.bulk_add_from_classroom(all_assignments)
+        self._push("todo")
+        return f"Synced Google Classroom: {added} new assignments added from {len(courses)} courses."
 
     async def _send_whatsapp_keyword(self, phone: str, keyword: str) -> str:
         """Send a keyword text to Niranjan's phone via the local WhatsApp bridge."""
