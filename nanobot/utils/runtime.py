@@ -84,6 +84,7 @@ def repeated_external_lookup_error(
     seen_counts[signature] = count
     if count <= _MAX_REPEAT_EXTERNAL_LOOKUPS:
         return None
+    seen_counts["__total_blocks__"] = seen_counts.get("__total_blocks__", 0) + 1
     logger.warning(
         "Blocking repeated external lookup {} on attempt {}",
         signature[:160],

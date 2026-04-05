@@ -182,6 +182,17 @@ class AgentRunner:
                     },
                 )
                 await hook.after_iteration(context)
+
+                # If too many tools have been blocked, force a text-only response now.
+                if external_lookup_counts.get("__total_blocks__", 0) >= 3:
+                    logger.warning("3+ blocked tool calls — forcing finalization without tools")
+                    fin_response = await self._request_finalization_retry(spec, messages)
+                    clean = hook.finalize_content(context, fin_response.content)
+                    final_content = clean or EMPTY_FINAL_RESPONSE_MESSAGE
+                    stop_reason = "forced_finalization"
+                    self._append_final_message(messages, final_content)
+                    break
+
                 continue
 
             clean = hook.finalize_content(context, response.content)
