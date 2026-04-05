@@ -273,6 +273,11 @@ class DailyTool(Tool):
         # ── Classroom import ─────────────────────────────────────────────
         if action == "add_from_classroom":
             assignments = kwargs.get("assignments", [])
+            if isinstance(assignments, str):
+                try:
+                    assignments = json.loads(assignments)
+                except Exception:
+                    return "Error: assignments must be a list of assignment objects, not a string."
             if not assignments:
                 return "No assignments provided."
             added = self._todo.bulk_add_from_classroom(assignments)
