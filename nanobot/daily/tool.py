@@ -110,25 +110,33 @@ class DailyTool(Tool):
         """Return a compact daily context string for pre-injection into the runtime context."""
         state = self._state.get()
         work_min = self._state.get_work_session_duration_minutes()
-        lock_min = self._state.get_lock_in_duration_minutes()
         tasks = self._todo.get_all()
         pending = [t for t in tasks if not t["done"]]
-        memory = self._memory.recall()
-        habits = self._habits.get_summary()
-        log = self._log.read()
 
         parts = ["[Daily Context]"]
-        parts.append(f"Mode: {state.get('mode', 'idle')} | Current task: {state.get('current_task') or 'none'}")
+        mode_line = f"Mode: {state.get('mode', 'idle')}"
+        if state.get('current_task'):
+            mode_line += f" | Task: {state['current_task']}"
         if work_min:
-            parts.append(f"Work session: {work_min}min | Lock-in: {lock_min}min")
-        parts.append(f"Todo ({len(pending)} pending): " + ", ".join(
-            f"{t['title']} [{t.get('priority','?')}]" for t in pending[:10]
-        ) or "none")
-        if memory:
-            parts.append(f"Memory: {memory}")
-        if habits:
-            parts.append(f"Habits: {json.dumps(habits)}")
-        parts.append(f"Log:\n{log}")
+            mode_line += f" | Working {work_min}min"
+        parts.append(mode_line)
+
+        if pending:
+            todo_items = ", ".join(
+                f"{t['title']} [{t.get('priority','?')}]" for t in pending[:8]
+            )
+            parts.append(f"Todo: {todo_items}")
+        else:
+            parts.append("Todo: none")
+
+        # Last 15 lines of today's log only — no yesterday
+        log_path = self._log.get_path()
+        if log_path.exists():
+            lines = log_path.read_text().splitlines()
+            recent = "\n".join(lines[-15:]) if len(lines) > 15 else "\n".join(lines)
+            if recent.strip():
+                parts.append(f"Log (recent):\n{recent}")
+
         return "\n".join(parts)
 
     def _push(self, event: str) -> None:
