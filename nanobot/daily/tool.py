@@ -36,12 +36,13 @@ class DailyTool(Tool):
     def description(self) -> str:
         return (
             "Manage Niranjan's daily productivity session. "
-            "Call get_context ONCE at conversation start to get all state, todo, habits, log, and memory. "
             "To check or import Google Classroom assignments, call sync_classroom — it fetches all courses and assignments automatically. "
-            "Actions: get_context, sync_classroom, add_task, complete_task, start_task, carry_over_task, update_priority, "
+            "Actions: get_state, get_todo, get_habits, read_daily_log, recall, "
+            "sync_classroom, add_task, complete_task, start_task, carry_over_task, update_priority, "
             "set_mode, set_current_task, log_home_arrival, log_note, "
             "add_from_classroom, sync_google_tasks, schedule_study_blocks, "
             "send_phone_keyword, remember, forget. "
+            "remember/recall/forget manage persistent long-term memory that survives across days. "
             "send_phone_keyword with keyword='lockdown' or 'unlock' toggles phone app restrictions."
         )
 
@@ -57,7 +58,7 @@ class DailyTool(Tool):
                 "action": {
                     "type": "string",
                     "enum": [
-                        "get_context",
+                        "get_state", "get_todo", "get_habits", "read_daily_log", "recall",
                         "sync_classroom",
                         "add_task", "complete_task", "start_task",
                         "carry_over_task", "update_priority",
@@ -68,7 +69,6 @@ class DailyTool(Tool):
                         "send_phone_keyword",
                         "remember", "forget",
                     ],
-                    "description": "Use get_context once at conversation start. Use sync_classroom to fetch and import Google Classroom assignments.",
                 },
                 # Task fields
                 "task_id": {"type": "string", "description": "Task ID or partial title match."},
@@ -116,28 +116,31 @@ class DailyTool(Tool):
     async def execute(self, **kwargs: Any) -> str:
         action = kwargs["action"]
 
-        # ── Startup context snapshot (replaces recall+get_state+get_todo+get_habits+read_daily_log) ──
-        if action == "get_context":
-            state = self._state.get()
-            work_min = self._state.get_work_session_duration_minutes()
-            lock_min = self._state.get_lock_in_duration_minutes()
-            tasks = self._todo.get_all()
-            pending = [t for t in tasks if not t["done"]]
-            done = [t for t in tasks if t["done"]]
-            return json.dumps({
-                "memory": self._memory.recall(),
-                "state": {**state, "work_session_duration_minutes": work_min, "lock_in_duration_minutes": lock_min},
-                "todo": {"pending": pending, "done": done, "total": len(tasks)},
-                "habits": self._habits.get_summary(),
-                "daily_log": self._log.read(),
-            }, indent=2)
-
-        # ── Todo operations ──────────────────────────────────────────────
+        # ── Read operations ──────────────────────────────────────────────
         if action == "get_todo":
             tasks = self._todo.get_all()
             pending = [t for t in tasks if not t["done"]]
             done = [t for t in tasks if t["done"]]
             return json.dumps({"pending": pending, "done": done, "total": len(tasks)}, indent=2)
+
+        if action == "get_state":
+            state = self._state.get()
+            work_min = self._state.get_work_session_duration_minutes()
+            lock_min = self._state.get_lock_in_duration_minutes()
+            return json.dumps({
+                **state,
+                "work_session_duration_minutes": work_min,
+                "lock_in_duration_minutes": lock_min,
+            }, indent=2)
+
+        if action == "get_habits":
+            return json.dumps(self._habits.get_summary(), indent=2)
+
+        if action == "read_daily_log":
+            return self._log.read()
+
+        if action == "recall":
+            return self._memory.recall()
 
         if action == "add_task":
             title = kwargs.get("title")
