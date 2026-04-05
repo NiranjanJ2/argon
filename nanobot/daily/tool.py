@@ -410,6 +410,10 @@ class DailyTool(Tool):
         except Exception as e:
             return f"Error fetching courses: {e}"
 
+        from datetime import date, timedelta
+        today = date.today()
+        cutoff = today + timedelta(days=30)
+
         all_assignments = []
         for course in courses:
             try:
@@ -417,11 +421,22 @@ class DailyTool(Tool):
                     courseId=course["id"], pageSize=30
                 ).execute()
                 for cw in cw_result.get("courseWork", []):
+                    due = cw.get("dueDate")
+                    if due:
+                        try:
+                            due_date = date(due["year"], due["month"], due["day"])
+                            if due_date < today or due_date > cutoff:
+                                continue
+                        except (KeyError, ValueError):
+                            continue
+                    else:
+                        # No due date — skip
+                        continue
                     all_assignments.append({
                         "id": cw.get("id"),
                         "title": cw.get("title"),
                         "description": cw.get("description"),
-                        "dueDate": cw.get("dueDate"),
+                        "dueDate": due,
                         "dueTime": cw.get("dueTime"),
                         "maxPoints": cw.get("maxPoints"),
                         "workType": cw.get("workType"),
@@ -432,11 +447,11 @@ class DailyTool(Tool):
                 continue
 
         if not all_assignments:
-            return "No assignments found in Google Classroom."
+            return f"No upcoming assignments (due within 30 days) found in Google Classroom."
 
         added = self._todo.bulk_add_from_classroom(all_assignments)
         self._push("todo")
-        return f"Synced Google Classroom: {added} new assignments added from {len(courses)} courses."
+        return f"Synced Google Classroom: {added} new assignments added from {len(courses)} courses (due within 30 days)."
 
     async def _send_whatsapp_keyword(self, phone: str, keyword: str) -> str:
         """Send a keyword text to Niranjan's phone via the local WhatsApp bridge."""
