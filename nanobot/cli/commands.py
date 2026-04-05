@@ -628,9 +628,6 @@ def gateway(
     config = _load_runtime_config(config, workspace)
     port = port if port is not None else config.gateway.port
 
-    from loguru import logger as _log
-    _log.info("Config loaded: google.enabled={}", config.google.enabled)
-
     console.print(f"{__logo__} Starting nanobot gateway version {__version__} on port {port}...")
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()

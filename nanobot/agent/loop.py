@@ -300,42 +300,31 @@ class AgentLoop:
 
     def _register_google_tools(self) -> None:
         """Register Google API tools (only those whose accounts are authenticated)."""
-        logger.info("Registering Google tools (google_enabled=True)")
-        try:
-            from nanobot.google.auth import GoogleAuth
-            from nanobot.google.calendar_tool import CalendarTool
-            from nanobot.google.tasks_tool import TasksTool
-            from nanobot.google.classroom_tool import ClassroomTool
-            from nanobot.google.drive_tool import DriveTool
-            from nanobot.google.gmail_tool import GmailTool
-        except Exception as e:
-            logger.error("Failed to import Google tool modules: {}", e)
-            return
+        from nanobot.google.auth import GoogleAuth
+        from nanobot.google.calendar_tool import CalendarTool
+        from nanobot.google.tasks_tool import TasksTool
+        from nanobot.google.classroom_tool import ClassroomTool
+        from nanobot.google.drive_tool import DriveTool
+        from nanobot.google.gmail_tool import GmailTool
 
         auth = GoogleAuth(self.workspace)
 
         def _authed(account: str) -> bool:
             try:
                 auth.get_credentials(account)
-                logger.info("Google account '{}' authenticated OK", account)
                 return True
-            except Exception as e:
-                logger.warning("Google account '{}' not authenticated: {}", account, e)
+            except Exception:
                 return False
 
         if _authed("work"):
             self.tools.register(CalendarTool(self.workspace))
             self.tools.register(TasksTool(self.workspace))
-            logger.info("Registered: google_calendar, google_tasks")
         if _authed("school"):
             self.tools.register(ClassroomTool(self.workspace))
-            logger.info("Registered: google_classroom")
         if any(_authed(a) for a in ("personal", "work", "school")):
             self.tools.register(DriveTool(self.workspace))
-            logger.info("Registered: google_drive")
         if _authed("work") or _authed("school"):
             self.tools.register(GmailTool(self.workspace))
-            logger.info("Registered: gmail")
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
