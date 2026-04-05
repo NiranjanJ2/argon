@@ -45,6 +45,7 @@ class DiscordConfig(Base):
     read_receipt_emoji: str = "👀"
     working_emoji: str = "🔧"
     working_emoji_delay: float = 2.0
+    streaming: bool = False
 
 
 if DISCORD_AVAILABLE:
@@ -263,6 +264,9 @@ class DiscordChannel(BaseChannel):
         self._bot_user_id: str | None = None
         self._pending_reactions: dict[str, Any] = {}  # chat_id -> message object
         self._working_emoji_tasks: dict[str, asyncio.Task[None]] = {}
+        self._stream_buffers: dict[str, str] = {}
+        self._stream_messages: dict[str, Any] = {}
+        self._last_edit_times: dict[str, float] = {}
 
     async def start(self) -> None:
         """Start the Discord client."""
@@ -451,6 +455,65 @@ class DiscordChannel(BaseChannel):
 
         return True
 
+    async def send_delta(self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None) -> None:
+        """Edit a Discord message in-place as streaming tokens arrive."""
+        client = self._client
+        if client is None or not client.is_ready():
+            return
+
+        meta = metadata or {}
+        stream_id = meta.get("_stream_id", chat_id)
+        is_end = bool(meta.get("_stream_end"))
+
+        if delta:
+            self._stream_buffers[stream_id] = self._stream_buffers.get(stream_id, "") + delta
+
+        accumulated = self._stream_buffers.get(stream_id, "")
+        if not accumulated.strip() and not is_end:
+            return
+
+        now = asyncio.get_event_loop().time()
+        last_edit = self._last_edit_times.get(stream_id, 0)
+
+        # Rate-limit edits to ~750ms; always flush on stream end
+        if not is_end and now - last_edit < 0.75:
+            return
+
+        try:
+            channel_id_int = int(chat_id)
+            discord_channel = client.get_channel(channel_id_int)
+            if discord_channel is None:
+                discord_channel = await client.fetch_channel(channel_id_int)
+        except Exception:
+            if is_end:
+                self._cleanup_stream(stream_id)
+            return
+
+        chunks = split_message(accumulated, MAX_MESSAGE_LEN) if accumulated.strip() else []
+        if not chunks:
+            if is_end:
+                self._cleanup_stream(stream_id)
+            return
+
+        existing_msg = self._stream_messages.get(stream_id)
+        try:
+            if existing_msg is None:
+                new_msg = await discord_channel.send(chunks[0])
+                self._stream_messages[stream_id] = new_msg
+            else:
+                await existing_msg.edit(content=chunks[0])
+            self._last_edit_times[stream_id] = now
+        except Exception as e:
+            logger.warning("Discord stream update failed for {}: {}", stream_id, e)
+
+        if is_end:
+            self._cleanup_stream(stream_id)
+
+    def _cleanup_stream(self, stream_id: str) -> None:
+        self._stream_buffers.pop(stream_id, None)
+        self._stream_messages.pop(stream_id, None)
+        self._last_edit_times.pop(stream_id, None)
+
     async def _start_typing(self, channel: Messageable) -> None:
         """Start periodic typing indicator for a channel."""
         channel_id = self._channel_key(channel)
@@ -507,6 +570,9 @@ class DiscordChannel(BaseChannel):
     async def _reset_runtime_state(self, close_client: bool) -> None:
         """Reset client and typing state."""
         await self._cancel_all_typing()
+        self._stream_buffers.clear()
+        self._stream_messages.clear()
+        self._last_edit_times.clear()
         if close_client and self._client is not None and not self._client.is_closed():
             try:
                 await self._client.close()

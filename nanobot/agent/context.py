@@ -25,7 +25,11 @@ class ContextBuilder:
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    def build_system_prompt(
+        self,
+        skill_names: list[str] | None = None,
+        extra_context: str | None = None,
+    ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         parts = [self._get_identity()]
 
@@ -51,6 +55,9 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")
+
+        if extra_context:
+            parts.append(extra_context)
 
         return "\n\n---\n\n".join(parts)
 
@@ -103,16 +110,12 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
     @staticmethod
     def _build_runtime_context(
         channel: str | None, chat_id: str | None, timezone: str | None = None,
-        extra: str | None = None,
     ) -> str:
         """Build untrusted runtime metadata block for injection before the user message."""
         lines = [f"Current Time: {current_time_str(timezone)}"]
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
-        result = ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
-        if extra:
-            result += f"\n\n{extra}"
-        return result
+        return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     @staticmethod
     def _merge_message_content(left: Any, right: Any) -> str | list[dict[str, Any]]:
@@ -152,7 +155,7 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
         extra_context: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
-        runtime_ctx = self._build_runtime_context(channel, chat_id, self.timezone, extra=extra_context)
+        runtime_ctx = self._build_runtime_context(channel, chat_id, self.timezone)
         user_content = self._build_user_content(current_message, media)
 
         # Merge runtime context and user content into a single user message
@@ -162,7 +165,7 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
         else:
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
         messages = [
-            {"role": "system", "content": self.build_system_prompt(skill_names)},
+            {"role": "system", "content": self.build_system_prompt(skill_names, extra_context)},
             *history,
         ]
         if messages[-1].get("role") == current_role:
