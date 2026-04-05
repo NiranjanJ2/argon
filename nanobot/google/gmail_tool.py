@@ -121,7 +121,13 @@ class GmailTool(Tool):
             if kwargs.get("query"):
                 params["q"] = kwargs["query"]
             if kwargs.get("label_ids"):
-                params["labelIds"] = kwargs["label_ids"]
+                label_ids = kwargs["label_ids"]
+                if isinstance(label_ids, str):
+                    try:
+                        label_ids = json.loads(label_ids)
+                    except Exception:
+                        label_ids = [label_ids]
+                params["labelIds"] = label_ids
             result = svc.users().messages().list(**params).execute()
             messages = result.get("messages", [])
             # Fetch snippet for each

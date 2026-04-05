@@ -124,6 +124,11 @@ class CalendarTool(Tool):
 
         if action == "create_event":
             body = kwargs.get("event_body")
+            if isinstance(body, str):
+                try:
+                    body = json.loads(body)
+                except Exception:
+                    return "Error: event_body must be a JSON object, not a string."
             if not body:
                 return "Error: event_body required for create_event."
             event = svc.events().insert(calendarId=cal_id, body=body).execute()
@@ -132,6 +137,11 @@ class CalendarTool(Tool):
         if action == "update_event":
             event_id = kwargs.get("event_id")
             body = kwargs.get("event_body")
+            if isinstance(body, str):
+                try:
+                    body = json.loads(body)
+                except Exception:
+                    return "Error: event_body must be a JSON object, not a string."
             if not event_id or not body:
                 return "Error: event_id and event_body required for update_event."
             event = svc.events().patch(calendarId=cal_id, eventId=event_id, body=body).execute()
