@@ -20,11 +20,9 @@ from nanobot.agent.runner import AgentRunSpec, AgentRunner
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
-from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from nanobot.agent.tools.filesystem import ReadFileTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.agent.tools.shell import ExecTool
-from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.command import CommandContext, CommandRouter, register_builtin_commands
@@ -260,21 +258,12 @@ class AgentLoop:
         """Register the default set of tools."""
         allowed_dir = self.workspace if self.restrict_to_workspace else None
         extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
+        # Read-only filesystem — Argon doesn't need write/edit/exec/spawn
         self.tools.register(ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read))
-        for cls in (WriteFileTool, EditFileTool, ListDirTool):
-            self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
-        if self.exec_config.enable:
-            self.tools.register(ExecTool(
-                working_dir=str(self.workspace),
-                timeout=self.exec_config.timeout,
-                restrict_to_workspace=self.restrict_to_workspace,
-                path_append=self.exec_config.path_append,
-            ))
         if self.web_config.enable:
             self.tools.register(WebSearchTool(config=self.web_config.search, proxy=self.web_config.proxy))
             self.tools.register(WebFetchTool(proxy=self.web_config.proxy))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
-        self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(
                 CronTool(self.cron_service, default_timezone=self.context.timezone or "UTC")
@@ -290,18 +279,16 @@ class AgentLoop:
         from nanobot.daily.state import DailyState
         from nanobot.daily.log import DailyLog
         from nanobot.daily.habits import HabitsTracker
-        from nanobot.daily.memory import PersistentMemory
         from nanobot.tools.tasks import (
             ListTasksTool, AddTaskTool, StartTaskTool, CompleteTaskTool, UpdateTaskTool,
         )
         from nanobot.tools.status import GetStatusTool, SetModeTool, LogNoteTool, ReadLogTool
-        from nanobot.tools.memory import RememberTool, RecallTool, ForgetTool
+        from nanobot.tools.memory import RememberTool, ForgetTool
 
         store = GoogleTasksStore(self.workspace)
         state = DailyState(self.workspace)
         log = DailyLog(self.workspace)
         habits = HabitsTracker(self.workspace)
-        memory = PersistentMemory(self.workspace)
         log.refresh_symlink()
 
         self.tools.register(ScheduleTool(self.workspace))
@@ -313,16 +300,15 @@ class AgentLoop:
         self.tools.register(CompleteTaskTool(store, state, log, habits))
         self.tools.register(UpdateTaskTool(store))
 
-        # Status and log
+        # Status and daily log
         self.tools.register(GetStatusTool(state, self.workspace))
         self.tools.register(SetModeTool(state, log, habits))
         self.tools.register(LogNoteTool(state, log))
         self.tools.register(ReadLogTool(log))
 
-        # Memory
-        self.tools.register(RememberTool(memory))
-        self.tools.register(RecallTool(memory))
-        self.tools.register(ForgetTool(memory))
+        # Long-term memory (daily memory = log_note + read_log above)
+        self.tools.register(RememberTool(self.workspace))
+        self.tools.register(ForgetTool(self.workspace))
 
     def _register_google_tools(self) -> None:
         """Register Google API tools (only those whose accounts are authenticated)."""

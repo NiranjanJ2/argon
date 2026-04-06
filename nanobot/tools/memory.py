@@ -1,18 +1,26 @@
-"""Memory tools — persistent facts that survive across sessions."""
+"""Memory tools — long-term and daily persistent memory."""
 
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from nanobot.agent.tools.base import Tool
-from nanobot.daily.memory import PersistentMemory
+
+_TZ = ZoneInfo("America/Los_Angeles")
+
+
+def _now_str() -> str:
+    return datetime.now(_TZ).strftime("%Y-%m-%d %H:%M")
 
 
 class RememberTool(Tool):
-    """Store a fact in persistent memory."""
+    """Append a fact to long-term memory (memory/MEMORY.md)."""
 
-    def __init__(self, memory: PersistentMemory) -> None:
-        self._memory = memory
+    def __init__(self, workspace: Path) -> None:
+        self._workspace = workspace
 
     @property
     def name(self) -> str:
@@ -21,8 +29,9 @@ class RememberTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Store a fact or note in Niranjan's persistent memory. "
-            "Survives across conversations. Use for preferences, recurring context, important facts."
+            "Store a fact in long-term memory. Survives across all sessions. "
+            "Use for preferences, recurring context, and things Niranjan explicitly asks you to remember. "
+            "For today-only context, use log_note instead."
         )
 
     @property
@@ -43,41 +52,18 @@ class RememberTool(Tool):
         note = kwargs["note"].strip()
         if not note:
             return "Error: note is empty."
-        self._memory.remember(note)
+        memory_file = self._workspace / "memory" / "MEMORY.md"
+        memory_file.parent.mkdir(parents=True, exist_ok=True)
+        with memory_file.open("a", encoding="utf-8") as f:
+            f.write(f"\n- [{_now_str()}] {note}\n")
         return f"Remembered: {note}"
 
 
-class RecallTool(Tool):
-    """Read all persistent memory."""
-
-    def __init__(self, memory: PersistentMemory) -> None:
-        self._memory = memory
-
-    @property
-    def name(self) -> str:
-        return "recall"
-
-    @property
-    def description(self) -> str:
-        return "Read all of Niranjan's stored persistent memory."
-
-    @property
-    def read_only(self) -> bool:
-        return True
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {"type": "object", "properties": {}, "required": []}
-
-    async def execute(self, **kwargs: Any) -> str:
-        return self._memory.recall()
-
-
 class ForgetTool(Tool):
-    """Remove entries from persistent memory."""
+    """Remove entries from long-term memory by keyword."""
 
-    def __init__(self, memory: PersistentMemory) -> None:
-        self._memory = memory
+    def __init__(self, workspace: Path) -> None:
+        self._workspace = workspace
 
     @property
     def name(self) -> str:
@@ -85,7 +71,7 @@ class ForgetTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Remove entries from persistent memory that match a keyword."
+        return "Remove entries from long-term memory that match a keyword."
 
     @property
     def read_only(self) -> bool:
@@ -105,6 +91,16 @@ class ForgetTool(Tool):
         }
 
     async def execute(self, **kwargs: Any) -> str:
-        keyword = kwargs["keyword"].strip()
-        removed = self._memory.forget(keyword)
+        keyword = kwargs["keyword"].strip().lower()
+        memory_file = self._workspace / "memory" / "MEMORY.md"
+        if not memory_file.exists():
+            return "Memory is empty."
+        lines = memory_file.read_text(encoding="utf-8").splitlines(keepends=True)
+        kept, removed = [], 0
+        for line in lines:
+            if keyword in line.lower() and line.strip().startswith("-"):
+                removed += 1
+            else:
+                kept.append(line)
+        memory_file.write_text("".join(kept), encoding="utf-8")
         return f"Removed {removed} entry/entries matching '{keyword}'."

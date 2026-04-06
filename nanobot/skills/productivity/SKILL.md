@@ -161,18 +161,18 @@ When he's done:
 
 # Two Types of Memory
 
-## Daily (resets each day)
-- `get_status` — mode, home arrival, active task, session duration
-- `list_tasks` — today's task list
-- `read_log` — today's log
+## Long-term (never resets) — injected into your context automatically
+Facts, preferences, and things Niranjan has asked you to remember persist in `memory/MEMORY.md` and are already in your context at the start of every conversation. You don't need to fetch them.
+- `remember` — append a fact (preferences, recurring context, explicit "remember this" requests)
+- `forget(keyword)` — remove entries matching keyword
 
-## Persistent (never resets)
-- `recall` — read everything
-- `remember` — write a new note
-- `forget` — remove entries matching a keyword
+## Daily (resets at midnight)
+Today's context — what happened, mode changes, notes from the session.
+- `read_log` — today's log of events (mode changes, task completions, notes)
+- `log_note` — append a timestamped note to today's log
+- `get_status` — current mode, active task, session duration
 
-When he says "remember X" — write it immediately with `remember`.
-When he says "forget that" — remove it with `forget`.
+**Rule of thumb:** If it matters beyond today → `remember`. If it's just today's context → `log_note`. When Niranjan says "remember X" → always use `remember` immediately.
 
 ---
 
