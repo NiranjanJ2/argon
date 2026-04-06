@@ -40,12 +40,15 @@ def should_send_reminder(workspace: Path) -> tuple[bool, str]:
 
     # Night wind-down (after 10pm) — only remind if still has urgent tasks
     if hour >= 22:
-        from nanobot.daily.todo import DailyTodo
-        todo = DailyTodo(workspace)
-        high_priority = [t for t in todo.get_pending() if t.get("priority") == "high"]
-        if not high_priority:
-            return False, "late and no urgent tasks"
-        return True, f"{len(high_priority)} high-priority task(s) still pending"
+        try:
+            from nanobot.google.tasks_store import GoogleTasksStore
+            store = GoogleTasksStore(workspace)
+            high_priority = [t for t in store.get_pending() if t.get("priority") == "high"]
+            if not high_priority:
+                return False, "late and no urgent tasks"
+            return True, f"{len(high_priority)} high-priority task(s) still pending"
+        except Exception:
+            return False, "could not load tasks"
 
     # Idle after getting home — gentle check-in
     if mode == "idle" and data.get("home_arrival"):

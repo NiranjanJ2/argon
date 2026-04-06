@@ -1,4 +1,8 @@
-"""Daily tool — agent interface for todo, state, habits, and log."""
+"""Daily tool — agent interface for todo, state, habits, and log.
+
+Tasks are backed by Google Tasks (GoogleTasksStore) — no local JSON, no sync step.
+State, habits, log, and memory remain workspace-local.
+"""
 
 from __future__ import annotations
 
@@ -12,21 +16,29 @@ from nanobot.daily.habits import HabitsTracker
 from nanobot.daily.log import DailyLog
 from nanobot.daily.memory import PersistentMemory
 from nanobot.daily.state import DailyState
-from nanobot.daily.todo import DailyTodo
 
 
 class DailyTool(Tool):
-    """Manage Niranjan's daily todo list, session state, habit tracking, and persistent memory."""
+    """Manage Niranjan's daily productivity session."""
 
     def __init__(self, workspace: Path, *, phone_number: str | None = None) -> None:
         self._workspace = workspace
         self._phone_number = phone_number
-        self._todo = DailyTodo(workspace)
         self._state = DailyState(workspace)
         self._habits = HabitsTracker(workspace)
         self._log = DailyLog(workspace)
         self._memory = PersistentMemory(workspace)
         self._log.refresh_symlink()
+
+        # Lazily initialized — requires Google auth (work account)
+        self._todo: Any = None
+
+    def _get_todo(self):
+        """Return the GoogleTasksStore, initializing it on first use."""
+        if self._todo is None:
+            from nanobot.google.tasks_store import GoogleTasksStore
+            self._todo = GoogleTasksStore(self._workspace)
+        return self._todo
 
     @property
     def name(self) -> str:
@@ -36,14 +48,12 @@ class DailyTool(Tool):
     def description(self) -> str:
         return (
             "Manage Niranjan's daily productivity session. "
-            "To check or import Google Classroom assignments, call sync_classroom — it fetches all courses and assignments automatically. "
+            "Tasks are stored in Google Tasks (Argon task list) — no sync needed. "
+            "To import Google Classroom assignments, call sync_classroom. "
             "Actions: get_state, get_todo, get_habits, read_daily_log, recall, "
             "sync_classroom, add_task, complete_task, start_task, carry_over_task, update_priority, "
             "set_mode, set_current_task, log_home_arrival, log_note, "
-            "add_from_classroom, sync_google_tasks, schedule_study_blocks, "
-            "send_phone_keyword, remember, forget. "
-            "remember/recall/forget manage persistent long-term memory that survives across days. "
-            "send_phone_keyword with keyword='lockdown' or 'unlock' toggles phone app restrictions."
+            "schedule_study_blocks, send_phone_keyword, remember, forget."
         )
 
     @property
@@ -64,13 +74,11 @@ class DailyTool(Tool):
                         "carry_over_task", "update_priority",
                         "set_mode", "set_current_task",
                         "log_home_arrival", "log_note",
-                        "add_from_classroom",
-                        "sync_google_tasks", "schedule_study_blocks",
+                        "schedule_study_blocks",
                         "send_phone_keyword",
                         "remember", "forget",
                     ],
                 },
-                # Task fields
                 "task_id": {"type": "string", "description": "Task ID or partial title match."},
                 "title": {"type": "string"},
                 "subject": {"type": "string", "description": "Subject/class (e.g. 'AP Chemistry')."},
@@ -79,28 +87,18 @@ class DailyTool(Tool):
                 "due": {"type": "string", "description": "ISO 8601 due datetime."},
                 "notes": {"type": "string"},
                 "time_estimate_min": {"type": "integer", "description": "Estimated minutes to complete."},
-                # State fields
                 "mode": {
                     "type": "string",
                     "enum": ["idle", "working", "napping", "lock_in", "done"],
                 },
                 "current_task": {"type": "string", "description": "Task title to set as current."},
-                # Log
                 "note": {"type": "string", "description": "Note to append to daily log."},
-                # Memory
-                "memory_note": {"type": "string", "description": "Fact or note to store in persistent memory."},
-                "memory_keyword": {"type": "string", "description": "Keyword to search/remove from persistent memory."},
-                # Phone keyword
+                "memory_note": {"type": "string", "description": "Fact to store in persistent memory."},
+                "memory_keyword": {"type": "string", "description": "Keyword to search/remove from memory."},
                 "keyword": {
                     "type": "string",
                     "enum": ["lockdown", "unlock"],
                     "description": "Keyword to text to Niranjan's phone via WhatsApp.",
-                },
-                # Classroom bulk import
-                "assignments": {
-                    "type": "array",
-                    "description": "List of assignment dicts from Google Classroom.",
-                    "items": {"type": "object"},
                 },
             },
             "required": ["action"],
@@ -136,10 +134,8 @@ class DailyTool(Tool):
 
         # ── Read operations ──────────────────────────────────────────────
         if action == "get_todo":
-            tasks = self._todo.get_all()
-            pending = [t for t in tasks if not t["done"]]
-            done = [t for t in tasks if t["done"]]
-            return json.dumps({"pending": pending, "done": done, "total": len(tasks)}, indent=2)
+            tasks = self._get_todo().get_all()
+            return json.dumps({"tasks": tasks, "total": len(tasks)}, indent=2)
 
         if action == "get_state":
             state = self._state.get()
@@ -160,11 +156,12 @@ class DailyTool(Tool):
         if action == "recall":
             return self._memory.recall()
 
+        # ── Task operations ──────────────────────────────────────────────
         if action == "add_task":
             title = kwargs.get("title")
             if not title:
                 return "Error: title required."
-            task = self._todo.add_task(
+            task = self._get_todo().add_task(
                 title=title,
                 source=kwargs.get("source", "manual"),
                 priority=kwargs.get("priority", "medium"),
@@ -173,41 +170,41 @@ class DailyTool(Tool):
                 notes=kwargs.get("notes"),
             )
             if kwargs.get("time_estimate_min"):
-                self._todo.set_time_estimate(task["id"], kwargs["time_estimate_min"])
+                self._get_todo().set_time_estimate(task["id"], kwargs["time_estimate_min"])
             self._push("todo")
-            return f"Added task [{task['id']}]: {title}"
+            return f"Added: {title}"
 
         if action == "complete_task":
             task_id = kwargs.get("task_id")
             if not task_id:
                 return "Error: task_id required."
-            # Look up subject for habit recording before completing
-            all_tasks = self._todo.get_all()
-            subject = next((t.get("subject") for t in all_tasks
-                           if t["id"] == task_id or task_id.lower() in t["title"].lower()), None)
-            _priority_order = {"high": 0, "medium": 1, "low": 2}
-            priority_rank = next((i + 1 for i, t in enumerate(
-                sorted([x for x in all_tasks if not x["done"]],
-                       key=lambda x: _priority_order.get(x.get("priority", "medium"), 1))
-            ) if t["id"] == task_id or task_id.lower() in t["title"].lower()), 1)
 
-            completed_id = self._todo.complete_task(task_id)
-            if not completed_id:
+            # Capture priority rank before completing (for habit recording)
+            all_tasks = self._get_todo().get_all()
+            _p = {"high": 0, "medium": 1, "low": 2}
+            pending_sorted = sorted(all_tasks, key=lambda t: _p.get(t.get("priority", "medium"), 1))
+            target_pre = next(
+                (t for t in all_tasks if t["id"] == task_id or task_id.lower() in t["title"].lower()),
+                None,
+            )
+            priority_rank = next(
+                (i + 1 for i, t in enumerate(pending_sorted)
+                 if t["id"] == (target_pre["id"] if target_pre else "")),
+                1,
+            )
+
+            completed = self._get_todo().complete_task(task_id)
+            if not completed:
                 return f"No pending task matching '{task_id}'."
-            task = next((t for t in self._todo.get_all() if t["id"] == completed_id), None)
-            actual_min = task.get("time_actual_min") if task else None
+
+            title = completed["title"]
+            actual_min = completed.get("time_actual_min")
+            subject = completed.get("subject")
+
             if subject and actual_min:
                 self._habits.record_task_completion(subject, actual_min, priority_rank)
-            title = task["title"] if task else task_id
             self._log.log_task_done(title, actual_min)
             self._state.set_current_task(None)
-            # Mirror completion to Google Tasks if synced
-            if task and task.get("google_task_id"):
-                try:
-                    from nanobot.google.sync import complete_in_google_tasks
-                    complete_in_google_tasks(self._workspace, task["google_task_id"])
-                except Exception:
-                    pass
             self._push("todo")
             self._push("state")
             return f"Completed: {title}" + (f" ({actual_min} min)" if actual_min else "")
@@ -216,31 +213,31 @@ class DailyTool(Tool):
             task_id = kwargs.get("task_id")
             if not task_id:
                 return "Error: task_id required."
-            tid = self._todo.start_task(task_id)
-            if not tid:
+            task = self._get_todo().start_task(task_id)
+            if not task:
                 return f"No task matching '{task_id}'."
-            task = next((t for t in self._todo.get_all() if t["id"] == tid), None)
-            title = task["title"] if task else task_id
-            self._state.set_current_task(title)
-            self._log.log_task_started(title)
+            self._state.set_current_task(task["title"])
+            self._log.log_task_started(task["title"])
             self._push("state")
-            return f"Started: {title}"
+            return f"Started: {task['title']}"
 
         if action == "carry_over_task":
             task_id = kwargs.get("task_id")
             if not task_id:
                 return "Error: task_id required."
-            ok = self._todo.carry_over_task(task_id)
-            if ok: self._push("todo")
-            return f"Carried over to tomorrow." if ok else f"Task '{task_id}' not found."
+            ok = self._get_todo().carry_over_task(task_id)
+            if ok:
+                self._push("todo")
+            return "Due date pushed to tomorrow." if ok else f"Task '{task_id}' not found."
 
         if action == "update_priority":
             task_id = kwargs.get("task_id")
             priority = kwargs.get("priority")
             if not task_id or not priority:
                 return "Error: task_id and priority required."
-            ok = self._todo.update_priority(task_id, priority)
-            if ok: self._push("todo")
+            ok = self._get_todo().update_priority(task_id, priority)
+            if ok:
+                self._push("todo")
             return "Priority updated." if ok else f"Task '{task_id}' not found."
 
         # ── State operations ─────────────────────────────────────────────
@@ -261,7 +258,7 @@ class DailyTool(Tool):
             if task:
                 self._log.log_task_started(task)
             self._push("state")
-            return f"Current task set to: {task or '(none)'}"
+            return f"Current task: {task or '(none)'}"
 
         if action == "log_home_arrival":
             self._state.set_home_arrival()
@@ -278,35 +275,10 @@ class DailyTool(Tool):
             return "Note logged."
 
         # ── Classroom import ─────────────────────────────────────────────
-        if action == "add_from_classroom":
-            assignments = kwargs.get("assignments", [])
-            if isinstance(assignments, str):
-                try:
-                    assignments = json.loads(assignments)
-                except Exception:
-                    return "Error: assignments must be a list of assignment objects, not a string."
-            if not assignments:
-                return "No assignments provided."
-            added = self._todo.bulk_add_from_classroom(assignments)
-            self._push("todo")
-            return f"Added {added} new assignments from Google Classroom."
-
         if action == "sync_classroom":
             return await self._sync_classroom_to_todo()
 
-        # ── Google sync ──────────────────────────────────────────────────
-        if action == "sync_google_tasks":
-            from nanobot.google.sync import sync_tasks
-            result = sync_tasks(self._workspace)
-            if "error" in result:
-                return f"Error: {result['error']}"
-            self._push("todo")
-            return (
-                f"Sync complete — pushed {result['pushed']} new tasks to Google Tasks, "
-                f"pulled {result['completed_from_gt']} completions, "
-                f"{result['already_synced']} already in sync."
-            )
-
+        # ── Study blocks ─────────────────────────────────────────────────
         if action == "schedule_study_blocks":
             from nanobot.google.sync import schedule_study_blocks
             state = self._state.get()
@@ -326,13 +298,16 @@ class DailyTool(Tool):
                 + (f" ({result['skipped']} tasks skipped — no time estimate)." if result["skipped"] else ".")
             )
 
-        # ── Persistent memory ────────────────────────────────────────────────
+        # ── Persistent memory ────────────────────────────────────────────
         if action == "remember":
             note = kwargs.get("memory_note", "").strip()
             if not note:
                 return "Error: memory_note required."
             self._memory.remember(note)
             return f"Remembered: {note}"
+
+        if action == "recall":
+            return self._memory.recall()
 
         if action == "forget":
             keyword = kwargs.get("memory_keyword", "").strip()
@@ -341,25 +316,26 @@ class DailyTool(Tool):
             removed = self._memory.forget(keyword)
             return f"Removed {removed} memory entry/entries matching '{keyword}'."
 
-        # ── Phone keyword (lockdown / unlock) ────────────────────────────────
+        # ── Phone keyword (lockdown / unlock) ────────────────────────────
         if action == "send_phone_keyword":
             keyword = kwargs.get("keyword", "").strip().lower()
             if keyword not in ("lockdown", "unlock"):
                 return "Error: keyword must be 'lockdown' or 'unlock'."
             if not self._phone_number:
-                return "Error: phone_number not configured — add phoneNumber to channels.whatsapp in config.json."
+                return "Error: phone_number not configured."
             return await self._send_whatsapp_keyword(self._phone_number, keyword)
 
         return f"Error: Unknown action '{action}'."
 
     async def _sync_classroom_to_todo(self) -> str:
-        """Fetch all Google Classroom coursework and import new items into todo."""
+        """Fetch all Google Classroom coursework and import new items into Google Tasks."""
         import asyncio
         return await asyncio.get_running_loop().run_in_executor(None, self._sync_classroom_sync)
 
     def _sync_classroom_sync(self) -> str:
         from googleapiclient.discovery import build
         from nanobot.google.auth import GoogleAuth
+        from nanobot.google.tasks_store import _parse_classroom_due, _infer_priority
 
         try:
             auth = GoogleAuth(self._workspace)
@@ -369,8 +345,7 @@ class DailyTool(Tool):
             return f"Error: Google Classroom not authenticated — {e}"
 
         try:
-            courses_result = svc.courses().list(pageSize=20, studentId="me").execute()
-            courses = courses_result.get("courses", [])
+            courses = svc.courses().list(pageSize=20, studentId="me").execute().get("courses", [])
         except Exception as e:
             return f"Error fetching courses: {e}"
 
@@ -381,10 +356,9 @@ class DailyTool(Tool):
         all_assignments = []
         for course in courses:
             try:
-                cw_result = svc.courses().courseWork().list(
+                for cw in svc.courses().courseWork().list(
                     courseId=course["id"], pageSize=30
-                ).execute()
-                for cw in cw_result.get("courseWork", []):
+                ).execute().get("courseWork", []):
                     due = cw.get("dueDate")
                     if due:
                         try:
@@ -394,36 +368,29 @@ class DailyTool(Tool):
                         except (KeyError, ValueError):
                             continue
                     else:
-                        # No due date — skip
                         continue
                     all_assignments.append({
                         "id": cw.get("id"),
                         "title": cw.get("title"),
-                        "description": cw.get("description"),
                         "dueDate": due,
                         "dueTime": cw.get("dueTime"),
-                        "maxPoints": cw.get("maxPoints"),
-                        "workType": cw.get("workType"),
-                        "state": cw.get("state"),
                         "course_name": course.get("name"),
                     })
             except Exception:
                 continue
 
         if not all_assignments:
-            return f"No upcoming assignments (due within 30 days) found in Google Classroom."
+            return "No upcoming assignments (due within 30 days) found in Google Classroom."
 
-        added = self._todo.bulk_add_from_classroom(all_assignments)
+        added = self._get_todo().bulk_add_from_classroom(all_assignments)
         self._push("todo")
-        return f"Synced Google Classroom: {added} new assignments added from {len(courses)} courses (due within 30 days)."
+        return f"Synced {added} new assignments from {len(courses)} courses (due within 30 days)."
 
     async def _send_whatsapp_keyword(self, phone: str, keyword: str) -> str:
-        """Send a keyword text to Niranjan's phone via the local WhatsApp bridge."""
         import httpx
-        bridge_url = "http://127.0.0.1:3996/send"
         try:
             async with httpx.AsyncClient(timeout=8) as client:
-                resp = await client.post(bridge_url, json={"to": phone, "body": keyword})
+                resp = await client.post("http://127.0.0.1:3996/send", json={"to": phone, "body": keyword})
             if resp.status_code == 200:
                 self._log.log_note(f"Phone keyword sent: {keyword}")
                 return f"Sent '{keyword}' to phone."

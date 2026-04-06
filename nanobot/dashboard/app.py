@@ -96,11 +96,9 @@ def api_schedule():
 @app.route("/api/todo")
 def api_todo():
     try:
-        from nanobot.daily.todo import DailyTodo
-        todo = DailyTodo(_get_workspace())
-        pending = todo.get_pending()
-        done = [t for t in todo.get_all() if t["done"]]
-        return jsonify({"pending": pending, "done": done})
+        from nanobot.google.tasks_store import GoogleTasksStore
+        store = GoogleTasksStore(_get_workspace())
+        return jsonify({"tasks": store.get_pending()})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -108,12 +106,12 @@ def api_todo():
 @app.route("/api/todo/<task_id>/complete", methods=["POST"])
 def api_complete_task(task_id: str):
     try:
-        from nanobot.daily.todo import DailyTodo
-        todo = DailyTodo(_get_workspace())
-        completed = todo.complete_task(task_id)
+        from nanobot.google.tasks_store import GoogleTasksStore
+        store = GoogleTasksStore(_get_workspace())
+        completed = store.complete_task(task_id)
         if completed:
             push_update("todo")
-            return jsonify({"ok": True, "id": completed})
+            return jsonify({"ok": True, "id": completed["id"]})
         return jsonify({"ok": False, "error": "Task not found"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
