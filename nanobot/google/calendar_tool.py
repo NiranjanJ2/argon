@@ -3,25 +3,13 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
-from nanobot.agent.tools.base import Tool
-from nanobot.google.auth import GoogleAuth
+from nanobot.google.base import GoogleAPITool, build_google_service
 
 
-def _build_service(workspace: Path):
-    from googleapiclient.discovery import build
-    auth = GoogleAuth(workspace)
-    creds = auth.get_credentials("work")
-    return build("calendar", "v3", credentials=creds)
-
-
-class CalendarTool(Tool):
+class CalendarTool(GoogleAPITool):
     """Interact with Google Calendar (work account)."""
-
-    def __init__(self, workspace: Path) -> None:
-        self._workspace = workspace
 
     @property
     def name(self) -> str:
@@ -83,14 +71,10 @@ class CalendarTool(Tool):
             "required": ["action"],
         }
 
-    async def execute(self, **kwargs: Any) -> str:
-        import asyncio
-        return await asyncio.get_running_loop().run_in_executor(None, self._run, kwargs)
-
     def _run(self, kwargs: dict[str, Any]) -> str:
         action = kwargs["action"]
         cal_id = kwargs.get("calendar_id", "primary")
-        svc = _build_service(self._workspace)
+        svc = build_google_service(self._workspace, "calendar", "v3", "work")
 
         if action == "list_calendars":
             result = svc.calendarList().list().execute()

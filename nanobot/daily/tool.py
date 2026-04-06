@@ -107,37 +107,22 @@ class DailyTool(Tool):
         }
 
     def build_context_snapshot(self) -> str:
-        """Return a compact daily context string for pre-injection into the runtime context."""
+        """Return a minimal daily context string for pre-injection into the runtime context.
+
+        Intentionally small — just enough for the agent to know Niranjan's current
+        state without pre-loading the full todo list or log on every message.
+        Call daily(action="get_todo") / daily(action="read_daily_log") for full data.
+        """
         state = self._state.get()
         work_min = self._state.get_work_session_duration_minutes()
-        tasks = self._todo.get_all()
-        pending = [t for t in tasks if not t["done"]]
 
-        parts = ["[Daily Context]"]
-        mode_line = f"Mode: {state.get('mode', 'idle')}"
-        if state.get('current_task'):
-            mode_line += f" | Task: {state['current_task']}"
+        parts = [f"Mode: {state.get('mode', 'idle')}"]
+        if state.get("current_task"):
+            parts.append(f"Current task: {state['current_task']}")
         if work_min:
-            mode_line += f" | Working {work_min}min"
-        parts.append(mode_line)
+            parts.append(f"Working {work_min}min this session")
 
-        if pending:
-            todo_items = ", ".join(
-                f"{t['title']} [{t.get('priority','?')}]" for t in pending[:8]
-            )
-            parts.append(f"Todo: {todo_items}")
-        else:
-            parts.append("Todo: none")
-
-        # Last 15 lines of today's log only — no yesterday
-        log_path = self._log.get_path()
-        if log_path.exists():
-            lines = log_path.read_text().splitlines()
-            recent = "\n".join(lines[-15:]) if len(lines) > 15 else "\n".join(lines)
-            if recent.strip():
-                parts.append(f"Log (recent):\n{recent}")
-
-        return "\n".join(parts)
+        return "[Daily Context]\n" + " | ".join(parts)
 
     def _push(self, event: str) -> None:
         try:
@@ -259,16 +244,6 @@ class DailyTool(Tool):
             return "Priority updated." if ok else f"Task '{task_id}' not found."
 
         # ── State operations ─────────────────────────────────────────────
-        if action == "get_state":
-            state = self._state.get()
-            work_min = self._state.get_work_session_duration_minutes()
-            lock_min = self._state.get_lock_in_duration_minutes()
-            return json.dumps({
-                **state,
-                "work_session_duration_minutes": work_min,
-                "lock_in_duration_minutes": lock_min,
-            }, indent=2)
-
         if action == "set_mode":
             mode = kwargs.get("mode")
             if not mode:
@@ -302,10 +277,6 @@ class DailyTool(Tool):
             self._log.log_note(note)
             return "Note logged."
 
-        # ── Habits ──────────────────────────────────────────────────────
-        if action == "get_habits":
-            return json.dumps(self._habits.get_summary(), indent=2)
-
         # ── Classroom import ─────────────────────────────────────────────
         if action == "add_from_classroom":
             assignments = kwargs.get("assignments", [])
@@ -322,10 +293,6 @@ class DailyTool(Tool):
 
         if action == "sync_classroom":
             return await self._sync_classroom_to_todo()
-
-        # ── Log ──────────────────────────────────────────────────────────
-        if action == "read_daily_log":
-            return self._log.read()
 
         # ── Google sync ──────────────────────────────────────────────────
         if action == "sync_google_tasks":
@@ -366,9 +333,6 @@ class DailyTool(Tool):
                 return "Error: memory_note required."
             self._memory.remember(note)
             return f"Remembered: {note}"
-
-        if action == "recall":
-            return self._memory.recall()
 
         if action == "forget":
             keyword = kwargs.get("memory_keyword", "").strip()

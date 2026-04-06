@@ -3,27 +3,15 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
-from nanobot.agent.tools.base import Tool
-from nanobot.google.auth import GoogleAuth
+from nanobot.google.base import GoogleAPITool, build_google_service
 
 _ACCOUNTS = ("personal", "work", "school")
 
 
-def _build_service(workspace: Path, account: str):
-    from googleapiclient.discovery import build
-    auth = GoogleAuth(workspace)
-    creds = auth.get_credentials(account)
-    return build("drive", "v3", credentials=creds)
-
-
-class DriveTool(Tool):
+class DriveTool(GoogleAPITool):
     """Read Google Drive files across personal, work, and school accounts."""
-
-    def __init__(self, workspace: Path) -> None:
-        self._workspace = workspace
 
     @property
     def name(self) -> str:
@@ -85,10 +73,6 @@ class DriveTool(Tool):
             "required": ["action", "account"],
         }
 
-    async def execute(self, **kwargs: Any) -> str:
-        import asyncio
-        return await asyncio.get_running_loop().run_in_executor(None, self._run, kwargs)
-
     def _run(self, kwargs: dict[str, Any]) -> str:
         action = kwargs["action"]
         account = kwargs["account"]
@@ -96,7 +80,7 @@ class DriveTool(Tool):
             return f"Error: account must be one of {_ACCOUNTS}."
 
         page_size = kwargs.get("page_size", 20)
-        svc = _build_service(self._workspace, account)
+        svc = build_google_service(self._workspace, "drive", "v3", account)
 
         _FIELDS = "id, name, mimeType, size, modifiedTime, parents, webViewLink, description"
 

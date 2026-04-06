@@ -3,25 +3,13 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
-from nanobot.agent.tools.base import Tool
-from nanobot.google.auth import GoogleAuth
+from nanobot.google.base import GoogleAPITool, build_google_service
 
 
-def _build_service(workspace: Path):
-    from googleapiclient.discovery import build
-    auth = GoogleAuth(workspace)
-    creds = auth.get_credentials("school")
-    return build("classroom", "v1", credentials=creds)
-
-
-class ClassroomTool(Tool):
+class ClassroomTool(GoogleAPITool):
     """Read Google Classroom (school account)."""
-
-    def __init__(self, workspace: Path) -> None:
-        self._workspace = workspace
 
     @property
     def name(self) -> str:
@@ -67,15 +55,11 @@ class ClassroomTool(Tool):
             "required": ["action"],
         }
 
-    async def execute(self, **kwargs: Any) -> str:
-        import asyncio
-        return await asyncio.get_running_loop().run_in_executor(None, self._run, kwargs)
-
     def _run(self, kwargs: dict[str, Any]) -> str:
         action = kwargs["action"]
         course_id = kwargs.get("course_id")
         page_size = kwargs.get("page_size", 20)
-        svc = _build_service(self._workspace)
+        svc = build_google_service(self._workspace, "classroom", "v1", "school")
 
         if action == "list_courses":
             result = svc.courses().list(pageSize=page_size, studentId="me").execute()

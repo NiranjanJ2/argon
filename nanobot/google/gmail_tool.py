@@ -4,27 +4,15 @@ from __future__ import annotations
 
 import base64
 import json
-from pathlib import Path
 from typing import Any
 
-from nanobot.agent.tools.base import Tool
-from nanobot.google.auth import GoogleAuth
+from nanobot.google.base import GoogleAPITool, build_google_service
 
 _ACCOUNTS = ("work", "school")
 
 
-def _build_service(workspace: Path, account: str):
-    from googleapiclient.discovery import build
-    auth = GoogleAuth(workspace)
-    creds = auth.get_credentials(account)
-    return build("gmail", "v1", credentials=creds)
-
-
-class GmailTool(Tool):
+class GmailTool(GoogleAPITool):
     """Read Gmail on work and school accounts."""
-
-    def __init__(self, workspace: Path) -> None:
-        self._workspace = workspace
 
     @property
     def name(self) -> str:
@@ -87,10 +75,6 @@ class GmailTool(Tool):
             "required": ["action", "account"],
         }
 
-    async def execute(self, **kwargs: Any) -> str:
-        import asyncio
-        return await asyncio.get_running_loop().run_in_executor(None, self._run, kwargs)
-
     def _run(self, kwargs: dict[str, Any]) -> str:
         action = kwargs["action"]
         account = kwargs["account"]
@@ -98,7 +82,7 @@ class GmailTool(Tool):
             return f"Error: account must be one of {_ACCOUNTS}."
 
         max_results = kwargs.get("max_results", 10)
-        svc = _build_service(self._workspace, account)
+        svc = build_google_service(self._workspace, "gmail", "v1", account)
 
         if action == "get_profile":
             profile = svc.users().getProfile(userId="me").execute()

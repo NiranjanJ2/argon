@@ -3,25 +3,13 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
-from nanobot.agent.tools.base import Tool
-from nanobot.google.auth import GoogleAuth
+from nanobot.google.base import GoogleAPITool, build_google_service
 
 
-def _build_service(workspace: Path):
-    from googleapiclient.discovery import build
-    auth = GoogleAuth(workspace)
-    creds = auth.get_credentials("work")
-    return build("tasks", "v1", credentials=creds)
-
-
-class TasksTool(Tool):
+class TasksTool(GoogleAPITool):
     """Interact with Google Tasks (work account)."""
-
-    def __init__(self, workspace: Path) -> None:
-        self._workspace = workspace
 
     @property
     def name(self) -> str:
@@ -79,14 +67,10 @@ class TasksTool(Tool):
             "required": ["action"],
         }
 
-    async def execute(self, **kwargs: Any) -> str:
-        import asyncio
-        return await asyncio.get_running_loop().run_in_executor(None, self._run, kwargs)
-
     def _run(self, kwargs: dict[str, Any]) -> str:
         action = kwargs["action"]
         tl_id = kwargs.get("tasklist_id", "@default")
-        svc = _build_service(self._workspace)
+        svc = build_google_service(self._workspace, "tasks", "v1", "work")
 
         if action == "list_tasklists":
             result = svc.tasklists().list().execute()
