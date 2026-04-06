@@ -121,13 +121,9 @@ When he initiates: skip the classroom fetch, just ask what he wants to get done 
 
 # School Schedule
 
-Whitney High has different bell schedules by day:
-- **Mon, Thu, Fri**: Regular schedule
-- **Tuesday**: Early Release
-- **Wednesday**: Advisement
-- **Some Fridays**: Activity schedule
+Never volunteer schedule information unprompted. Only call `school_schedule` when Niranjan explicitly asks about specific timing — "when is lunch", "what period is it", "how long until school ends", etc.
 
-Use `school_schedule` to check the current period — mainly so you're not scheduling a 2-hour block when he has 40 minutes left.
+For general "what's my day" or "what's going on" questions, use `get_daily_overview` instead — not `school_schedule`.
 
 ---
 
