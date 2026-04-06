@@ -284,25 +284,50 @@ class AgentLoop:
             self._register_google_tools()
 
     def _register_productivity_tools(self) -> None:
-        """Register schedule and daily productivity tools."""
+        """Register schedule, task, status, log, and memory tools."""
         from nanobot.schedule.tool import ScheduleTool
-        from nanobot.daily.tool import DailyTool
+        from nanobot.google.tasks_store import GoogleTasksStore
+        from nanobot.daily.state import DailyState
+        from nanobot.daily.log import DailyLog
+        from nanobot.daily.habits import HabitsTracker
+        from nanobot.daily.memory import PersistentMemory
+        from nanobot.tools.tasks import (
+            ListTasksTool, AddTaskTool, StartTaskTool, CompleteTaskTool, UpdateTaskTool,
+        )
+        from nanobot.tools.status import GetStatusTool, SetModeTool, LogNoteTool, ReadLogTool
+        from nanobot.tools.memory import RememberTool, RecallTool, ForgetTool
 
-        # Extract phone number from WhatsApp channel config if present
-        wa_phone: str | None = None
-        if self.channels_config:
-            wa_cfg = (self.channels_config.model_extra or {}).get("whatsapp", {})
-            if isinstance(wa_cfg, dict):
-                wa_phone = wa_cfg.get("phoneNumber") or wa_cfg.get("phone_number")
+        store = GoogleTasksStore(self.workspace)
+        state = DailyState(self.workspace)
+        log = DailyLog(self.workspace)
+        habits = HabitsTracker(self.workspace)
+        memory = PersistentMemory(self.workspace)
+        log.refresh_symlink()
 
         self.tools.register(ScheduleTool(self.workspace))
-        self.tools.register(DailyTool(self.workspace, phone_number=wa_phone))
+
+        # Task tools
+        self.tools.register(ListTasksTool(store))
+        self.tools.register(AddTaskTool(store, log))
+        self.tools.register(StartTaskTool(store, state, log))
+        self.tools.register(CompleteTaskTool(store, state, log, habits))
+        self.tools.register(UpdateTaskTool(store))
+
+        # Status and log
+        self.tools.register(GetStatusTool(state, self.workspace))
+        self.tools.register(SetModeTool(state, log, habits))
+        self.tools.register(LogNoteTool(state, log))
+        self.tools.register(ReadLogTool(log))
+
+        # Memory
+        self.tools.register(RememberTool(memory))
+        self.tools.register(RecallTool(memory))
+        self.tools.register(ForgetTool(memory))
 
     def _register_google_tools(self) -> None:
         """Register Google API tools (only those whose accounts are authenticated)."""
         from nanobot.google.auth import GoogleAuth
         from nanobot.google.calendar_tool import CalendarTool
-        from nanobot.google.tasks_tool import TasksTool
         from nanobot.google.classroom_tool import (
             GetCoursesTool, GetCourseAssignmentsTool, GetAllAssignmentsTool,
             GetAssignmentInfoTool, GetCourseStreamTool,
@@ -321,7 +346,6 @@ class AgentLoop:
 
         if _authed("work"):
             self.tools.register(CalendarTool(self.workspace))
-            self.tools.register(TasksTool(self.workspace))
         if _authed("school"):
             self.tools.register(GetCoursesTool(self.workspace))
             self.tools.register(GetCourseAssignmentsTool(self.workspace))
@@ -617,20 +641,22 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=0)
-        daily_context: str | None = None
-        if daily_tool := self.tools.get("daily"):
-            try:
-                from nanobot.daily.tool import DailyTool
-                if isinstance(daily_tool, DailyTool):
-                    daily_context = daily_tool.build_context_snapshot()
-            except Exception:
-                pass
+        status_context: str | None = None
+        try:
+            from nanobot.daily.state import DailyState
+            _s = DailyState(self.workspace).get()
+            _parts = [f"Mode: {_s.get('mode', 'idle')}"]
+            if _s.get("current_task"):
+                _parts.append(f"Task: {_s['current_task']}")
+            status_context = "[Status] " + " | ".join(_parts)
+        except Exception:
+            pass
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
-            extra_context=daily_context,
+            extra_context=status_context,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:

@@ -309,7 +309,7 @@ class GoogleTasksStore:
         return True
 
     def carry_over_task(self, task_id: str) -> bool:
-        """Push due date to tomorrow (tasks in GT don't expire by day)."""
+        """Push due date to tomorrow."""
         svc = self._svc()
         target = self._resolve(svc, task_id)
         if not target:
@@ -322,6 +322,22 @@ class GoogleTasksStore:
             body={"due": tomorrow.strftime("%Y-%m-%dT00:00:00.000Z")},
         ).execute()
         return True
+
+    def update_due(self, task_id: str, due_iso: str) -> bool:
+        """Set an arbitrary due date (ISO 8601 string)."""
+        svc = self._svc()
+        target = self._resolve(svc, task_id)
+        if not target:
+            return False
+        try:
+            due_dt = datetime.fromisoformat(due_iso)
+            svc.tasks().patch(
+                tasklist=self._tl(), task=target["id"],
+                body={"due": due_dt.strftime("%Y-%m-%dT00:00:00.000Z")},
+            ).execute()
+            return True
+        except Exception:
+            return False
 
     def bulk_add_from_classroom(self, assignments: list[dict[str, Any]]) -> int:
         """Add Classroom assignments as tasks, skipping duplicates by classroom_id."""
