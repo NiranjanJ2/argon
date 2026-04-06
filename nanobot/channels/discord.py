@@ -111,7 +111,9 @@ if DISCORD_AVAILABLE:
 
         def _register_app_commands(self) -> None:
             commands = (
-                ("new", "Start a new conversation", "/new"),
+                ("new", "Start a new conversation (saves context to memory)", "/new"),
+                ("clear-context", "Hard reset — discard current session, start fresh", "/clear-context"),
+                ("clear-memory", "Wipe all long-term memory", "/clear-memory"),
                 ("stop", "Stop the current task", "/stop"),
                 ("restart", "Restart the bot", "/restart"),
                 ("status", "Show bot status", "/status"),

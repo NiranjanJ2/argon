@@ -91,6 +91,32 @@ async def cmd_new(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_clear_memory(ctx: CommandContext) -> OutboundMessage:
+    """Wipe all long-term memory (memory/MEMORY.md)."""
+    memory_file = ctx.loop.workspace / "memory" / "MEMORY.md"
+    if memory_file.exists():
+        memory_file.write_text("", encoding="utf-8")
+    return OutboundMessage(
+        channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
+        content="Long-term memory cleared.",
+        metadata=dict(ctx.msg.metadata or {})
+    )
+
+
+async def cmd_clear_context(ctx: CommandContext) -> OutboundMessage:
+    """Hard-reset the current session without archiving to memory consolidator."""
+    loop = ctx.loop
+    session = ctx.session or loop.sessions.get_or_create(ctx.key)
+    session.clear()
+    loop.sessions.save(session)
+    loop.sessions.invalidate(session.key)
+    return OutboundMessage(
+        channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
+        content="Context cleared. Fresh start.",
+        metadata=dict(ctx.msg.metadata or {})
+    )
+
+
 async def cmd_help(ctx: CommandContext) -> OutboundMessage:
     """Return available slash commands."""
     return OutboundMessage(
@@ -105,7 +131,9 @@ def build_help_text() -> str:
     """Build canonical help text shared across channels."""
     lines = [
         "🐈 nanobot commands:",
-        "/new — Start a new conversation",
+        "/new — Start a new conversation (saves context to memory)",
+        "/clear-context — Hard reset, discard current session entirely",
+        "/clear-memory — Wipe all long-term memory",
         "/stop — Stop the current task",
         "/restart — Restart the bot",
         "/status — Show bot status",
@@ -120,5 +148,7 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.priority("/restart", cmd_restart)
     router.priority("/status", cmd_status)
     router.exact("/new", cmd_new)
+    router.exact("/clear-context", cmd_clear_context)
+    router.exact("/clear-memory", cmd_clear_memory)
     router.exact("/status", cmd_status)
     router.exact("/help", cmd_help)
