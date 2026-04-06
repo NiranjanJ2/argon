@@ -99,6 +99,11 @@ class AddTaskTool(Tool):
         if kwargs.get("time_estimate_min"):
             self._store.set_time_estimate(task["id"], int(kwargs["time_estimate_min"]))
         self._log.append(f"Task added: {title}", tag="task")
+        try:
+            from nanobot.dashboard.app import push_update
+            push_update("todo")
+        except Exception:
+            pass
         return f"Added: {title}"
 
 
@@ -141,6 +146,12 @@ class StartTaskTool(Tool):
             return f"No task matching '{kwargs['task_id']}'."
         self._state.set_current_task(task["title"])
         self._log.log_task_started(task["title"])
+        try:
+            from nanobot.dashboard.app import push_update
+            push_update("todo")
+            push_update("state")
+        except Exception:
+            pass
         return f"Started: {task['title']}"
 
 
@@ -211,6 +222,12 @@ class CompleteTaskTool(Tool):
         self._log.log_task_done(title, actual_min)
         self._state.set_current_task(None)
 
+        try:
+            from nanobot.dashboard.app import push_update
+            push_update("todo")
+            push_update("state")
+        except Exception:
+            pass
         return f"Done: {title}" + (f" ({actual_min}min)" if actual_min else "")
 
 
@@ -268,4 +285,9 @@ class UpdateTaskTool(Tool):
 
         if not changes:
             return "Provide at least one field to update: priority or due."
+        try:
+            from nanobot.dashboard.app import push_update
+            push_update("todo")
+        except Exception:
+            pass
         return "Updated: " + ", ".join(changes)

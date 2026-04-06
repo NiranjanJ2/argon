@@ -98,7 +98,8 @@ def api_todo():
     try:
         from nanobot.google.tasks_store import GoogleTasksStore
         store = GoogleTasksStore(_get_workspace())
-        return jsonify({"tasks": store.get_pending()})
+        tasks = store.get_all()
+        return jsonify({"pending": tasks, "done": []})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -824,16 +825,8 @@ body::before {
     <div class="hero" id="hero">
       <div class="hero-timer" id="heroTimer">
         <div class="hero-timer-time">
-          <div class="hero-timer-num" id="heroTimerNum">25:00</div>
+          <div class="hero-timer-num" id="heroTimerNum">0:00</div>
           <div class="hero-timer-sub" id="heroTimerSub">Focus</div>
-        </div>
-        <div class="hero-timer-btns">
-          <button class="htbtn" id="htPause" onclick="pomoToggle()" title="Pause">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="3" width="4" height="18" rx="1.5"/><rect x="15" y="3" width="4" height="18" rx="1.5"/></svg>
-          </button>
-          <button class="htbtn" onclick="pomoReset()" title="Reset">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.65"/></svg>
-          </button>
         </div>
       </div>
       <div class="hero-content">
@@ -956,7 +949,22 @@ function updatePeriod(){
 loadSched().then(updatePeriod);
 setInterval(updatePeriod,30000);
 
-// ── State ──────────────────────────────────────────────────────
+// ── State + server-driven session timer ────────────────────────
+let _sessionStartMs = null;
+let _sessionTimerTick = null;
+
+function tickSessionTimer(){
+  if(!_sessionStartMs){ return; }
+  const elapsed = Math.floor((Date.now() - _sessionStartMs) / 1000);
+  const h = Math.floor(elapsed / 3600);
+  const m = Math.floor((elapsed % 3600) / 60);
+  const s = elapsed % 60;
+  const str = h > 0
+    ? h+':'+(m<10?'0':'')+m+':'+(s<10?'0':'')+s
+    : (m<10?'0':'')+m+':'+(s<10?'0':'')+s;
+  document.getElementById('heroTimerNum').textContent = str;
+}
+
 function updateState(){
   fetch('/api/state').then(r=>r.json()).then(d=>{
     const mode=d.mode||'idle';
@@ -969,16 +977,28 @@ function updateState(){
 
     document.getElementById('heroTask').textContent=
       d.current_task || (mode==='idle'?'Nothing active':mode==='done'?'Session complete':'—');
-
-    const wm=d.work_session_duration_minutes, lm=d.lock_in_duration_minutes;
-    const mins=mode==='lock_in'?lm:wm;
-    const showMins=mins!=null&&mins>0&&(mode==='working'||mode==='lock_in');
-    document.getElementById('heroMeta').textContent=showMins?mins+' minutes in':'';
+    document.getElementById('heroMeta').textContent='';
 
     const hero=document.getElementById('hero');
     if(mode==='working'||mode==='lock_in') hero.classList.add('active');
     else hero.classList.remove('active');
 
+    // Server-driven session timer in hero
+    const ht=document.getElementById('heroTimer');
+    const hs=document.getElementById('heroTimerSub');
+    const startIso = mode==='working' ? d.work_session_start :
+                     mode==='lock_in' ? d.lock_in_start : null;
+    if(startIso){
+      _sessionStartMs = new Date(startIso).getTime();
+      hs.textContent = mode==='lock_in' ? 'Lock In' : 'Focus';
+      ht.classList.add('show');
+      tickSessionTimer();
+      if(!_sessionTimerTick) _sessionTimerTick = setInterval(tickSessionTimer, 1000);
+    } else {
+      _sessionStartMs = null;
+      if(_sessionTimerTick){ clearInterval(_sessionTimerTick); _sessionTimerTick=null; }
+      ht.classList.remove('show');
+    }
   }).catch(()=>{});
 }
 
@@ -1047,25 +1067,14 @@ function setRingGlow(on){
 }
 
 function syncTimerTop(){
-  const ht=document.getElementById('heroTimer');
-  const hn=document.getElementById('heroTimerNum');
-  const hs=document.getElementById('heroTimerSub');
+  // Pomodoro timer only controls the left-column widget now.
+  // The hero timer is server-driven (work_session_start from /api/state).
   const wrap=document.getElementById('timerWrap');
   const div=document.getElementById('timerDivider');
   if(_ta){
-    ht.classList.add('show');
     wrap.style.display='none';
     div.style.display='none';
-    const dur=document.getElementById('tDur').value;
-    hs.textContent=(_pm==='work'?'Focus':'Break')+' · '+dur+'m';
-    const m=Math.floor(_ps/60), s=_ps%60;
-    hn.textContent=(m<10?'0':'')+m+':'+(s<10?'0':'')+s;
-    const pb=document.getElementById('htPause');
-    if(pb) pb.innerHTML=_pr
-      ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="3" width="4" height="18" rx="1.5"/><rect x="15" y="3" width="4" height="18" rx="1.5"/></svg>'
-      : '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>';
   } else {
-    ht.classList.remove('show');
     wrap.style.display='';
     div.style.display='';
   }
@@ -1123,7 +1132,6 @@ function renderTimer(){
   const m=Math.floor(_ps/60), s=_ps%60;
   const str=(m<10?'0':'')+m+':'+(s<10?'0':'')+s;
   document.getElementById('tNum').textContent=str;
-  if(_ta) document.getElementById('heroTimerNum').textContent=str;
   const total=_pm==='work'?parseInt(document.getElementById('tDur').value)*60:5*60;
   document.getElementById('ringFg').style.strokeDashoffset=(RC*(_ps/total)).toString();
 }

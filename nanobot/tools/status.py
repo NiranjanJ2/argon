@@ -104,6 +104,11 @@ class SetModeTool(Tool):
         self._log.log_mode_change(mode)
         if mode == "working":
             self._habits.record_work_start()
+        try:
+            from nanobot.dashboard.app import push_update
+            push_update("state")
+        except Exception:
+            pass
         return f"Mode: {mode}"
 
 
