@@ -303,7 +303,10 @@ class AgentLoop:
         from nanobot.google.auth import GoogleAuth
         from nanobot.google.calendar_tool import CalendarTool
         from nanobot.google.tasks_tool import TasksTool
-        from nanobot.google.classroom_tool import ClassroomTool
+        from nanobot.google.classroom_tool import (
+            GetCoursesTool, GetCourseAssignmentsTool, GetAllAssignmentsTool,
+            GetAssignmentInfoTool, GetCourseStreamTool,
+        )
         from nanobot.google.drive_tool import DriveTool
         from nanobot.google.gmail_tool import GmailTool
 
@@ -320,7 +323,11 @@ class AgentLoop:
             self.tools.register(CalendarTool(self.workspace))
             self.tools.register(TasksTool(self.workspace))
         if _authed("school"):
-            self.tools.register(ClassroomTool(self.workspace))
+            self.tools.register(GetCoursesTool(self.workspace))
+            self.tools.register(GetCourseAssignmentsTool(self.workspace))
+            self.tools.register(GetAllAssignmentsTool(self.workspace))
+            self.tools.register(GetAssignmentInfoTool(self.workspace))
+            self.tools.register(GetCourseStreamTool(self.workspace))
         if any(_authed(a) for a in ("personal", "work", "school")):
             self.tools.register(DriveTool(self.workspace))
         if _authed("work") or _authed("school"):
