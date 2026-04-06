@@ -31,7 +31,7 @@ class ChannelsConfig(Base):
 class AgentDefaults(Base):
     """Default agent configuration."""
 
-    workspace: str = "~/.nanobot/workspace"
+    workspace: str = "."
     model: str = "nvidia/llama-3.1-nemotron-ultra-253b-v1"
     fallback_model: str | None = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
     provider: str = (

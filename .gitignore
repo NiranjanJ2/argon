@@ -28,3 +28,8 @@ nano.*.save
 uv.lock
 config.json
 config.sample.json
+sessions/
+daily/
+memory/
+habits/
+skills/
