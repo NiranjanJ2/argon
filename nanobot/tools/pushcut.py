@@ -56,10 +56,11 @@ class SendPhoneNotificationTool(Tool):
         if kwargs.get("input"):
             body["input"] = kwargs["input"]
 
-        url = f"https://api.pushcut.io/{self._api_key}/notifications/{name}"
+        url = f"https://api.pushcut.io/v1/notifications/{name}"
+        headers = {"API-Key": self._api_key}
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(url, json=body if body else None)
+                resp = await client.post(url, json=body if body else None, headers=headers)
                 resp.raise_for_status()
             return f"Notification '{name}' sent to phone."
         except httpx.HTTPStatusError as e:
