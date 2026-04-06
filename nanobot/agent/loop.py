@@ -685,6 +685,15 @@ class AgentLoop:
         if final_content is None or not final_content.strip():
             final_content = EMPTY_FINAL_RESPONSE_MESSAGE
 
+        # Don't forward raw provider errors (e.g. tool validation failures from
+        # model hallucinating bad tool names) to the user as chat messages.
+        if final_content and (
+            "Tool call validation failed" in final_content
+            or "which was not in request.tools" in final_content
+        ):
+            logger.warning("Suppressing raw provider error from user output: {}", final_content[:200])
+            final_content = EMPTY_FINAL_RESPONSE_MESSAGE
+
         self._save_turn(session, all_msgs, 1 + len(history))
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
