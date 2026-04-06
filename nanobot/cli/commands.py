@@ -693,7 +693,13 @@ def gateway(
             if isinstance(cron_tool, CronTool) and cron_token is not None:
                 cron_tool.reset_cron_context(cron_token)
 
+        from nanobot.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
+
         response = resp.content if resp else ""
+
+        # Model decided to stay silent — don't forward the error string to Discord
+        if response == EMPTY_FINAL_RESPONSE_MESSAGE:
+            return None
 
         message_tool = agent.tools.get("message")
         if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
