@@ -179,7 +179,8 @@ class AgentLoop:
         timezone: str | None = None,
         hooks: list[AgentHook] | None = None,
         google_enabled: bool = False,
-        pushcut_api_key: str | None = None,
+        trigger_email: str | None = None,
+        trigger_password: str | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -209,7 +210,8 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.google_enabled = google_enabled
-        self._pushcut_api_key = pushcut_api_key
+        self._trigger_email = trigger_email
+        self._trigger_password = trigger_password
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
@@ -316,10 +318,10 @@ class AgentLoop:
         # Always available — handles missing Google auth gracefully
         self.tools.register(GetDailyOverviewTool(self.workspace))
 
-        # Phone notifications (Pushcut → iOS Shortcuts)
-        if self._pushcut_api_key:
-            from nanobot.tools.pushcut import SendPhoneNotificationTool
-            self.tools.register(SendPhoneNotificationTool(self._pushcut_api_key))
+        # Phone notifications (email trigger → iOS Shortcuts)
+        if self._trigger_email and self._trigger_password:
+            from nanobot.tools.email_trigger import SendPhoneNotificationTool
+            self.tools.register(SendPhoneNotificationTool(self._trigger_email, self._trigger_password))
 
     def _register_google_tools(self) -> None:
         """Register Google API tools (only those whose accounts are authenticated)."""
