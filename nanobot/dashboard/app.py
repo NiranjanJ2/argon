@@ -17,6 +17,8 @@ app = Flask(__name__)
 _workspace: Path | None = None
 _whatsapp_handler: "Callable[[dict], None] | None" = None
 _chat_handler: "Callable[[str], str] | None" = None
+_pushcut_handler: "Callable[[str], str] | None" = None
+_pushcut_token: str | None = None
 
 # ── SSE push ──────────────────────────────────────────────────────────────────
 _sse_clients: list[queue.Queue] = []
@@ -59,6 +61,12 @@ def register_whatsapp_handler(handler: "Callable[[dict], None]") -> None:
 def register_chat_handler(handler: "Callable[[str], str]") -> None:
     global _chat_handler
     _chat_handler = handler
+
+
+def register_pushcut_handler(handler: "Callable[[str], str]", token: str | None = None) -> None:
+    global _pushcut_handler, _pushcut_token
+    _pushcut_handler = handler
+    _pushcut_token = token
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +206,37 @@ def whatsapp_incoming():
             _whatsapp_handler(payload)
         except Exception:
             pass
+    return jsonify({"ok": True})
+
+
+@app.route("/webhook/pushcut", methods=["POST"])
+def pushcut_incoming():
+    """Webhook endpoint for Pushcut iOS app triggers."""
+    # Optional token auth — check query param or Authorization header
+    if _pushcut_token:
+        provided = request.args.get("token") or request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        if provided != _pushcut_token:
+            return jsonify({"error": "Unauthorized"}), 401
+
+    body = request.get_json(force=True, silent=True) or {}
+    # Pushcut sends {"input": "..."} or we accept {"message": "..."}
+    # Also support a plain ?msg= query param for simple shortcut triggers
+    message = (
+        body.get("input")
+        or body.get("message")
+        or request.args.get("msg", "")
+    ).strip()
+
+    if not message:
+        return jsonify({"error": "No message provided"}), 400
+
+    if _pushcut_handler is not None:
+        try:
+            reply = _pushcut_handler(message)
+            return jsonify({"ok": True, "response": reply})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
     return jsonify({"ok": True})
 
 

@@ -775,7 +775,7 @@ def gateway(
         timezone=config.agents.defaults.timezone,
     )
 
-    from nanobot.dashboard.app import start_dashboard, register_chat_handler
+    from nanobot.dashboard.app import start_dashboard, register_chat_handler, register_pushcut_handler
     start_dashboard(workspace=config.workspace_path)
     console.print("[green]✓[/green] Dashboard: http://0.0.0.0:3995")
 
@@ -818,6 +818,29 @@ def gateway(
             return f"error: {e}"
 
     register_chat_handler(_dashboard_chat_handler)
+
+    def _pushcut_webhook_handler(message: str) -> str:
+        channel, chat_id = _pick_heartbeat_target()
+        fut = asyncio.run_coroutine_threadsafe(
+            agent.process_direct(
+                message,
+                session_key=f"{channel}:{chat_id}",
+                channel=channel,
+                chat_id=chat_id,
+            ),
+            _loop,
+        )
+        try:
+            resp = fut.result(timeout=120)
+            return resp.content if resp else "…"
+        except TimeoutError:
+            return "timed out"
+        except Exception as e:
+            return f"error: {e}"
+
+    pushcut_token = (config.channels.model_extra or {}).get("pushcutToken") or (config.channels.model_extra or {}).get("pushcut_token")
+    register_pushcut_handler(_pushcut_webhook_handler, token=pushcut_token)
+    console.print("[green]✓[/green] Pushcut webhook: http://0.0.0.0:3995/webhook/pushcut")
 
     async def run():
         try:

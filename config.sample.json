@@ -1,15 +1,14 @@
 {
   "agents": {
     "defaults": {
-      "model": "nvidia/llama-3.1-nemotron-ultra-253b-v1",
-      "fallbackModel": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+      "model": "openai/gpt-oss-20b",
       "provider": "custom"
     }
   },
   "providers": {
     "custom": {
-      "apiKey": "nvapi-YOUR_NIM_API_KEY",
-      "apiBase": "https://integrate.api.nvidia.com/v1"
+      "apiKey": "YOUR_GROQ_API_KEY",
+      "apiBase": "https://api.groq.com/openai/v1"
     }
   },
   "channels": {
@@ -21,9 +20,9 @@
     },
     "whatsapp": {
       "enabled": true,
-      "phoneNumber": "YOUR_PHONE_E164",
+      "phoneNumber": "YOUR_PHONE_NUMBER",
       "bridgePort": 3996,
-      "allowFrom": ["YOUR_PHONE_E164"]
+      "allowFrom": ["YOUR_WHATSAPP_NUMBER"]
     }
   },
   "google": {
