@@ -13,9 +13,10 @@ from nanobot.agent.tools.base import Tool
 class SendPhoneNotificationTool(Tool):
     """Send a trigger email to agentargonai@gmail.com to fire iOS Shortcuts."""
 
-    def __init__(self, email: str, password: str) -> None:
+    def __init__(self, email: str, password: str, phone_number: str) -> None:
         self._email = email
         self._password = password
+        self._sms_gateway = f"{phone_number}@tmomail.net"
 
     @property
     def name(self) -> str:
@@ -56,10 +57,10 @@ class SendPhoneNotificationTool(Tool):
             msg = MIMEText("")
             msg["Subject"] = subject
             msg["From"] = self._email
-            msg["To"] = self._email
+            msg["To"] = self._sms_gateway
             with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
                 server.login(self._email, self._password)
-                server.sendmail(self._email, self._email, msg.as_string())
+                server.sendmail(self._email, self._sms_gateway, msg.as_string())
 
         try:
             await asyncio.to_thread(_send)

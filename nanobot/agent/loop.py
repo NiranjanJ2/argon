@@ -181,6 +181,7 @@ class AgentLoop:
         google_enabled: bool = False,
         trigger_email: str | None = None,
         trigger_password: str | None = None,
+        trigger_phone: str | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -212,6 +213,7 @@ class AgentLoop:
         self.google_enabled = google_enabled
         self._trigger_email = trigger_email
         self._trigger_password = trigger_password
+        self._trigger_phone = trigger_phone
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
@@ -319,9 +321,9 @@ class AgentLoop:
         self.tools.register(GetDailyOverviewTool(self.workspace))
 
         # Phone notifications (email trigger → iOS Shortcuts)
-        if self._trigger_email and self._trigger_password:
+        if self._trigger_email and self._trigger_password and self._trigger_phone:
             from nanobot.tools.email_trigger import SendPhoneNotificationTool
-            self.tools.register(SendPhoneNotificationTool(self._trigger_email, self._trigger_password))
+            self.tools.register(SendPhoneNotificationTool(self._trigger_email, self._trigger_password, self._trigger_phone))
 
     def _register_google_tools(self) -> None:
         """Register Google API tools (only those whose accounts are authenticated)."""

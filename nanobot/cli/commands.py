@@ -664,6 +664,7 @@ def gateway(
         google_enabled=config.google.enabled,
         trigger_email=(config.channels.model_extra or {}).get("triggerEmail"),
         trigger_password=(config.channels.model_extra or {}).get("triggerPassword"),
+        trigger_phone=(config.channels.model_extra or {}).get("triggerPhone"),
     )
 
     # Set cron callback (needs agent)
