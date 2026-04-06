@@ -16,7 +16,7 @@ class SendPhoneNotificationTool(Tool):
     def __init__(self, email: str, password: str, phone_number: str) -> None:
         self._email = email
         self._password = password
-        self._sms_gateway = f"{phone_number}@tmomail.net"
+        self._sms_gateway = f"+1{phone_number}@tmomail.net"
 
     @property
     def name(self) -> str:
