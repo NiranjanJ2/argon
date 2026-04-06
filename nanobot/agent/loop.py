@@ -286,6 +286,7 @@ class AgentLoop:
         )
         from nanobot.tools.status import GetStatusTool, SetModeTool, LogNoteTool, ReadLogTool
         from nanobot.tools.memory import RememberTool, ForgetTool
+        from nanobot.tools.daily_overview import GetDailyOverviewTool
 
         store = GoogleTasksStore(self.workspace)
         state = DailyState(self.workspace)
@@ -312,6 +313,9 @@ class AgentLoop:
         self.tools.register(RememberTool(self.workspace))
         self.tools.register(ForgetTool(self.workspace))
 
+        # Always available — handles missing Google auth gracefully
+        self.tools.register(GetDailyOverviewTool(self.workspace))
+
         # Phone notifications (Pushcut → iOS Shortcuts)
         if self._pushcut_api_key:
             from nanobot.tools.pushcut import SendPhoneNotificationTool
@@ -324,7 +328,6 @@ class AgentLoop:
             GetTodayEventsTool, ListCalendarEventsTool, CreateCalendarEventTool,
             UpdateCalendarEventTool, DeleteCalendarEventTool, ListCalendarsTool,
         )
-        from nanobot.tools.daily_overview import GetDailyOverviewTool
         from nanobot.google.classroom_tool import (
             GetCoursesTool, GetCourseAssignmentsTool, GetAllAssignmentsTool,
             GetAssignmentInfoTool, GetCourseStreamTool,
@@ -348,7 +351,6 @@ class AgentLoop:
             self.tools.register(UpdateCalendarEventTool(self.workspace))
             self.tools.register(DeleteCalendarEventTool(self.workspace))
             self.tools.register(ListCalendarsTool(self.workspace))
-            self.tools.register(GetDailyOverviewTool(self.workspace))
         if _authed("school"):
             self.tools.register(GetCoursesTool(self.workspace))
             self.tools.register(GetCourseAssignmentsTool(self.workspace))
