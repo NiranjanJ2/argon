@@ -49,7 +49,7 @@ def set_workspace(workspace: Path) -> None:
 
 def _get_workspace() -> Path:
     if _workspace is None:
-        return Path.home() / ".nanobot" / "workspace"
+        return Path(".")
     return _workspace
 
 

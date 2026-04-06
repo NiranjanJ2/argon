@@ -2,7 +2,7 @@
 from pathlib import Path
 from nanobot.google.auth import GoogleAuth
 
-auth = GoogleAuth(Path.home() / ".nanobot/workspace")
+auth = GoogleAuth(Path("."))
 for account in ("school", "work", "personal"):
     try:
         creds = auth.get_credentials(account)
