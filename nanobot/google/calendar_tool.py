@@ -1,157 +1,19 @@
-"""Google Calendar tool — read/write on the 'work' account."""
+"""Google Calendar tools — individual focused tools for the work account."""
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from nanobot.google.base import GoogleAPITool, build_google_service
 
+_TZ = ZoneInfo("America/Los_Angeles")
 
-class CalendarTool(GoogleAPITool):
-    """Interact with Google Calendar (work account)."""
 
-    @property
-    def name(self) -> str:
-        return "google_calendar"
-
-    @property
-    def description(self) -> str:
-        return (
-            "Read and write Google Calendar events on the work account. "
-            "Actions: list_events, get_event, create_event, update_event, delete_event, list_calendars, free_busy."
-        )
-
-    @property
-    def read_only(self) -> bool:
-        return False
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": [
-                        "list_events", "get_event", "create_event",
-                        "update_event", "delete_event", "list_calendars", "free_busy",
-                    ],
-                    "description": "Operation to perform.",
-                },
-                "calendar_id": {
-                    "type": "string",
-                    "description": "Calendar ID. Defaults to 'primary'.",
-                },
-                "event_id": {
-                    "type": "string",
-                    "description": "Event ID (required for get/update/delete).",
-                },
-                "time_min": {
-                    "type": "string",
-                    "description": "ISO 8601 datetime lower bound for list_events / free_busy.",
-                },
-                "time_max": {
-                    "type": "string",
-                    "description": "ISO 8601 datetime upper bound for list_events / free_busy.",
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Max events to return (default 20).",
-                },
-                "event_body": {
-                    "type": "object",
-                    "description": (
-                        "Event resource for create/update. "
-                        "Fields: summary, description, start (dateTime/date), end (dateTime/date), "
-                        "location, attendees ([{email}]), recurrence ([RRULE:...])."
-                    ),
-                },
-            },
-            "required": ["action"],
-        }
-
-    def _run(self, kwargs: dict[str, Any]) -> str:
-        action = kwargs["action"]
-        cal_id = kwargs.get("calendar_id", "primary")
-        svc = build_google_service(self._workspace, "calendar", "v3", "work")
-
-        if action == "list_calendars":
-            result = svc.calendarList().list().execute()
-            items = [
-                {"id": c["id"], "summary": c.get("summary", ""), "primary": c.get("primary", False)}
-                for c in result.get("items", [])
-            ]
-            return json.dumps(items, indent=2)
-
-        if action == "list_events":
-            params: dict[str, Any] = {
-                "calendarId": cal_id,
-                "maxResults": kwargs.get("max_results", 20),
-                "singleEvents": True,
-                "orderBy": "startTime",
-            }
-            if kwargs.get("time_min"):
-                params["timeMin"] = kwargs["time_min"]
-            if kwargs.get("time_max"):
-                params["timeMax"] = kwargs["time_max"]
-            result = svc.events().list(**params).execute()
-            events = [_fmt_event(e) for e in result.get("items", [])]
-            return json.dumps(events, indent=2)
-
-        if action == "get_event":
-            event_id = kwargs.get("event_id")
-            if not event_id:
-                return "Error: event_id required for get_event."
-            event = svc.events().get(calendarId=cal_id, eventId=event_id).execute()
-            return json.dumps(_fmt_event(event), indent=2)
-
-        if action == "create_event":
-            body = kwargs.get("event_body")
-            if isinstance(body, str):
-                try:
-                    body = json.loads(body)
-                except Exception:
-                    return "Error: event_body must be a JSON object, not a string."
-            if not body:
-                return "Error: event_body required for create_event."
-            event = svc.events().insert(calendarId=cal_id, body=body).execute()
-            return f"Created event: {event.get('id')} — {event.get('summary', '')}"
-
-        if action == "update_event":
-            event_id = kwargs.get("event_id")
-            body = kwargs.get("event_body")
-            if isinstance(body, str):
-                try:
-                    body = json.loads(body)
-                except Exception:
-                    return "Error: event_body must be a JSON object, not a string."
-            if not event_id or not body:
-                return "Error: event_id and event_body required for update_event."
-            event = svc.events().patch(calendarId=cal_id, eventId=event_id, body=body).execute()
-            return f"Updated event: {event.get('id')} — {event.get('summary', '')}"
-
-        if action == "delete_event":
-            event_id = kwargs.get("event_id")
-            if not event_id:
-                return "Error: event_id required for delete_event."
-            svc.events().delete(calendarId=cal_id, eventId=event_id).execute()
-            return f"Deleted event {event_id}."
-
-        if action == "free_busy":
-            time_min = kwargs.get("time_min")
-            time_max = kwargs.get("time_max")
-            if not time_min or not time_max:
-                return "Error: time_min and time_max required for free_busy."
-            body = {
-                "timeMin": time_min,
-                "timeMax": time_max,
-                "items": [{"id": cal_id}],
-            }
-            result = svc.freebusy().query(body=body).execute()
-            return json.dumps(result.get("calendars", {}), indent=2)
-
-        return f"Error: Unknown action '{action}'."
+def _now() -> datetime:
+    return datetime.now(_TZ)
 
 
 def _fmt_event(e: dict) -> dict:
@@ -165,5 +27,226 @@ def _fmt_event(e: dict) -> dict:
         "status": e.get("status"),
         "attendees": [a.get("email") for a in e.get("attendees", [])],
         "htmlLink": e.get("htmlLink"),
-        "recurrence": e.get("recurrence"),
     }
+
+
+def _svc(workspace):
+    return build_google_service(workspace, "calendar", "v3", "work")
+
+
+class GetTodayEventsTool(GoogleAPITool):
+    """Get today's calendar events."""
+
+    @property
+    def name(self) -> str:
+        return "get_today_events"
+
+    @property
+    def description(self) -> str:
+        return "Get all Google Calendar events for today (work account, primary calendar)."
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {}, "required": []}
+
+    def _run(self, kwargs: dict[str, Any]) -> str:
+        now = _now()
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        items = _svc(self._workspace).events().list(
+            calendarId="primary",
+            timeMin=start.isoformat(),
+            timeMax=end.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=20,
+        ).execute().get("items", [])
+        return json.dumps([_fmt_event(e) for e in items], indent=2)
+
+
+class ListCalendarEventsTool(GoogleAPITool):
+    """List calendar events over a date range."""
+
+    @property
+    def name(self) -> str:
+        return "list_calendar_events"
+
+    @property
+    def description(self) -> str:
+        return "List Google Calendar events between two ISO 8601 datetimes."
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "time_min": {"type": "string", "description": "ISO 8601 start datetime."},
+                "time_max": {"type": "string", "description": "ISO 8601 end datetime."},
+                "calendar_id": {"type": "string", "description": "Calendar ID (default: primary)."},
+                "max_results": {"type": "integer", "description": "Max events to return (default 20)."},
+            },
+            "required": ["time_min", "time_max"],
+        }
+
+    def _run(self, kwargs: dict[str, Any]) -> str:
+        items = _svc(self._workspace).events().list(
+            calendarId=kwargs.get("calendar_id", "primary"),
+            timeMin=kwargs["time_min"],
+            timeMax=kwargs["time_max"],
+            maxResults=kwargs.get("max_results", 20),
+            singleEvents=True,
+            orderBy="startTime",
+        ).execute().get("items", [])
+        return json.dumps([_fmt_event(e) for e in items], indent=2)
+
+
+class CreateCalendarEventTool(GoogleAPITool):
+    """Create a calendar event."""
+
+    @property
+    def name(self) -> str:
+        return "create_calendar_event"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Create a Google Calendar event. "
+            "event_body fields: summary, description, start (dateTime or date), "
+            "end (dateTime or date), location, attendees ([{email}])."
+        )
+
+    @property
+    def read_only(self) -> bool:
+        return False
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "event_body": {
+                    "type": "object",
+                    "description": "Event resource with summary, start, end, etc.",
+                },
+                "calendar_id": {"type": "string", "description": "Calendar ID (default: primary)."},
+            },
+            "required": ["event_body"],
+        }
+
+    def _run(self, kwargs: dict[str, Any]) -> str:
+        body = kwargs["event_body"]
+        if isinstance(body, str):
+            body = json.loads(body)
+        event = _svc(self._workspace).events().insert(
+            calendarId=kwargs.get("calendar_id", "primary"), body=body,
+        ).execute()
+        return f"Created: {event.get('id')} — {event.get('summary', '')}"
+
+
+class UpdateCalendarEventTool(GoogleAPITool):
+    """Update a calendar event."""
+
+    @property
+    def name(self) -> str:
+        return "update_calendar_event"
+
+    @property
+    def description(self) -> str:
+        return "Update an existing Google Calendar event by ID."
+
+    @property
+    def read_only(self) -> bool:
+        return False
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+                "event_body": {"type": "object", "description": "Fields to update."},
+                "calendar_id": {"type": "string", "description": "Calendar ID (default: primary)."},
+            },
+            "required": ["event_id", "event_body"],
+        }
+
+    def _run(self, kwargs: dict[str, Any]) -> str:
+        body = kwargs["event_body"]
+        if isinstance(body, str):
+            body = json.loads(body)
+        event = _svc(self._workspace).events().patch(
+            calendarId=kwargs.get("calendar_id", "primary"),
+            eventId=kwargs["event_id"],
+            body=body,
+        ).execute()
+        return f"Updated: {event.get('id')} — {event.get('summary', '')}"
+
+
+class DeleteCalendarEventTool(GoogleAPITool):
+    """Delete a calendar event."""
+
+    @property
+    def name(self) -> str:
+        return "delete_calendar_event"
+
+    @property
+    def description(self) -> str:
+        return "Delete a Google Calendar event by ID."
+
+    @property
+    def read_only(self) -> bool:
+        return False
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+                "calendar_id": {"type": "string", "description": "Calendar ID (default: primary)."},
+            },
+            "required": ["event_id"],
+        }
+
+    def _run(self, kwargs: dict[str, Any]) -> str:
+        _svc(self._workspace).events().delete(
+            calendarId=kwargs.get("calendar_id", "primary"),
+            eventId=kwargs["event_id"],
+        ).execute()
+        return f"Deleted event {kwargs['event_id']}."
+
+
+class ListCalendarsTool(GoogleAPITool):
+    """List all calendars on the work account."""
+
+    @property
+    def name(self) -> str:
+        return "list_calendars"
+
+    @property
+    def description(self) -> str:
+        return "List all Google Calendars on the work account."
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {}, "required": []}
+
+    def _run(self, kwargs: dict[str, Any]) -> str:
+        items = _svc(self._workspace).calendarList().list().execute().get("items", [])
+        result = [
+            {"id": c["id"], "summary": c.get("summary", ""), "primary": c.get("primary", False)}
+            for c in items
+        ]
+        return json.dumps(result, indent=2)

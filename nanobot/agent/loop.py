@@ -327,7 +327,11 @@ class AgentLoop:
     def _register_google_tools(self) -> None:
         """Register Google API tools (only those whose accounts are authenticated)."""
         from nanobot.google.auth import GoogleAuth
-        from nanobot.google.calendar_tool import CalendarTool
+        from nanobot.google.calendar_tool import (
+            GetTodayEventsTool, ListCalendarEventsTool, CreateCalendarEventTool,
+            UpdateCalendarEventTool, DeleteCalendarEventTool, ListCalendarsTool,
+        )
+        from nanobot.tools.daily_overview import GetDailyOverviewTool
         from nanobot.google.classroom_tool import (
             GetCoursesTool, GetCourseAssignmentsTool, GetAllAssignmentsTool,
             GetAssignmentInfoTool, GetCourseStreamTool,
@@ -345,7 +349,13 @@ class AgentLoop:
                 return False
 
         if _authed("work"):
-            self.tools.register(CalendarTool(self.workspace))
+            self.tools.register(GetTodayEventsTool(self.workspace))
+            self.tools.register(ListCalendarEventsTool(self.workspace))
+            self.tools.register(CreateCalendarEventTool(self.workspace))
+            self.tools.register(UpdateCalendarEventTool(self.workspace))
+            self.tools.register(DeleteCalendarEventTool(self.workspace))
+            self.tools.register(ListCalendarsTool(self.workspace))
+            self.tools.register(GetDailyOverviewTool(self.workspace))
         if _authed("school"):
             self.tools.register(GetCoursesTool(self.workspace))
             self.tools.register(GetCourseAssignmentsTool(self.workspace))
