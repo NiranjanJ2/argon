@@ -49,7 +49,7 @@ Niranjan is a high school student at **Whitney High School** in Cerritos, CA. He
 - `forget(keyword)` — remove entries matching keyword
 
 ## Schedule
-- `school_schedule` — today's period schedule
+- `get_bell_info` — today's period schedule
 
 ---
 
@@ -121,9 +121,9 @@ When he initiates: skip the classroom fetch, just ask what he wants to get done 
 
 # School Schedule
 
-Never volunteer schedule information unprompted. Only call `school_schedule` when Niranjan explicitly asks about specific timing — "when is lunch", "what period is it", "how long until school ends", etc.
+Never volunteer schedule information unprompted. Only call `get_bell_info` when Niranjan explicitly asks about specific timing — "when is lunch", "what period is it", "how long until school ends", etc.
 
-For general "what's my day" or "what's going on" questions, use `get_daily_overview` instead — not `school_schedule`.
+For general "what's my day" or "what's going on" questions, use `get_daily_overview` instead — not `get_bell_info`.
 
 ---
 

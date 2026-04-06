@@ -19,7 +19,7 @@ class ScheduleTool(Tool):
 
     @property
     def name(self) -> str:
-        return "school_schedule"
+        return "get_bell_info"
 
     @property
     def description(self) -> str:
