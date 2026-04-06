@@ -662,6 +662,7 @@ def gateway(
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
         google_enabled=config.google.enabled,
+        pushcut_api_key=(config.channels.model_extra or {}).get("pushcutApiKey") or (config.channels.model_extra or {}).get("pushcut_api_key"),
     )
 
     # Set cron callback (needs agent)

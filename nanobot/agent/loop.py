@@ -179,6 +179,7 @@ class AgentLoop:
         timezone: str | None = None,
         hooks: list[AgentHook] | None = None,
         google_enabled: bool = False,
+        pushcut_api_key: str | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -208,6 +209,7 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.google_enabled = google_enabled
+        self._pushcut_api_key = pushcut_api_key
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
@@ -309,6 +311,11 @@ class AgentLoop:
         # Long-term memory (daily memory = log_note + read_log above)
         self.tools.register(RememberTool(self.workspace))
         self.tools.register(ForgetTool(self.workspace))
+
+        # Phone notifications (Pushcut → iOS Shortcuts)
+        if self._pushcut_api_key:
+            from nanobot.tools.pushcut import SendPhoneNotificationTool
+            self.tools.register(SendPhoneNotificationTool(self._pushcut_api_key))
 
     def _register_google_tools(self) -> None:
         """Register Google API tools (only those whose accounts are authenticated)."""
