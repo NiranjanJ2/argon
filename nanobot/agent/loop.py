@@ -692,8 +692,8 @@ class AgentLoop:
         # Don't forward raw provider errors (e.g. tool validation failures from
         # model hallucinating bad tool names) to the user as chat messages.
         if final_content and (
-            "Tool call validation failed" in final_content
-            or "which was not in request.tools" in final_content
+            "tool call validation failed" in final_content.lower()
+            or "which was not in request.tools" in final_content.lower()
         ):
             logger.warning("Suppressing raw provider error from user output: {}", final_content[:200])
             final_content = EMPTY_FINAL_RESPONSE_MESSAGE

@@ -47,15 +47,15 @@ class SendPhoneNotificationTool(Tool):
             "properties": {
                 "notification": {
                     "type": "string",
-                    "enum": ["Lockdown", "Unlock"],
-                    "description": "Action to trigger on the phone.",
+                    "description": "Action to trigger: 'lockdown' to restrict phone, 'unlock' to unrestrict.",
                 },
             },
             "required": ["notification"],
         }
 
     async def execute(self, **kwargs: Any) -> str:
-        notification = kwargs["notification"]
+        raw = kwargs["notification"].strip().lower()
+        notification = "Unlock" if "unlock" in raw else "Lockdown"
 
         def _send() -> None:
             msg = MIMEText(notification.upper())
