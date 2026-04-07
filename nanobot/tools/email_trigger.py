@@ -54,10 +54,11 @@ class SendPhoneNotificationTool(Tool):
         subject = notification.upper()
 
         def _send() -> None:
-            msg = MIMEText("")
+            msg = MIMEText(subject)
             msg["Subject"] = subject
-            msg["From"] = self._email
+            msg["From"] = f"Argon <{self._email}>"
             msg["To"] = self._sms_gateway
+            msg["MIME-Version"] = "1.0"
             with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
                 server.login(self._email, self._password)
                 server.sendmail(self._email, self._sms_gateway, msg.as_string())
