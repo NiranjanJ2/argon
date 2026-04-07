@@ -1,21 +1,26 @@
-"""Email trigger tool — send SMS trigger via Gmail API to T-Mobile gateway."""
+"""Email trigger tool — send lockdown/unlock SMS via Gmail SMTP to T-Mobile gateway."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
+import smtplib
 from email.mime.text import MIMEText
-from pathlib import Path
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
 
+# Fixed thread anchor — all lockdown/unlock emails reply to this ID so they
+# stay in one chain instead of flooding the inbox.
+_THREAD_MESSAGE_ID = "<argon-control-thread@tmomail>"
+_SUBJECT = "Argon Control"
+
 
 class SendPhoneNotificationTool(Tool):
-    """Send a lockdown/unlock trigger SMS via Gmail API → T-Mobile email gateway."""
+    """Send a lockdown/unlock trigger SMS via Gmail SMTP → T-Mobile email gateway."""
 
-    def __init__(self, workspace: Path, phone_number: str) -> None:
-        self._workspace = workspace
+    def __init__(self, email: str, password: str, phone_number: str) -> None:
+        self._email = email
+        self._password = password
         self._sms_gateway = f"+1{phone_number}@tmomail.net"
 
     @property
@@ -51,28 +56,22 @@ class SendPhoneNotificationTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         notification = kwargs["notification"]
-        subject = notification.upper()
 
         def _send() -> None:
-            from googleapiclient.discovery import build
-            from nanobot.google.auth import GoogleAuth
-
-            auth = GoogleAuth(self._workspace)
-            creds = auth.get_credentials("trigger")
-            service = build("gmail", "v1", credentials=creds)
-
-            msg = MIMEText(subject)
-            msg["Subject"] = subject
+            msg = MIMEText(notification.upper())
+            msg["Subject"] = _SUBJECT
+            msg["From"] = self._email
             msg["To"] = self._sms_gateway
-            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-            service.users().messages().send(
-                userId="me", body={"raw": raw}
-            ).execute()
+            msg["In-Reply-To"] = _THREAD_MESSAGE_ID
+            msg["References"] = _THREAD_MESSAGE_ID
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(self._email, self._password)
+                server.sendmail(self._email, self._sms_gateway, msg.as_string())
 
         try:
             await asyncio.to_thread(_send)
-            return f"Trigger '{subject}' sent to phone."
-        except RuntimeError as e:
-            return f"Failed: {e}"
+            return f"Trigger '{notification.upper()}' sent to phone."
+        except smtplib.SMTPAuthenticationError:
+            return "Failed: Gmail authentication error."
         except Exception as e:
             return f"Failed to send trigger: {e}"
