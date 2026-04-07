@@ -1,21 +1,21 @@
-"""Email trigger tool — send control emails to Argon's own inbox to fire iOS Shortcuts."""
+"""Email trigger tool — send SMS trigger via Gmail API to T-Mobile gateway."""
 
 from __future__ import annotations
 
 import asyncio
-import smtplib
+import base64
 from email.mime.text import MIMEText
+from pathlib import Path
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
 
 
 class SendPhoneNotificationTool(Tool):
-    """Send a trigger email to agentargonai@gmail.com to fire iOS Shortcuts."""
+    """Send a lockdown/unlock trigger SMS via Gmail API → T-Mobile email gateway."""
 
-    def __init__(self, email: str, password: str, phone_number: str) -> None:
-        self._email = email
-        self._password = password
+    def __init__(self, workspace: Path, phone_number: str) -> None:
+        self._workspace = workspace
         self._sms_gateway = f"+1{phone_number}@tmomail.net"
 
     @property
@@ -54,19 +54,25 @@ class SendPhoneNotificationTool(Tool):
         subject = notification.upper()
 
         def _send() -> None:
+            from googleapiclient.discovery import build
+            from nanobot.google.auth import GoogleAuth
+
+            auth = GoogleAuth(self._workspace)
+            creds = auth.get_credentials("trigger")
+            service = build("gmail", "v1", credentials=creds)
+
             msg = MIMEText(subject)
             msg["Subject"] = subject
-            msg["From"] = f"Argon <{self._email}>"
             msg["To"] = self._sms_gateway
-            msg["MIME-Version"] = "1.0"
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(self._email, self._password)
-                server.sendmail(self._email, self._sms_gateway, msg.as_string())
+            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+            service.users().messages().send(
+                userId="me", body={"raw": raw}
+            ).execute()
 
         try:
             await asyncio.to_thread(_send)
             return f"Trigger '{subject}' sent to phone."
-        except smtplib.SMTPAuthenticationError:
-            return "Failed: Gmail authentication error. Check email/password or use an App Password."
+        except RuntimeError as e:
+            return f"Failed: {e}"
         except Exception as e:
             return f"Failed to send trigger: {e}"

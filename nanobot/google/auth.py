@@ -43,6 +43,9 @@ ACCOUNT_SCOPES: dict[str, list[str]] = {
         "https://www.googleapis.com/auth/drive.readonly",
         "https://www.googleapis.com/auth/gmail.readonly",
     ],
+    "trigger": [
+        "https://www.googleapis.com/auth/gmail.send",
+    ],
 }
 
 
