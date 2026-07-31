@@ -24,7 +24,7 @@ from argon.providers.openai_compat import OpenAICompatProvider
 from argon.providers.registry import find_by_name
 from argon.services.cron import CronJob, CronService
 from argon.services.heartbeat import HeartbeatService
-from argon.services.reminder import ReminderService
+from argon.services.reminder import ReminderService, is_silence
 from argon.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
 
 
@@ -207,7 +207,10 @@ def build_runtime(config: Config) -> Runtime:
         if isinstance(tool, MessageTool) and tool.sent_in_turn:
             return response or "(sent)"
 
-        if response and response != EMPTY_FINAL_RESPONSE_MESSAGE:
+        # Filter before delivering, not after: a model that answers the
+        # decision rather than writing a message ("No.") would otherwise be
+        # sent to Niranjan verbatim as its check-in.
+        if response and response != EMPTY_FINAL_RESPONSE_MESSAGE and not is_silence(response):
             await notify(response)
             return response
         return ""

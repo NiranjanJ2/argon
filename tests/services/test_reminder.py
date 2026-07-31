@@ -211,3 +211,55 @@ async def test_a_silent_turn_records_nothing(tmp_path, monkeypatch):
     service, _ = _service(tmp_path, monkeypatch, _at(13, 30))
     assert await service.tick() == ""
     assert service.ledger.spoken_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Silence detection
+#
+# gpt-oss-20b answered the *decision* ("No.") when the prompt asked it to
+# decide, and that string would have been delivered as the check-in.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reply", [
+    "SKIP", "skip", "Skip.", "No.", "no", "none", "Nothing to say", "",
+    "   ", '"SKIP"', "SKIP — nothing worth saying", "pass", "N/A",
+])
+def test_refusals_are_recognised_as_silence(reply):
+    assert reminder_mod.is_silence(reply) is True
+
+
+@pytest.mark.parametrize("reply", [
+    "hey, how'd the chem pset go?",
+    "you've been at it 40 minutes — worth a break?",
+    "No pressure, but that essay is due tonight.",
+])
+def test_real_messages_are_not_silence(reply):
+    assert reminder_mod.is_silence(reply) is False
+
+
+async def test_a_refusal_is_never_recorded_as_something_said(tmp_path, monkeypatch):
+    async def refuse(_prompt: str) -> str:
+        return "SKIP"
+
+    service, _ = _service(tmp_path, monkeypatch, _at(13, 30), handler=refuse)
+    assert await service.tick() == ""
+    assert service.ledger.spoken_count() == 0
+
+
+async def test_a_bare_no_is_never_recorded(tmp_path, monkeypatch):
+    async def answer_the_question(_prompt: str) -> str:
+        return "No."
+
+    service, _ = _service(tmp_path, monkeypatch, _at(13, 30), handler=answer_the_question)
+    assert await service.tick() == ""
+    assert service.ledger.spoken_count() == 0
+
+
+def test_the_prompt_asks_for_a_message_not_a_decision(tmp_path, monkeypatch):
+    service, _ = _service(tmp_path, monkeypatch, _at(13, 30))
+    prompt = service.build_prompt(service.pick_occasion())
+    assert "WRITE THE TEXT MESSAGE" in prompt
+    assert reminder_mod.SKIP_TOKEN in prompt
+    # The old phrasing is what produced "No.".
+    assert "deciding whether" not in prompt

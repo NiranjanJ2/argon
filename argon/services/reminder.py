@@ -37,6 +37,26 @@ SESSION_FLOOR_MINUTES = 25
 # For `ambient`: how long since the last word before a no-agenda text is welcome.
 AMBIENT_QUIET_MINUTES = 180
 
+#: How the model declines to say anything.
+SKIP_TOKEN = "SKIP"
+
+#: Short answers that are the model replying *about* the decision instead of
+#: writing a message. Delivering one of these would send Niranjan the word "No."
+_NON_MESSAGES = {
+    "skip", "no", "no.", "none", "nothing", "n/a", "pass", "silence",
+    "no message", "nothing to say", "stay silent", "yes", "yes.", "ok", "okay",
+}
+
+
+def is_silence(text: str) -> bool:
+    """Is this a refusal rather than a message worth sending?"""
+    stripped = (text or "").strip().strip('"').strip()
+    if not stripped:
+        return True
+    if stripped.upper().startswith(SKIP_TOKEN):
+        return True
+    return stripped.lower().rstrip(".!") in _NON_MESSAGES
+
 
 @dataclass(frozen=True)
 class Occasion:
@@ -216,7 +236,13 @@ class ReminderService:
         return None
 
     def build_prompt(self, occasion: Occasion) -> str:
-        """What the model is woken with. The bias here is toward reaching out."""
+        """What the model is woken with.
+
+        Phrasing this as "decide whether to text him" gets the decision back as
+        the answer — gpt-oss-20b replied a bare "No.", which would then have been
+        delivered to Niranjan as the check-in. So the instruction is imperative,
+        and refusal has one exact spelling the caller can filter on.
+        """
         already = self.ledger.said_today()
         history = (
             "\n".join(f"- {text}" for text in already)
@@ -224,18 +250,20 @@ class ReminderService:
             else "- nothing yet today"
         )
         return (
-            f"It's {self._now():%-I:%M %p} and {occasion.blurb}. You're deciding "
-            "whether to text Niranjan, the way a friend would — unprompted, short, "
-            "in your own voice.\n\n"
+            f"It's {self._now():%-I:%M %p} and {occasion.blurb}.\n\n"
+            "First call get_status, and list_tasks if it would tell you anything.\n\n"
             f"Already sent today:\n{history}\n\n"
-            "Call get_status first, and list_tasks if it would tell you something. "
-            "Then send him a message with the message tool if you have something "
-            "real to say: a deadline he hasn't started, a session worth "
-            "acknowledging, something he told you earlier, or just asking how a "
+            "Now WRITE THE TEXT MESSAGE you would send Niranjan — one or two "
+            "sentences, unprompted, in your own voice, the way a friend texts. "
+            "Something real: a deadline he hasn't started, a session worth "
+            "acknowledging, something he mentioned earlier, or just asking how a "
             "thing went.\n\n"
-            "Two rules: don't repeat anything above, even reworded, and no filler "
-            "— 'just checking in!' with nothing behind it is worse than silence. "
-            "If you genuinely have nothing, say nothing and end the turn."
+            "Reply with the message itself and nothing else — no preamble, no "
+            "explanation, no quotes around it.\n\n"
+            f"Don't repeat anything listed above, even reworded. If there is "
+            f"genuinely nothing worth saying, reply with exactly {SKIP_TOKEN} "
+            "and nothing else — that is better than filler like "
+            '"just checking in!".'
         )
 
     # -- lifecycle ---------------------------------------------------------
@@ -284,6 +312,9 @@ class ReminderService:
 
         said = await self.on_check_in(self.build_prompt(occasion))
         text = (said or "").strip() if isinstance(said, str) else ""
+        if is_silence(text):
+            logger.debug("Check-in ({}): nothing to say", occasion.kind)
+            return ""
         if text:
             self.ledger.record_said(occasion.kind, text, now)
             logger.info("Check-in spoke ({}): {}", occasion.kind, text[:80])
