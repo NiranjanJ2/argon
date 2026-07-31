@@ -1,0 +1,21 @@
+[Unit]
+Description=Argon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=agentneon
+WorkingDirectory=/home/agentneon/argon
+ExecStart=/home/agentneon/argon/.venv/bin/argon gateway
+Restart=always
+RestartSec=5
+Environment=HOME=/home/agentneon
+Environment=PATH=/home/agentneon/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# State lives in ~/.argon; the checkout is read-only to the service.
+ReadWritePaths=/home/agentneon/.argon
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

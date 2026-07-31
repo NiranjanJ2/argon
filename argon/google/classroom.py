@@ -3,31 +3,35 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from argon.google.service import LOCAL_TZ, GoogleAPITool
 
 
 def classroom_due(coursework: dict) -> datetime | None:
-    """Due datetime of a Classroom courseWork item, or None if it has no due date.
+    """Local due datetime of a courseWork item, or None if it has no deadline.
 
-    Classroom splits the deadline across ``dueDate`` (UTC calendar date) and an
-    optional ``dueTime``; a missing time means end of day.
+    Classroom reports ``dueDate``/``dueTime`` in **UTC**; reading them as local
+    time shifts every deadline by the UTC offset (an 11:59 PM assignment lands
+    on the following morning). With no ``dueTime`` the deadline is a date only,
+    so it becomes end of the local day.
     """
     due_date = coursework.get("dueDate")
     if not due_date:
         return None
-    due_time = coursework.get("dueTime") or {}
+    due_time = coursework.get("dueTime")
     try:
+        if due_time is None:
+            return datetime(
+                due_date["year"], due_date["month"], due_date["day"],
+                23, 59, tzinfo=LOCAL_TZ,
+            )
         return datetime(
-            due_date["year"],
-            due_date["month"],
-            due_date["day"],
-            due_time.get("hours", 23),
-            due_time.get("minutes", 59),
-            tzinfo=LOCAL_TZ,
-        )
+            due_date["year"], due_date["month"], due_date["day"],
+            due_time.get("hours", 0), due_time.get("minutes", 0),
+            tzinfo=timezone.utc,
+        ).astimezone(LOCAL_TZ)
     except (KeyError, TypeError, ValueError):
         return None
 

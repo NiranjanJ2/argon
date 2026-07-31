@@ -216,14 +216,33 @@ def _migrate(data: dict[str, Any]) -> dict[str, Any]:
     defaults.pop("workspace", None)
     defaults.pop("memoryWindow", None)
 
+    # A cron session reached 14MB because this was pinned to 0 and nothing else
+    # bounded raw history. Anyone still carrying the old 0 gets the new default.
+    if defaults.get("maxSessionMessages") == 0:
+        defaults.pop("maxSessionMessages")
+
     # Providers used to be a fixed object with ~24 mostly-empty entries.
     providers = data.get("providers")
     if isinstance(providers, dict):
-        data["providers"] = {
+        kept = {
             name: cfg
             for name, cfg in providers.items()
             if isinstance(cfg, dict) and (cfg.get("apiKey") or cfg.get("apiBase"))
         }
+        # "custom" was a catch-all for any OpenAI-compatible base URL. Name it
+        # after the endpoint it actually points at, so lookups by name work.
+        custom = kept.pop("custom", None)
+        if custom:
+            base = custom.get("apiBase") or ""
+            guess = next((n for n in KNOWN_API_BASES if n in base), "custom")
+            kept.setdefault(guess, custom)
+        data["providers"] = kept
+
+    # The old "api" section configured the OpenAI-compatible server (127.0.0.1:8900),
+    # which no longer exists. The key now means the iOS/webhook server, so the old
+    # values are not just stale — they are wrong. Drop them.
+    if isinstance(data.get("api"), dict) and "token" not in data["api"]:
+        data.pop("api")
 
     # Lockdown credentials used to hide inside the channels blob.
     channels = data.get("channels")

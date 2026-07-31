@@ -224,6 +224,7 @@ def doctor(
     """
     from argon.google.auth import ACCOUNT_SCOPES, GoogleAuth
 
+    logger.disable("argon")  # the checks below log their own failures
     cfg = _load(config)
     ok, bad = "[green]OK  [/green]", "[red]FAIL[/red]"
     warn = "[yellow]WARN[/yellow]"
@@ -248,9 +249,11 @@ def doctor(
     if cfg.google.enabled:
         auth = GoogleAuth(cfg.workspace_path)
         for account in ACCOUNT_SCOPES:
-            state = auth.status(account)
+            state, detail = auth.verify(account)
             mark = ok if state == "ok" else bad
             console.print(f"{mark} google    {account}: {state}")
+            if detail:
+                console.print(f"           [dim]{detail}[/dim]")
     else:
         console.print(f"{warn} google    disabled in config")
 
@@ -314,7 +317,10 @@ def migrate(
         if not dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)
             if src.is_dir():
-                shutil.copytree(src, dest)
+                # symlinks=True: daily/ holds a daily.md symlink to today's log,
+                # which is dangling whenever today has no entries yet. Following
+                # it aborts the whole copy.
+                shutil.copytree(src, dest, symlinks=True, dirs_exist_ok=True)
             else:
                 shutil.copy2(src, dest)
 

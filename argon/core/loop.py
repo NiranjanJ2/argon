@@ -293,45 +293,30 @@ class AgentLoop:
             self.tools.register(SendPhoneNotificationTool(self.config.lockdown))
 
     def _register_google_tools(self) -> None:
-        """Register Google API tools (only those whose accounts are authenticated)."""
+        """Register Google API tools unconditionally.
+
+        These used to be registered only if ``get_credentials`` succeeded, so an
+        expired token made calendar and classroom silently cease to exist —
+        Argon answered as though it had never had those features. They went dead
+        in April and nobody noticed until July. Now the tools always exist and an
+        unauthenticated one explains itself and names the fix.
+        """
         from argon.google.auth import GoogleAuth
-        from argon.google.calendar import (
-            GetTodayEventsTool, ListCalendarEventsTool, CreateCalendarEventTool,
-            UpdateCalendarEventTool, DeleteCalendarEventTool, ListCalendarsTool,
-        )
-        from argon.google.classroom import (
-            GetCoursesTool, GetCourseAssignmentsTool, GetAllAssignmentsTool,
-            GetAssignmentInfoTool, GetCourseStreamTool,
-        )
-        from argon.google.drive import DriveTool
-        from argon.google.gmail import GmailTool
+        from argon.google.service import google_tools
 
-        auth = GoogleAuth(self.workspace)
+        for tool in google_tools(self.workspace):
+            self.tools.register(tool)
 
-        def _authed(account: str) -> bool:
-            try:
-                auth.get_credentials(account)
-                return True
-            except Exception:
-                return False
-
-        if _authed("work"):
-            self.tools.register(GetTodayEventsTool(self.workspace))
-            self.tools.register(ListCalendarEventsTool(self.workspace))
-            self.tools.register(CreateCalendarEventTool(self.workspace))
-            self.tools.register(UpdateCalendarEventTool(self.workspace))
-            self.tools.register(DeleteCalendarEventTool(self.workspace))
-            self.tools.register(ListCalendarsTool(self.workspace))
-        if _authed("school"):
-            self.tools.register(GetCoursesTool(self.workspace))
-            self.tools.register(GetCourseAssignmentsTool(self.workspace))
-            self.tools.register(GetAllAssignmentsTool(self.workspace))
-            self.tools.register(GetAssignmentInfoTool(self.workspace))
-            self.tools.register(GetCourseStreamTool(self.workspace))
-        if any(_authed(a) for a in ("personal", "work", "school")):
-            self.tools.register(DriveTool(self.workspace))
-        if _authed("work") or _authed("school"):
-            self.tools.register(GmailTool(self.workspace))
+        stale = {
+            account: state
+            for account, state in GoogleAuth(self.workspace).status().items()
+            if state != "ok"
+        }
+        if stale:
+            logger.warning(
+                "Google accounts needing re-auth: {}",
+                ", ".join(f"{a} ({s})" for a, s in sorted(stale.items())),
+            )
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""

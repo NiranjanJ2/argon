@@ -131,7 +131,7 @@ class GoogleAuth:
             creds = Credentials.from_authorized_user_file(
                 str(token_path), ACCOUNT_SCOPES[account]
             )
-        except (ValueError, OSError, json.JSONDecodeError) as exc:
+        except (ValueError, OSError) as exc:  # ValueError covers malformed JSON
             raise GoogleAuthExpired(account, f"token file unreadable: {exc}") from exc
 
         if creds.valid:
@@ -257,6 +257,27 @@ class GoogleAuth:
                 f"run `argon google-auth {account}`"
             )
         return str(GoogleAuthExpired(account, self.last_error(account) or ""))
+
+    def verify(self, account: str) -> tuple[str, str | None]:
+        """Actually exercise the grant. Returns ``(state, detail)``.
+
+        ``account_status`` only inspects the token file, so a revoked grant
+        still reads as ``ok`` until something tries to use it — which is how
+        four dead accounts went unnoticed for three months. ``doctor`` calls
+        this instead; it costs one network round-trip per account.
+        """
+        state = self.account_status(account)
+        if state != "ok":
+            return state, self.status_message(account)
+        try:
+            self.get_credentials(account)
+        except GoogleAuthExpired as e:
+            return "expired", str(e)
+        except GoogleAuthUnavailable as e:
+            return "unreachable", str(e)
+        except Exception as e:  # noqa: BLE001 — doctor must never crash
+            return "error", str(e)
+        return "ok", None
 
     def last_error(self, account: str) -> str | None:
         """The recorded reason an account went bad, if any."""
