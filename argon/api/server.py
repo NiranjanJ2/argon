@@ -202,10 +202,50 @@ def status() -> Any:
     from argon.productivity.state import DailyState
     from argon.tools.status import GetStatusTool
 
+    from argon.ios import mode as ios_mode
+
     ws = _rt.config.workspace_path if _rt.config else argon_home()
     data = json.loads(asyncio.run(GetStatusTool(DailyState(ws), ws).execute()))
     data["lockdown"] = _read_lockdown()
+    # The app decodes `ios.desired` and `ios.actual` into non-optional structs,
+    # so both must always be complete objects — see argon/ios/mode.py.
+    data["ios"] = ios_mode.snapshot()
     return jsonify(data)
+
+
+@app.get("/v1/ios/mode")
+@require_token
+def ios_mode_get() -> Any:
+    """Desired focus state on its own, for a client that doesn't need the rest."""
+    from argon.ios import mode as ios_mode
+
+    return jsonify(ios_mode.get_mode())
+
+
+@app.post("/v1/ios/state")
+@require_token
+def ios_state() -> Any:
+    """Record what the phone actually applied. Also its liveness heartbeat."""
+    from argon.ios import mode as ios_mode
+
+    body = _body()
+    if not body:
+        return jsonify({"error": "json object required"}), 400
+    return jsonify({"ok": True, **ios_mode.record_actual(body)})
+
+
+@app.post("/v1/ios/register")
+@require_token
+def ios_register() -> Any:
+    """Store the APNs device token."""
+    from argon.ios import mode as ios_mode
+
+    body = _body()
+    if not str(body.get("device_token") or "").strip():
+        return jsonify({"error": "device_token required"}), 400
+    device = ios_mode.record_device(body)
+    logger.info("iOS device registered ({} build)", device["environment"])
+    return jsonify({"ok": True, "environment": device["environment"]})
 
 
 @app.post("/v1/screentime")

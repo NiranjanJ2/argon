@@ -26,6 +26,9 @@ Compared with `hmac.compare_digest`. An empty `api.token` fails closed — every
 | `GET` | `/v1/screentime?date=` | — | `{"date", "count", "records"}` |
 | `POST` | `/v1/lockdown` | `{"state": "lock"\|"unlock", "trigger": bool}` | `{"ok","state","since","source","triggered"}` |
 | `POST` | `/v1/webhook/<name>` | `{"message": "..."}` | runs a turn and also delivers the reply to Discord |
+| `GET` | `/v1/ios/mode` | — | the desired focus mode alone |
+| `POST` | `/v1/ios/state` | `{"mode","version","shielded","applied_at","battery"}` | records what the phone applied |
+| `POST` | `/v1/ios/register` | `{"device_token","environment","app_version"}` | stores the APNs token |
 
 Errors are always JSON: `401` bad/missing token, `400` bad body, `413` oversize,
 `502` agent failure, `503` not ready, `504` turn timed out (120 s cap on chat).
@@ -44,11 +47,45 @@ never disagree:
   "lock_in_minutes": null,
   "school_period": {"status":"in_period","period":"Period 4",
                     "ends_at":"12:49","minutes_remaining":12},
-  "lockdown": {"state":"lock","since":"...","source":"ios"}
+  "lockdown": {"state":"lock","since":"...","source":"ios"},
+  "ios": {
+    "desired": {"mode":"lock_in","version":41,"since":"2026-07-31T19:04:11-07:00",
+                "expires_at":"2026-07-31T21:00:00-07:00","allow_early_end":false,
+                "reason":"Chem pset due 11pm and you haven't started"},
+    "actual":  {"mode":"lock_in","version":41,"shielded":true,
+                "last_seen":"2026-07-31T19:04:31-07:00"}
+  }
 }
 ```
 
 `mode` is one of `idle | working | napping | lock_in | done`.
+
+## Screen Time (`ios`)
+
+Argon publishes a **desired** mode; the app reconciles toward it and reports
+back. `version` is the whole protocol — the phone stores the last version it
+applied and ignores what it has already seen, so a dropped push or an hour
+offline converges instead of replaying a stale command. `argon/ios/mode.py` is
+the store; `set_focus_mode` is the model's tool over it.
+
+Two shape rules, both load-bearing for the app:
+
+- **Every field is always present.** The app's Swift structs are non-optional
+  apart from `since` and `expires_at`. One missing key fails the whole
+  `/v1/status` decode and the app quietly shows "Offline".
+- **Timestamps carry no fractional seconds.** `ISO8601DateFormatter` parses zero
+  or exactly three fractional digits; Python's `isoformat()` emits six. A
+  six-digit `expires_at` decodes to nil, the app treats a timed lock as
+  open-ended, and the shield never releases itself.
+
+An elapsed window collapses to `off` (with a version bump) on read, so the
+server never advertises a lock the phone already dropped. Modes are
+`off | school | homework | lock_in | sleep`; the phone maps the name to a local
+Screen Time profile, so the server never sees a profile UUID.
+
+APNs push is **not** wired — `/v1/ios/register` stores the token for later. The
+app reconciles on launch, foreground, and a 20-second timer while open, so a
+lock lands when the app is next opened rather than instantly.
 
 ## Screen Time
 

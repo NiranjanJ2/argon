@@ -194,15 +194,34 @@ def build_runtime(config: Config) -> Runtime:
         timezone=config.agents.defaults.timezone,
     )
 
-    async def on_check_in(prompt: str) -> None:
+    async def on_check_in(prompt: str) -> str:
+        """Run a check-in turn. Returns what actually reached Niranjan."""
+        from argon.tools.message import MessageTool
+
         response = await run_background_turn(prompt)
+
+        # A check-in tells the model to use the message tool, so the usual case
+        # is that delivery already happened. Notifying again would send it twice
+        # — on_cron_job guards this; this path did not.
+        tool = heartbeat_agent.tools.get("message")
+        if isinstance(tool, MessageTool) and tool.sent_in_turn:
+            return response or "(sent)"
+
         if response and response != EMPTY_FINAL_RESPONSE_MESSAGE:
             await notify(response)
+            return response
+        return ""
 
+    checkin_cfg = config.gateway.checkins
     reminder = ReminderService(
         workspace=config.workspace_path,
         timezone=config.agents.defaults.timezone,
         on_check_in=on_check_in,
+        enabled=checkin_cfg.enabled,
+        max_per_day=checkin_cfg.max_per_day,
+        min_gap_minutes=checkin_cfg.min_gap_minutes,
+        quiet_start_hour=checkin_cfg.quiet_start_hour,
+        quiet_end_hour=checkin_cfg.quiet_end_hour,
     )
 
     return Runtime(

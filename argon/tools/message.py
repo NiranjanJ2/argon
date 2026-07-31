@@ -42,6 +42,11 @@ class MessageTool(Tool):
         self._sent_in_turn = False
 
     @property
+    def sent_in_turn(self) -> bool:
+        """Did the model already deliver this turn? Guards double-sends."""
+        return self._sent_in_turn
+
+    @property
     def name(self) -> str:
         return "message"
 

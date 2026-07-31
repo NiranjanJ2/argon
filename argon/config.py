@@ -86,6 +86,12 @@ class LockdownConfig(Base):
         return bool(self.email and self.password and self.phone)
 
 
+class IosConfig(Base):
+    """iOS app. APNs push is not wired yet — the app polls while foregrounded."""
+
+    default_lock_minutes: int = 60
+
+
 class ApiConfig(Base):
     """Local HTTP surface: WhatsApp bridge webhook + the iOS app."""
 
@@ -103,8 +109,19 @@ class HeartbeatConfig(Base):
     provider: str | None = None
 
 
+class CheckInConfig(Base):
+    """Unprompted messages — how often Argon may start a conversation."""
+
+    enabled: bool = True
+    max_per_day: int = 8
+    min_gap_minutes: int = 25
+    quiet_start_hour: int = 23
+    quiet_end_hour: int = 7
+
+
 class GatewayConfig(Base):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+    checkins: CheckInConfig = Field(default_factory=CheckInConfig)
 
 
 class GoogleConfig(Base):
@@ -156,6 +173,7 @@ class Config(BaseSettings):
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     lockdown: LockdownConfig = Field(default_factory=LockdownConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
+    ios: IosConfig = Field(default_factory=IosConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     google: GoogleConfig = Field(default_factory=GoogleConfig)

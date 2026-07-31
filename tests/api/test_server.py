@@ -23,6 +23,9 @@ V1_ROUTES = [
     ("post", "/v1/screentime"),
     ("get", "/v1/screentime"),
     ("post", "/v1/lockdown"),
+    ("get", "/v1/ios/mode"),
+    ("post", "/v1/ios/state"),
+    ("post", "/v1/ios/register"),
 ]
 
 
@@ -364,3 +367,94 @@ def test_lockdown_trigger_fires_the_tool(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.get_json()["triggered"] is True
     assert sent == ["lockdown"]
+
+
+# ---------------------------------------------------------------------------
+# iOS app contract
+#
+# The app's Swift structs are non-optional for everything but `since` and
+# `expires_at`. A missing key fails the whole /v1/status decode and the app
+# silently reports "Offline", so these assert the shape, not just the values.
+# ---------------------------------------------------------------------------
+
+DESIRED_KEYS = {"mode", "version", "since", "expires_at", "allow_early_end", "reason"}
+ACTUAL_KEYS = {"mode", "version", "shielded", "last_seen"}
+
+
+def test_status_carries_the_ios_block_on_a_fresh_install(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    body = client.get("/v1/status", headers=AUTH).get_json()
+
+    assert DESIRED_KEYS <= body["ios"]["desired"].keys()
+    assert ACTUAL_KEYS <= body["ios"]["actual"].keys()
+    # Non-optional on the Swift side — nulls here break the decode.
+    assert body["ios"]["desired"]["reason"] == ""
+    assert body["ios"]["desired"]["allow_early_end"] is True
+    assert body["ios"]["actual"]["shielded"] is False
+
+
+def test_status_still_carries_the_keys_the_app_reads(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    body = client.get("/v1/status", headers=AUTH).get_json()
+    assert {"mode", "current_task", "work_session_minutes", "lock_in_minutes"} <= body.keys()
+
+
+def test_a_published_mode_reaches_status(tmp_path, monkeypatch):
+    from argon.ios import mode as ios_mode
+
+    client = _client(tmp_path, monkeypatch)
+    ios_mode.set_mode("lock_in", duration_min=60, allow_early_end=False, reason="pset")
+
+    desired = client.get("/v1/status", headers=AUTH).get_json()["ios"]["desired"]
+    assert desired["mode"] == "lock_in"
+    assert desired["allow_early_end"] is False
+    assert desired["reason"] == "pset"
+    # Swift parses 0 or 3 fractional digits; Python's default 6 decodes to nil
+    # and the phone would never release the shield on its own.
+    assert "." not in desired["expires_at"]
+
+
+def test_ios_mode_endpoint_matches_the_status_block(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    standalone = client.get("/v1/ios/mode", headers=AUTH).get_json()
+    embedded = client.get("/v1/status", headers=AUTH).get_json()["ios"]["desired"]
+    assert standalone == embedded
+
+
+def test_the_phone_can_report_what_it_applied(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    response = client.post(
+        "/v1/ios/state",
+        headers=AUTH,
+        json={"mode": "lock_in", "version": 3, "shielded": True,
+              "applied_at": "2026-07-31T10:00:00-07:00", "battery": 0.62},
+    )
+    assert response.status_code == 200
+
+    actual = client.get("/v1/status", headers=AUTH).get_json()["ios"]["actual"]
+    assert actual["mode"] == "lock_in"
+    assert actual["shielded"] is True
+    assert actual["last_seen"] is not None
+
+
+def test_an_empty_state_report_is_rejected(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    assert client.post("/v1/ios/state", headers=AUTH, json={}).status_code == 400
+
+
+def test_device_registration_stores_the_token(tmp_path, monkeypatch):
+    from argon.ios import mode as ios_mode
+
+    client = _client(tmp_path, monkeypatch)
+    response = client.post(
+        "/v1/ios/register",
+        headers=AUTH,
+        json={"device_token": "deadbeef", "environment": "sandbox", "app_version": "1.0"},
+    )
+    assert response.status_code == 200
+    assert ios_mode._read("device.json", {})["device_token"] == "deadbeef"
+
+
+def test_registration_without_a_token_is_rejected(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    assert client.post("/v1/ios/register", headers=AUTH, json={}).status_code == 400

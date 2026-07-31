@@ -292,6 +292,12 @@ class AgentLoop:
             from argon.tools.lockdown import SendPhoneNotificationTool
             self.tools.register(SendPhoneNotificationTool(self.config.lockdown))
 
+        # Screen Time via the iOS app. Registered unconditionally: the tool
+        # reports when the phone has never checked in, which is more useful to
+        # the model than the tool silently not existing.
+        from argon.tools.focus import SetFocusModeTool
+        self.tools.register(SetFocusModeTool(self.config.ios.default_lock_minutes))
+
     def _register_google_tools(self) -> None:
         """Register Google API tools unconditionally.
 

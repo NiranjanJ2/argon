@@ -14,3 +14,4 @@ config.json
 whatsapp_bridge/node_modules/
 whatsapp_bridge/wwebjs_auth/
 whatsapp_bridge/.wwebjs_cache/
+.venv-local/
