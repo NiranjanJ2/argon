@@ -95,19 +95,25 @@ class ListCalendarEventsTool(CalendarTool):
         return {
             "type": "object",
             "properties": {
-                "time_min": {"type": "string", "description": "ISO 8601 start datetime."},
-                "time_max": {"type": "string", "description": "ISO 8601 end datetime."},
+                "time_min": {"type": "string", "description": "ISO 8601 start datetime (default: now)."},
+                "time_max": {"type": "string", "description": "ISO 8601 end datetime (default: 7 days out)."},
                 "calendar_id": {"type": "string", "description": "Calendar ID (default: primary)."},
                 "max_results": {"type": "integer", "description": "Max events (default 20)."},
             },
-            "required": ["time_min", "time_max"],
+            "required": [],
         }
 
     def _run(self, kwargs: dict[str, Any]) -> str:
+        # Default the window rather than requiring it: a small model that omits
+        # an argument should get the next week, not a KeyError up the agent loop.
+        time_min = kwargs.get("time_min") or _now().isoformat()
+        time_max = kwargs.get("time_max") or (
+            datetime.fromisoformat(time_min) + timedelta(days=7)
+        ).isoformat()
         items = self._svc().events().list(
             calendarId=self._calendar_id(kwargs),
-            timeMin=kwargs["time_min"],
-            timeMax=kwargs["time_max"],
+            timeMin=time_min,
+            timeMax=time_max,
             maxResults=kwargs.get("max_results", 20),
             singleEvents=True,
             orderBy="startTime",

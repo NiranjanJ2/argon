@@ -12,6 +12,7 @@ from typing import Callable
 
 from loguru import logger
 
+from argon import clock
 from argon.channels.manager import ChannelManager
 from argon.config import Config
 from argon.core.bus import MessageBus, OutboundMessage
@@ -65,6 +66,7 @@ class Runtime:
 
 
 def build_runtime(config: Config) -> Runtime:
+    clock.configure(config.agents.defaults.timezone)
     bus = MessageBus()
     sessions = SessionManager(config.workspace_path)
     provider = build_provider(config)

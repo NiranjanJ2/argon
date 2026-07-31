@@ -123,6 +123,12 @@ class GoogleAPITool(Tool):
     def _guarded_run(self, kwargs: dict[str, Any]) -> str:
         try:
             return self._run(kwargs)
+        except KeyError as exc:
+            # A small model dropping a required argument is routine. Tell it what
+            # is missing so it can retry, instead of raising into the agent loop.
+            missing = exc.args[0] if exc.args else "an argument"
+            logger.warning(f"{self.name}: missing argument {missing!r}")
+            return f"Error: {self.name} requires the '{missing}' argument."
         except Exception as exc:
             message = google_error_message(exc, kwargs.get("account") or self.account)
             if message is None:

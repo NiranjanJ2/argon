@@ -72,11 +72,19 @@ class Session:
         if len(self.messages) <= max_messages:
             return
 
-        start_idx = max(0, len(self.messages) - max_messages)
+        cutoff = max(0, len(self.messages) - max_messages)
 
-        # If the cutoff lands mid-turn, extend backward to the nearest user turn.
-        while start_idx > 0 and self.messages[start_idx].get("role") != "user":
-            start_idx -= 1
+        # Prefer starting on a user turn so we don't cut a turn in half — but
+        # never walk back past `floor`. An autonomous cron session is pure
+        # assistant/tool pairs with no user message to find, so an unbounded
+        # backward walk reaches 0 and retains everything; that is how one
+        # session reached 14MB despite this cap. Worst case is now 2x the cap.
+        floor = max(0, len(self.messages) - 2 * max_messages)
+        start_idx = next(
+            (i for i in range(cutoff, floor - 1, -1)
+             if self.messages[i].get("role") == "user"),
+            cutoff,
+        )
 
         retained = self.messages[start_idx:]
 

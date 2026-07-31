@@ -10,24 +10,13 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
-from zoneinfo import ZoneInfo
 
-_TZ = ZoneInfo("America/Los_Angeles")
+from argon.clock import now as _now
+from argon.clock import today_key as _today_key
 
 Mode = Literal["idle", "working", "napping", "lock_in", "done"]
 
 
-def _now() -> datetime:
-    return datetime.now(_TZ)
-
-
-def _today_key() -> str:
-    """Returns date string, but treats midnight–4am as previous day."""
-    now = _now()
-    if now.hour < 4:
-        from datetime import timedelta
-        now = now - timedelta(days=1)
-    return now.strftime("%Y-%m-%d")
 
 
 class DailyState:

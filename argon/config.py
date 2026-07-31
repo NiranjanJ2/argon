@@ -11,7 +11,6 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
-import pydantic
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
@@ -209,9 +208,24 @@ def config_path() -> Path:
     return _config_path_override or get_config_path()
 
 
+def _section(data: dict[str, Any], *keys: str) -> dict[str, Any]:
+    """Dig out a nested dict, tolerating nulls and wrong types.
+
+    ``{"agents": {"defaults": null}}`` used to raise AttributeError here, which
+    escaped load_config's except clause and crashed the gateway at startup —
+    exactly the case the "fall back to defaults" promise is for.
+    """
+    node: Any = data
+    for key in keys:
+        node = node.get(key) if isinstance(node, dict) else None
+        if not isinstance(node, dict):
+            return {}
+    return node
+
+
 def _migrate(data: dict[str, Any]) -> dict[str, Any]:
     """Upgrade a pre-rename (nanobot) config in memory. Never writes back."""
-    defaults = data.get("agents", {}).get("defaults", {})
+    defaults = _section(data, "agents", "defaults")
     # workspace is no longer configurable — state always lives in ~/.argon.
     defaults.pop("workspace", None)
     defaults.pop("memoryWindow", None)
@@ -224,17 +238,28 @@ def _migrate(data: dict[str, Any]) -> dict[str, Any]:
     # Providers used to be a fixed object with ~24 mostly-empty entries.
     providers = data.get("providers")
     if isinstance(providers, dict):
+
+        def _cred(cfg: dict[str, Any], camel: str, snake: str) -> Any:
+            return cfg.get(camel) or cfg.get(snake)
+
         kept = {
             name: cfg
             for name, cfg in providers.items()
-            if isinstance(cfg, dict) and (cfg.get("apiKey") or cfg.get("apiBase"))
+            if isinstance(cfg, dict)
+            and (_cred(cfg, "apiKey", "api_key") or _cred(cfg, "apiBase", "api_base"))
         }
         # "custom" was a catch-all for any OpenAI-compatible base URL. Name it
-        # after the endpoint it actually points at, so lookups by name work.
+        # after the endpoint it points at, so lookups by name work. Match on the
+        # known base URLs, not their keys — "nim" does not appear anywhere in
+        # https://integrate.api.nvidia.com/v1, and nim is the default provider.
         custom = kept.pop("custom", None)
         if custom:
-            base = custom.get("apiBase") or ""
-            guess = next((n for n in KNOWN_API_BASES if n in base), "custom")
+            base = (_cred(custom, "apiBase", "api_base") or "").rstrip("/")
+            guess = next(
+                (name for name, known in KNOWN_API_BASES.items()
+                 if base and base == known.rstrip("/")),
+                "custom",
+            )
             kept.setdefault(guess, custom)
         data["providers"] = kept
 
@@ -257,8 +282,8 @@ def _migrate(data: dict[str, Any]) -> dict[str, Any]:
         if any(moved.values()) and "lockdown" not in data:
             data["lockdown"] = moved
 
-    tools = data.get("tools", {})
-    exec_cfg = tools.get("exec", {})
+    tools = _section(data, "tools")
+    exec_cfg = _section(data, "tools", "exec")
     if "restrictToWorkspace" in exec_cfg and "restrictToWorkspace" not in tools:
         tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
     return data
@@ -270,7 +295,7 @@ def load_config(path: Path | None = None) -> Config:
     if target.exists():
         try:
             return Config.model_validate(_migrate(json.loads(target.read_text(encoding="utf-8"))))
-        except (json.JSONDecodeError, ValueError, pydantic.ValidationError) as e:
+        except Exception as e:  # noqa: BLE001 — a bad config must not stop the service
             logger.warning("Failed to load config from {}: {} — using defaults", target, e)
     return Config()
 

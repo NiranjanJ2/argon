@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import AsyncExitStack, asynccontextmanager
 import sys
+from contextlib import AsyncExitStack, asynccontextmanager
 from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from argon.config import MCPServerConfig
 from argon.tools.mcp import MCPToolWrapper, connect_mcp_servers
 from argon.tools.registry import ToolRegistry
-from argon.config import MCPServerConfig
 
 
 class _FakeTextContent:

@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, time
 from pathlib import Path
-from zoneinfo import ZoneInfo
+
+from argon.clock import now as _now_local
+from argon.clock import tz as _tz
 
 # ---------------------------------------------------------------------------
 # Schedule data
@@ -17,6 +19,9 @@ from zoneinfo import ZoneInfo
 
 # Each entry: (label, start HHMM, end HHMM)
 ScheduleEntry = tuple[str, int, int]
+
+# Override value meaning "no school this day" — holidays, breaks, summer.
+NO_SCHOOL = "none"
 
 SCHEDULES: dict[str, list[ScheduleEntry]] = {
     "regular": [
@@ -143,16 +148,12 @@ SCHEDULE_DISPLAY_NAMES: dict[str, str] = {
 
 
 
-_TZ = ZoneInfo("America/Los_Angeles")  # Whitney High School timezone
 
 
 def _hhmm_to_time(hhmm: int) -> time:
     h, m = divmod(hhmm, 100)
     return time(h, m)
 
-
-def _now_local() -> datetime:
-    return datetime.now(_TZ)
 
 
 class ScheduleManager:
@@ -175,9 +176,17 @@ class ScheduleManager:
         self._overrides_path.write_text(json.dumps(overrides, indent=2))
 
     def set_override(self, schedule_type: str, for_date: date | None = None) -> None:
-        """Override the schedule type for a given date (default: today)."""
-        if schedule_type not in SCHEDULES:
-            raise ValueError(f"Unknown schedule type '{schedule_type}'. Valid: {list(SCHEDULES)}")
+        """Override the schedule type for a given date (default: today).
+
+        ``NO_SCHOOL`` marks a holiday or break — without it a weekday could only
+        ever be moved to a *different* schedule, never cancelled, so Argon
+        announced Period 3 on winter break and all summer.
+        """
+        if schedule_type != NO_SCHOOL and schedule_type not in SCHEDULES:
+            raise ValueError(
+                f"Unknown schedule type '{schedule_type}'. "
+                f"Valid: {[*SCHEDULES, NO_SCHOOL]}"
+            )
         target = for_date or _now_local().date()
         overrides = self._load_overrides()
         overrides[target.isoformat()] = schedule_type
@@ -193,16 +202,24 @@ class ScheduleManager:
     # Schedule resolution
     # ------------------------------------------------------------------
 
-    def get_schedule_type(self, for_date: date | None = None) -> str:
+    def is_school_day(self, for_date: date | None = None) -> bool:
+        """Weekends are not school days unless explicitly overridden."""
+        return self.get_schedule_type(for_date) is not None
+
+    def get_schedule_type(self, for_date: date | None = None) -> str | None:
+        """Schedule name for *for_date*, or None when there is no school."""
         target = for_date or _now_local().date()
         overrides = self._load_overrides()
         if target.isoformat() in overrides:
-            return overrides[target.isoformat()]
-        weekday = target.weekday()
-        return DEFAULT_BY_WEEKDAY.get(weekday, "regular")
+            override = overrides[target.isoformat()]
+            return None if override == NO_SCHOOL else override
+        # DEFAULT_BY_WEEKDAY only covers Mon-Fri. Defaulting the miss to
+        # "regular" put Argon in Period 3 on a Sunday morning.
+        return DEFAULT_BY_WEEKDAY.get(target.weekday())
 
     def get_schedule(self, for_date: date | None = None) -> list[ScheduleEntry]:
-        return SCHEDULES[self.get_schedule_type(for_date)]
+        schedule_type = self.get_schedule_type(for_date)
+        return SCHEDULES[schedule_type] if schedule_type else []
 
     # ------------------------------------------------------------------
     # Current period
@@ -212,11 +229,13 @@ class ScheduleManager:
         """Return info about what's happening right now."""
         now = _now_local()
         schedule = self.get_schedule()
+        if not schedule:
+            return {"status": "no_school", "message": "No school today."}
         now_hhmm = now.hour * 100 + now.minute
 
         for label, start, end in schedule:
             if start <= now_hhmm < end:
-                end_dt = datetime.combine(now.date(), _hhmm_to_time(end), tzinfo=_TZ)
+                end_dt = datetime.combine(now.date(), _hhmm_to_time(end), tzinfo=_tz())
                 remaining = int((end_dt - now).total_seconds() / 60)
                 return {
                     "status": "in_period",
@@ -228,7 +247,7 @@ class ScheduleManager:
         # Between periods — find next
         for label, start, end in schedule:
             if now_hhmm < start:
-                start_dt = datetime.combine(now.date(), _hhmm_to_time(start), tzinfo=_TZ)
+                start_dt = datetime.combine(now.date(), _hhmm_to_time(start), tzinfo=_tz())
                 until = int((start_dt - now).total_seconds() / 60)
                 return {
                     "status": "between_periods",
@@ -243,6 +262,8 @@ class ScheduleManager:
     def get_full_schedule_today(self) -> dict:
         schedule_type = self.get_schedule_type()
         entries = self.get_schedule()
+        if not schedule_type:
+            return {"schedule_type": None, "display_name": "No school", "periods": []}
         return {
             "schedule_type": schedule_type,
             "display_name": SCHEDULE_DISPLAY_NAMES.get(schedule_type, schedule_type),

@@ -90,7 +90,10 @@ class HeartbeatService:
             content = self.heartbeat_file.read_text(encoding="utf-8")
         except Exception:
             return None
+        # Drop comments, including an unterminated trailing one — a half-written
+        # `<!--` would otherwise read as a live task forever.
         body = re.sub(r"<!--.*?-->", "", content, flags=re.S)
+        body = re.sub(r"<!--.*$", "", body, flags=re.S)
         body = "\n".join(
             line for line in body.splitlines()
             if line.strip() and not line.lstrip().startswith("#")

@@ -151,3 +151,11 @@ def test_unknown_schedule_type_is_rejected(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         mgr.set_override("half_day")
     assert mgr.get_schedule_type() == "regular"
+
+
+def test_no_school_override_cancels_a_weekday(tmp_path, monkeypatch):
+    mgr = _manager(tmp_path, monkeypatch, MONDAY, 11, 0)
+    mgr.set_override("none")
+    assert mgr.get_schedule_type() is None
+    assert mgr.is_school_day() is False
+    assert mgr.get_current_period()["status"] == "no_school"

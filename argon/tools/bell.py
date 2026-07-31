@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from argon.productivity.bell import SCHEDULES, ScheduleManager
+from argon.productivity.bell import NO_SCHOOL, SCHEDULES, ScheduleManager
 from argon.tools.base import Tool
 
 
@@ -45,7 +45,7 @@ class ScheduleTool(Tool):
                 },
                 "schedule_type": {
                     "type": "string",
-                    "description": "Schedule type for set_schedule_type (e.g. 'minimum_day', 'activity').",
+                    "description": "Schedule type for set_schedule_type (e.g. 'minimum_day', 'activity'). Use 'none' for a holiday or break.",
                 },
             },
             "required": ["action"],
@@ -71,6 +71,6 @@ class ScheduleTool(Tool):
                 return f"Error: {e}"
 
         if action == "list_schedule_types":
-            return json.dumps(list(SCHEDULES.keys()), indent=2)
+            return json.dumps([*SCHEDULES, NO_SCHOOL], indent=2)
 
         return f"Error: Unknown action '{action}'."

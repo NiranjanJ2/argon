@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 from loguru import logger
 
+from argon import clock
 from argon.productivity.state import DailyState
 
 CHECK_IN_PROMPT = (
@@ -40,7 +41,9 @@ class ReminderService:
         enabled: bool = True,
     ) -> None:
         self.workspace = workspace
-        self.tz = ZoneInfo(timezone)
+        # Explicit tz wins (tests); otherwise the process-wide clock, which
+        # runtime configures from the same config value DailyState now uses.
+        self.tz = ZoneInfo(timezone) if timezone else clock.tz()
         self.on_check_in = on_check_in
         self.enabled = enabled
         self._state = DailyState(workspace)
@@ -59,8 +62,8 @@ class ReminderService:
         hour = self._now().hour
         if mode in ("working", "lock_in"):
             return 15
-        if hour >= 22 or hour < 15:
-            return 30
+        if hour >= 22 or hour < 12:
+            return 30  # nothing to say before noon anyway — see should_check_in
         return 20
 
     def should_check_in(self) -> tuple[bool, str]:

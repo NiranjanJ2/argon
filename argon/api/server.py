@@ -65,8 +65,10 @@ def register_whatsapp_handler(handler: WhatsAppSink) -> None:
 
 
 def _now() -> datetime:
-    """Local wall clock, tz-aware — day buckets should match the user's day."""
-    return datetime.now().astimezone()
+    """Local wall clock — day buckets follow the configured timezone."""
+    from argon import clock
+
+    return clock.now()
 
 
 def _body() -> dict[str, Any]:
@@ -133,7 +135,7 @@ def read_screentime(day: str | None = None, limit: int = 200) -> list[dict[str, 
             records.append(json.loads(line))
         except json.JSONDecodeError:
             continue  # Tolerate a torn final line rather than losing the day.
-    return records[-max(limit, 1):]
+    return records[-limit:] if limit > 0 else []
 
 
 def _lockdown_file() -> Path:
@@ -250,10 +252,11 @@ def lockdown() -> Any:
         cfg = _rt.config.lockdown if _rt.config else None
         if cfg is None or not cfg.configured:
             return jsonify({"error": "lockdown trigger not configured"}), 503
-        from argon.tools.lockdown import SendPhoneNotificationTool
+        from argon.tools.lockdown import send_trigger
 
-        tool = SendPhoneNotificationTool(cfg.email, cfg.password, cfg.phone)
-        result = asyncio.run(tool.execute(notification="lockdown" if state == "lock" else "unlock"))
+        # send_trigger is the shared seam the model's tool goes through too, so
+        # the phone and the agent can never disagree about how a lock is sent.
+        result = send_trigger(cfg, "lockdown" if state == "lock" else "unlock")
         triggered = result.startswith("Trigger")
         if not triggered:
             logger.error("Lockdown trigger failed: {}", result)

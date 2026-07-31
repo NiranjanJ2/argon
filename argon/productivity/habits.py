@@ -7,16 +7,10 @@ File: workspace/habits/habits.json
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
-_TZ = ZoneInfo("America/Los_Angeles")
-
-
-def _now() -> datetime:
-    return datetime.now(_TZ)
+from argon.clock import now as _now
 
 
 class HabitsTracker:

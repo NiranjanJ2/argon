@@ -2,23 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
-_TZ = ZoneInfo("America/Los_Angeles")
-
-
-def _now() -> datetime:
-    return datetime.now(_TZ)
-
-
-def _today_key() -> str:
-    now = _now()
-    if now.hour < 4:
-        from datetime import timedelta
-        now = now - timedelta(days=1)
-    return now.strftime("%Y-%m-%d")
+from argon.clock import now as _now
+from argon.clock import today_key as _today_key
 
 
 class DailyLog:
