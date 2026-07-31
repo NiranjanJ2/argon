@@ -35,13 +35,28 @@ class ToolRegistry:
         """Get all tool definitions in OpenAI format."""
         return [tool.to_schema() for tool in self._tools.values()]
 
+    def resolve(self, name: str) -> tuple[str, Tool | None]:
+        """Look up a tool, tolerating a name the model dirtied.
+
+        gpt-oss speaks the Harmony format and sometimes glues a control token
+        onto the function name — ``list_tasks<|channel|>commentary``. An exact
+        lookup misses, the model gets "not found" plus a list of all 30 tools,
+        and retries: several wasted calls and a large context dump per turn.
+        Only tried after the exact match fails, so real names are untouched.
+        """
+        tool = self._tools.get(name)
+        if tool is not None:
+            return name, tool
+        cleaned = (name or "").split("<|")[0].strip()
+        return (cleaned, self._tools.get(cleaned)) if cleaned != name else (name, None)
+
     def prepare_call(
         self,
         name: str,
         params: dict[str, Any],
     ) -> tuple[Tool | None, dict[str, Any], str | None]:
         """Resolve, cast, and validate one tool call."""
-        tool = self._tools.get(name)
+        name, tool = self.resolve(name)
         if not tool:
             return None, params, (
                 f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
