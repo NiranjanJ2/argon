@@ -87,6 +87,40 @@ APNs push is **not** wired — `/v1/ios/register` stores the token for later. Th
 app reconciles on launch, foreground, and a 20-second timer while open, so a
 lock lands when the app is next opened rather than instantly.
 
+### Did it actually land?
+
+`convergence()` compares the version the phone last applied against the version
+Argon published, so a lock that never took effect cannot pass for success:
+
+| state | meaning |
+|---|---|
+| `converged` | versions match, and a requested lock is actually shielded |
+| `pending` | published; the phone has not answered since |
+| `diverged` | answered *after* the request, still on the old version |
+| `failed` | the phone reported an `error`, or acknowledged a lock without shielding |
+| `stale` | no report for 5 minutes |
+| `never_seen` | no report ever |
+
+`POST /v1/ios/state` accepts an optional `error` string, which the app sends
+only when it could not apply the mode. This matters more than it looks: the
+app's reconciler used to return nil on failure and its caller only reported on
+success, so a failed lock was byte-identical to a phone that was switched off —
+Argon would have believed it had locked a device that was wide open. Two rules
+follow from that:
+
+- **On failure the phone reports the version still in force**, not the one it
+  failed to apply, so a plain version comparison shows it has not converged.
+- **A matching version is not enough.** The app refuses focus states it deems
+  unsafe (no hard expiry) and still reports the version, so a requested lock
+  with `shielded: false` counts as `failed`.
+
+`set_focus_mode` says "Do not assume it is locked" on any of these, and
+`get_status` grows a `phone_focus` block whenever the answer is not the boring
+one — so the model can see a block did not land.
+
+With no APNs key, `stale` is also the ordinary state whenever the app is
+backgrounded; that ambiguity disappears once push is wired.
+
 ## Screen Time
 
 `POST /v1/screentime` accepts whatever shape you send and appends

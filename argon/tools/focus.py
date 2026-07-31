@@ -89,7 +89,7 @@ class SetFocusModeTool(Tool):
         state, detail = ios_mode.convergence()
         if state == "never_seen":
             return f"{requested} The phone has never checked in — it may not be paired yet."
-        if state in ("stale", "diverged"):
+        if state in ("stale", "diverged", "failed"):
             # Worth saying plainly: the previous request never landed either.
             return f"{requested} But {detail}. Do not assume it is locked."
         return f"{requested} Waiting for the phone to pick it up."

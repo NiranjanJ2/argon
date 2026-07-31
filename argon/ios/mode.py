@@ -136,6 +136,8 @@ def record_actual(payload: dict[str, Any]) -> dict[str, Any]:
         "applied_at": payload.get("applied_at"),
         # -1.0 is what UIDevice reports when battery monitoring is off.
         "battery": payload.get("battery"),
+        # Present only when the phone could not apply what was asked.
+        "error": (str(payload["error"])[:300] if payload.get("error") else None),
     }
     _write("state.json", actual)
     return actual
@@ -169,7 +171,17 @@ def convergence() -> tuple[str, str]:
     locked a phone that is wide open.
     """
     desired, actual = get_mode(), get_actual()
+
+    # The phone says outright that it could not apply this.
+    if actual.get("error"):
+        return "failed", str(actual["error"])
+
     if desired["version"] == actual["version"]:
+        # Versions can agree while the shield is not up: the app refuses a
+        # focus state it considers unsafe and still reports the version. A
+        # requested lock with no shield is a failure, not convergence.
+        if desired["mode"] != "off" and not actual.get("shielded"):
+            return "failed", "the phone acknowledged the mode but is not shielded"
         return "converged", ""
 
     last_seen = actual.get("last_seen")

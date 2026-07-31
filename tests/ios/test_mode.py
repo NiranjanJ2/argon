@@ -200,3 +200,44 @@ def test_snapshot_carries_convergence_without_breaking_the_app_contract():
     # The Swift structs still find everything they decode; extra keys are ignored.
     assert REQUIRED_DESIRED <= snap["desired"].keys()
     assert REQUIRED_ACTUAL <= snap["actual"].keys()
+
+
+def test_a_reported_error_is_a_failure_not_a_gap():
+    """The app now confesses; the server must not read that as silence."""
+    ios_mode.set_mode("lock_in", duration_min=60, reason="pset")
+    ios_mode.record_actual(
+        {"mode": "off", "version": 0, "shielded": False,
+         "error": "No profile named 'Argon Lockdown'"}
+    )
+    state, detail = ios_mode.convergence()
+    assert state == "failed"
+    assert "Argon Lockdown" in detail
+
+
+def test_an_acknowledged_lock_without_a_shield_is_a_failure():
+    """The app refuses unsafe focus states and still reports the version.
+
+    Comparing versions alone would call that converged while the phone sits
+    wide open — the exact lie this whole mechanism exists to prevent.
+    """
+    desired = ios_mode.set_mode("lock_in", duration_min=60, reason="pset")
+    ios_mode.record_actual(
+        {"mode": "off", "version": desired["version"], "shielded": False}
+    )
+    assert ios_mode.convergence()[0] == "failed"
+
+
+def test_an_acknowledged_lock_with_a_shield_is_converged():
+    desired = ios_mode.set_mode("lock_in", duration_min=60, reason="pset")
+    ios_mode.record_actual(
+        {"mode": "lock_in", "version": desired["version"], "shielded": True}
+    )
+    assert ios_mode.convergence()[0] == "converged"
+
+
+def test_an_acknowledged_unlock_needs_no_shield():
+    desired = ios_mode.set_mode("off", reason="done")
+    ios_mode.record_actual(
+        {"mode": "off", "version": desired["version"], "shielded": False}
+    )
+    assert ios_mode.convergence()[0] == "converged"
