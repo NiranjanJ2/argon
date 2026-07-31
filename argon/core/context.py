@@ -6,11 +6,9 @@ import platform
 from pathlib import Path
 from typing import Any
 
-from argon.utils.helpers import current_time_str
-
 from argon.core.memory import MemoryStore
 from argon.core.skills import SkillsLoader
-from argon.utils.helpers import build_assistant_message, detect_image_mime
+from argon.utils.helpers import build_assistant_message, current_time_str, detect_image_mime
 
 
 class ContextBuilder:

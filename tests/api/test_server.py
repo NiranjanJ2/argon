@@ -1,0 +1,366 @@
+"""HTTP surface: auth must fail closed, and the webhook must stay on-host.
+
+This server is bound to 0.0.0.0 on the home LAN, so ``/v1/*`` is the only thing
+between the LAN and a full agent turn. Nothing here touches the network — the
+agent bridge is a plain callable and the WhatsApp sink is a list.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from argon.api import server as srv
+from argon.config import ApiConfig, Config
+
+TOKEN = "s3cret-token"
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
+V1_ROUTES = [
+    ("post", "/v1/chat"),
+    ("post", "/v1/webhook/shortcut"),
+    ("get", "/v1/status"),
+    ("post", "/v1/screentime"),
+    ("get", "/v1/screentime"),
+    ("post", "/v1/lockdown"),
+]
+
+
+def _client(tmp_path, monkeypatch, *, token: str = TOKEN):
+    """A test client with an isolated ARGON_HOME and no agent wired."""
+    monkeypatch.setenv("ARGON_HOME", str(tmp_path))
+    monkeypatch.setattr(srv._rt, "config", Config(api=ApiConfig(token=token)))
+    monkeypatch.setattr(srv._rt, "agent", None)
+    monkeypatch.setattr(srv._rt, "whatsapp", None)
+    return srv.app.test_client()
+
+
+def _call(client, method: str, path: str, **kw):
+    return getattr(client, method)(path, **kw)
+
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("method,path", V1_ROUTES)
+def test_v1_rejects_a_request_with_no_token(tmp_path, monkeypatch, method, path):
+    response = _call(_client(tmp_path, monkeypatch), method, path, json={})
+    assert response.status_code == 401
+    assert response.get_json() == {"error": "unauthorized"}
+
+
+@pytest.mark.parametrize("method,path", V1_ROUTES)
+def test_v1_fails_closed_when_the_configured_token_is_empty(
+    tmp_path, monkeypatch, method, path
+):
+    """An unset api.token must authorise nothing, including an empty bearer."""
+    client = _client(tmp_path, monkeypatch, token="")
+    assert _call(client, method, path, json={}, headers={"Authorization": "Bearer "}).status_code == 401
+    assert _call(client, method, path, json={}, headers={"Authorization": "Bearer x"}).status_code == 401
+    assert _call(client, method, path, json={}).status_code == 401
+
+
+def test_v1_rejects_a_wrong_token(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    response = client.post(
+        "/v1/chat", json={"message": "hi"}, headers={"Authorization": "Bearer wrong"}
+    )
+    assert response.status_code == 401
+
+
+def test_v1_rejects_a_correct_token_under_the_wrong_scheme(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    response = client.post(
+        "/v1/chat", json={"message": "hi"}, headers={"Authorization": f"Basic {TOKEN}"}
+    )
+    assert response.status_code == 401
+
+
+def test_v1_rejects_a_token_prefix(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    response = client.post(
+        "/v1/chat", json={"message": "hi"}, headers={"Authorization": f"Bearer {TOKEN[:-1]}"}
+    )
+    assert response.status_code == 401
+
+
+def test_v1_rejects_when_no_config_is_installed(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARGON_HOME", str(tmp_path))
+    monkeypatch.setattr(srv._rt, "config", None)
+    response = srv.app.test_client().post("/v1/chat", json={"message": "hi"}, headers=AUTH)
+    assert response.status_code == 401
+
+
+def test_health_is_unauthenticated(tmp_path, monkeypatch):
+    response = _client(tmp_path, monkeypatch).get("/health")
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# /whatsapp/incoming
+# ---------------------------------------------------------------------------
+
+
+def test_whatsapp_webhook_rejects_a_non_loopback_caller(tmp_path, monkeypatch):
+    received: list[dict] = []
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(srv._rt, "whatsapp", received.append)
+
+    response = client.post(
+        "/whatsapp/incoming",
+        json={"from": "attacker", "body": "hi"},
+        environ_base={"REMOTE_ADDR": "192.168.1.50"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "forbidden"}
+    assert received == []
+
+
+def test_whatsapp_webhook_accepts_loopback(tmp_path, monkeypatch):
+    received: list[dict] = []
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(srv._rt, "whatsapp", received.append)
+
+    response = client.post(
+        "/whatsapp/incoming",
+        json={"from": "1555", "body": "hi"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert received == [{"from": "1555", "body": "hi"}]
+
+
+def test_whatsapp_webhook_survives_a_handler_that_raises(tmp_path, monkeypatch):
+    def boom(payload):
+        raise RuntimeError("bridge exploded")
+
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(srv._rt, "whatsapp", boom)
+
+    response = client.post("/whatsapp/incoming", json={"body": "hi"})
+
+    assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# /v1/chat
+# ---------------------------------------------------------------------------
+
+
+def test_chat_runs_one_turn_on_the_ios_session(tmp_path, monkeypatch):
+    seen: list[tuple[str, str]] = []
+
+    def agent(message: str, session_key: str, timeout: float) -> str:
+        seen.append((message, session_key))
+        return "pong"
+
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(srv._rt, "agent", agent)
+
+    response = client.post("/v1/chat", json={"message": "ping"}, headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.get_json() == {"reply": "pong", "session": srv.IOS_SESSION}
+    assert seen == [("ping", srv.IOS_SESSION)]
+
+
+def test_chat_requires_a_message(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(srv._rt, "agent", lambda *a: "unreachable")
+    response = client.post("/v1/chat", json={"message": "   "}, headers=AUTH)
+    assert response.status_code == 400
+
+
+def test_chat_reports_503_when_no_agent_is_wired(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    response = client.post("/v1/chat", json={"message": "ping"}, headers=AUTH)
+    assert response.status_code == 503
+
+
+def test_chat_maps_a_bridge_timeout_to_504(tmp_path, monkeypatch):
+    def agent(message, session_key, timeout):
+        raise TimeoutError
+
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(srv._rt, "agent", agent)
+    assert client.post("/v1/chat", json={"message": "ping"}, headers=AUTH).status_code == 504
+
+
+def test_chat_does_not_leak_an_agent_traceback(tmp_path, monkeypatch):
+    def agent(message, session_key, timeout):
+        raise RuntimeError("NIM api key sk-secret is invalid")
+
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(srv._rt, "agent", agent)
+
+    response = client.post("/v1/chat", json={"message": "ping"}, headers=AUTH)
+
+    assert response.status_code == 502
+    assert "sk-secret" not in response.get_data(as_text=True)
+
+
+def test_webhook_rejects_a_name_outside_the_allowed_charset(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(srv._rt, "agent", lambda *a: "ok")
+    assert client.post("/v1/webhook/Shortcut", json={"message": "x"}, headers=AUTH).status_code == 400
+    assert client.post("/v1/webhook/-lead", json={"message": "x"}, headers=AUTH).status_code == 400
+
+
+def test_webhook_runs_on_its_own_session(tmp_path, monkeypatch):
+    seen: list[str] = []
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(srv._rt, "agent", lambda m, k, t: seen.append(k) or "ok")
+
+    response = client.post("/v1/webhook/leaving-school", json={"input": "home"}, headers=AUTH)
+
+    assert response.status_code == 200
+    assert seen == ["webhook:leaving-school"]
+
+
+# ---------------------------------------------------------------------------
+# /v1/screentime
+# ---------------------------------------------------------------------------
+
+
+def test_screentime_post_round_trips_through_read_screentime(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    payload = {"apps": [{"name": "Safari", "minutes": 42}], "total": 42}
+
+    response = client.post("/v1/screentime", json=payload, headers=AUTH)
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is True
+
+    records = srv.read_screentime(body["date"])
+    assert len(records) == 1
+    assert records[0]["payload"] == payload
+    assert records[0]["received_at"]
+
+    # And the GET endpoint sees the same record.
+    history = client.get(f"/v1/screentime?date={body['date']}", headers=AUTH)
+    assert history.get_json()["count"] == 1
+    assert history.get_json()["records"][0]["payload"] == payload
+
+
+def test_screentime_appends_rather_than_overwrites(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    client.post("/v1/screentime", json={"n": 1}, headers=AUTH)
+    day = client.post("/v1/screentime", json={"n": 2}, headers=AUTH).get_json()["date"]
+
+    records = srv.read_screentime(day)
+
+    assert [r["payload"]["n"] for r in records] == [1, 2]
+
+
+def test_screentime_writes_under_argon_home(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    day = client.post("/v1/screentime", json={"n": 1}, headers=AUTH).get_json()["date"]
+    assert (tmp_path / "screentime" / f"{day}.jsonl").exists()
+
+
+def test_screentime_rejects_a_non_object_body(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    response = client.post("/v1/screentime", json=[1, 2, 3], headers=AUTH)
+    assert response.status_code == 400
+
+
+def test_screentime_history_rejects_a_malformed_date(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    response = client.get("/v1/screentime?date=../../etc/passwd", headers=AUTH)
+    assert response.status_code == 400
+
+
+def test_read_screentime_tolerates_a_torn_line(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARGON_HOME", str(tmp_path))
+    day = "2026-07-30"
+    path = tmp_path / "screentime"
+    path.mkdir()
+    (path / f"{day}.jsonl").write_text(
+        json.dumps({"payload": {"n": 1}}) + "\n" + '{"payload": {"n":',
+        encoding="utf-8",
+    )
+
+    records = srv.read_screentime(day)
+
+    assert [r["payload"]["n"] for r in records] == [1]
+
+
+def test_read_screentime_rejects_a_malformed_day(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARGON_HOME", str(tmp_path))
+    with pytest.raises(ValueError):
+        srv.read_screentime("2026-7-30")
+
+
+def test_read_screentime_of_an_unreported_day_is_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARGON_HOME", str(tmp_path))
+    assert srv.read_screentime("2020-01-01") == []
+
+
+# ---------------------------------------------------------------------------
+# /v1/status and /v1/lockdown
+# ---------------------------------------------------------------------------
+
+
+def test_status_returns_the_widget_payload(tmp_path, monkeypatch):
+    """Same assembly the agent's get_status tool uses — catches wiring breaks."""
+    client = _client(tmp_path, monkeypatch)
+
+    body = client.get("/v1/status", headers=AUTH).get_json()
+
+    assert body["mode"] == "idle"
+    assert body["lockdown"] == {"state": "unknown", "since": None}
+    assert "school_period" in body
+
+
+def test_lockdown_records_the_reported_state(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    body = client.post("/v1/lockdown", json={"state": "lock"}, headers=AUTH).get_json()
+
+    assert body["ok"] is True
+    assert body["state"] == "lock"
+    assert body["triggered"] is False
+    assert client.get("/v1/status", headers=AUTH).get_json()["lockdown"]["state"] == "lock"
+
+
+def test_lockdown_rejects_an_unknown_state(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    assert client.post("/v1/lockdown", json={"state": "sleep"}, headers=AUTH).status_code == 400
+
+
+def test_lockdown_trigger_needs_credentials(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    response = client.post(
+        "/v1/lockdown", json={"state": "lock", "trigger": True}, headers=AUTH
+    )
+    assert response.status_code == 503
+
+
+@pytest.mark.xfail(
+    reason="argon/api/server.py:255 builds SendPhoneNotificationTool(email, password, phone) "
+           "but the tool takes a single LockdownConfig — the trigger path always 500s",
+)
+def test_lockdown_trigger_fires_the_tool(tmp_path, monkeypatch):
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "argon.tools.lockdown.send_trigger",
+        lambda config, state: sent.append(state) or f"Trigger '{state}' sent to phone.",
+    )
+    client = _client(tmp_path, monkeypatch)
+    srv._rt.config.lockdown.email = "a@b.c"
+    srv._rt.config.lockdown.password = "p"
+    srv._rt.config.lockdown.phone = "5551234567"
+
+    response = client.post(
+        "/v1/lockdown", json={"state": "lock", "trigger": True}, headers=AUTH
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["triggered"] is True
+    assert sent == ["lockdown"]

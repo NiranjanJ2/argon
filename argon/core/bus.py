@@ -1,6 +1,6 @@
 """Message bus: events + async queue."""
 
-
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -39,9 +39,7 @@ class OutboundMessage:
 
 
 
-import asyncio
 
-from argon.core.bus import InboundMessage, OutboundMessage
 
 
 class MessageBus:

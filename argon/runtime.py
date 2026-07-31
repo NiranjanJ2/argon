@@ -72,6 +72,20 @@ def build_runtime(config: Config) -> Runtime:
 
     agent = AgentLoop(config, bus, provider, cron_service=cron, session_manager=sessions)
 
+    if config.google.enabled:
+        from argon.google.auth import GoogleAuth
+
+        stale = {
+            account: state
+            for account, state in GoogleAuth(config.workspace_path).status().items()
+            if state != "ok"
+        }
+        if stale:
+            logger.warning(
+                "Google accounts needing re-auth ({}): run `argon google-auth <account>`",
+                ", ".join(f"{a}: {s}" for a, s in sorted(stale.items())),
+            )
+
     # The heartbeat and check-ins run on a cheaper model so background chatter
     # never competes with interactive messages for rate limit.
     hb_cfg = config.gateway.heartbeat

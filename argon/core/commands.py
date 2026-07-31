@@ -1,10 +1,17 @@
 """Slash-command routing and built-in commands."""
 
-
 from __future__ import annotations
 
+import asyncio
+import os
+import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+from argon import __version__
+from argon.core.bus import OutboundMessage
+from argon.utils.helpers import build_status_content
+from argon.utils.restart import set_restart_notice_to_env
 
 if TYPE_CHECKING:
     from argon.core.bus import InboundMessage, OutboundMessage
@@ -86,14 +93,7 @@ class CommandRouter:
 
 
 
-import asyncio
-import os
-import sys
 
-from argon import __version__
-from argon.core.bus import OutboundMessage
-from argon.utils.helpers import build_status_content
-from argon.utils.restart import set_restart_notice_to_env
 
 
 async def cmd_stop(ctx: CommandContext) -> OutboundMessage:

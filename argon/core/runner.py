@@ -10,8 +10,8 @@ from typing import Any
 from loguru import logger
 
 from argon.core.hook import AgentHook, AgentHookContext
-from argon.tools.registry import ToolRegistry
 from argon.providers.base import LLMProvider, ToolCallRequest
+from argon.tools.registry import ToolRegistry
 from argon.utils.helpers import (
     build_assistant_message,
     estimate_message_tokens,
@@ -58,6 +58,17 @@ class AgentRunSpec:
     provider_retry_mode: str = "standard"
     progress_callback: Any | None = None
     checkpoint_callback: Any | None = None
+
+
+def _already_delivered(spec: AgentRunSpec) -> bool:
+    """True when the model already sent its answer via the message tool.
+
+    A blank final response is then correct, not a failure — the persona tells it
+    not to repeat itself. Retrying costs a full extra call with the entire
+    context attached, to produce a reply nobody reads.
+    """
+    tool = spec.tools.get("message") if spec.tools else None
+    return bool(getattr(tool, "_sent_in_turn", False))
 
 
 @dataclass(slots=True)
@@ -196,7 +207,11 @@ class AgentRunner:
                 continue
 
             clean = hook.finalize_content(context, response.content)
-            if response.finish_reason != "error" and is_blank_text(clean):
+            if (
+                response.finish_reason != "error"
+                and is_blank_text(clean)
+                and not _already_delivered(spec)
+            ):
                 logger.warning(
                     "Empty final response on turn {} for {}; retrying with explicit finalization prompt",
                     iteration,

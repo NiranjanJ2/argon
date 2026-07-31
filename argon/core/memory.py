@@ -14,8 +14,8 @@ from loguru import logger
 from argon.utils.helpers import ensure_dir, estimate_message_tokens, estimate_prompt_tokens_chain
 
 if TYPE_CHECKING:
-    from argon.providers.base import LLMProvider
     from argon.core.session import Session, SessionManager
+    from argon.providers.base import LLMProvider
 
 
 _SAVE_MEMORY_TOOL = [

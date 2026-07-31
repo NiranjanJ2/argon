@@ -6,6 +6,11 @@ Times are 24-hour integers, e.g. 8:30 AM = 830, 1:30 PM = 1330.
 
 from __future__ import annotations
 
+import json
+from datetime import date, datetime, time
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
 # ---------------------------------------------------------------------------
 # Schedule data
 # ---------------------------------------------------------------------------
@@ -136,17 +141,7 @@ SCHEDULE_DISPLAY_NAMES: dict[str, str] = {
 
 
 
-import json
-from datetime import date, datetime, time, timedelta
-from pathlib import Path
-from zoneinfo import ZoneInfo
 
-from argon.productivity.bell import (
-    DEFAULT_BY_WEEKDAY,
-    SCHEDULE_DISPLAY_NAMES,
-    SCHEDULES,
-    ScheduleEntry,
-)
 
 _TZ = ZoneInfo("America/Los_Angeles")  # Whitney High School timezone
 

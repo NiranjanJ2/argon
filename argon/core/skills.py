@@ -108,7 +108,12 @@ class SkillsLoader:
         Returns:
             XML-formatted skills summary.
         """
-        all_skills = self.list_skills(filter_unavailable=False)
+        # always-skills are injected in full further up the prompt; listing them
+        # here too just pays for the same names twice.
+        always = set(self.get_always_skills())
+        all_skills = [
+            s for s in self.list_skills(filter_unavailable=False) if s["name"] not in always
+        ]
         if not all_skills:
             return ""
 

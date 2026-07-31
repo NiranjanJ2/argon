@@ -7,10 +7,9 @@ from typing import Any
 
 from loguru import logger
 
-from argon.core.bus import OutboundMessage
-from argon.core.bus import MessageBus
 from argon.channels.base import BaseChannel
 from argon.config import Config
+from argon.core.bus import MessageBus, OutboundMessage
 from argon.utils.restart import consume_restart_notice_from_env, format_restart_completed_message
 
 # Retry delays for message sending (exponential backoff: 1s, 2s, 4s)

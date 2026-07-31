@@ -10,12 +10,11 @@ from typing import TYPE_CHECKING, Any, Literal
 from loguru import logger
 from pydantic import Field
 
-from argon.core.bus import OutboundMessage
-from argon.core.bus import MessageBus
 from argon.channels.base import BaseChannel
+from argon.config import Base
+from argon.core.bus import MessageBus, OutboundMessage
 from argon.core.commands import build_help_text
 from argon.paths import get_media_dir
-from argon.config import Base
 from argon.utils.helpers import safe_filename, split_message
 
 DISCORD_AVAILABLE = importlib.util.find_spec("discord") is not None

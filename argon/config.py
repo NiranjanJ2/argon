@@ -14,8 +14,8 @@ from typing import Any, Literal
 import pydantic
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
-from pydantic_settings import BaseSettings
 from pydantic.alias_generators import to_camel
+from pydantic_settings import BaseSettings
 
 from argon.paths import argon_home, get_config_path
 

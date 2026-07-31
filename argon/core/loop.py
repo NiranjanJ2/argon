@@ -4,37 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import os
 import time
 from contextlib import AsyncExitStack, nullcontext
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
+from argon.config import Config
+from argon.core.bus import InboundMessage, MessageBus, OutboundMessage
+from argon.core.commands import CommandContext, CommandRouter, register_builtin_commands
 from argon.core.context import ContextBuilder
 from argon.core.hook import AgentHook, AgentHookContext, CompositeHook
 from argon.core.memory import MemoryConsolidator
-from argon.core.runner import AgentRunSpec, AgentRunner
-from argon.tools.cron import CronTool
+from argon.core.runner import AgentRunner, AgentRunSpec
+from argon.core.session import Session, SessionManager
 from argon.core.skills import BUILTIN_SKILLS_DIR
+from argon.providers.base import LLMProvider
+from argon.tools.cron import CronTool
 from argon.tools.fs import ReadFileTool
 from argon.tools.message import MessageTool
 from argon.tools.registry import ToolRegistry
 from argon.tools.web import WebFetchTool, WebSearchTool
-from argon.core.bus import InboundMessage, OutboundMessage
-from argon.core.commands import CommandContext, CommandRouter, register_builtin_commands
-from argon.core.bus import MessageBus
-from argon.config import Config
-from argon.providers.base import LLMProvider
-from argon.core.session import Session, SessionManager
 from argon.utils.helpers import image_placeholder_text, truncate_text
 from argon.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
 
 if TYPE_CHECKING:
-    from argon.config import ChannelsConfig, ExecToolConfig, WebToolsConfig
     from argon.services.cron import CronService
 
 
@@ -252,16 +248,20 @@ class AgentLoop:
 
     def _register_productivity_tools(self) -> None:
         """Register schedule, task, status, log, and memory tools."""
-        from argon.tools.bell import ScheduleTool
         from argon.google.tasks_store import GoogleTasksStore
-        from argon.productivity.state import DailyState
-        from argon.productivity.log import DailyLog
         from argon.productivity.habits import HabitsTracker
-        from argon.tools.tasks import (
-            ListTasksTool, AddTaskTool, StartTaskTool, CompleteTaskTool, UpdateTaskTool,
-        )
-        from argon.tools.status import GetStatusTool, SetModeTool, LogNoteTool, ReadLogTool
+        from argon.productivity.log import DailyLog
+        from argon.productivity.state import DailyState
+        from argon.tools.bell import ScheduleTool
         from argon.tools.overview import GetDailyOverviewTool
+        from argon.tools.status import GetStatusTool, LogNoteTool, ReadLogTool, SetModeTool
+        from argon.tools.tasks import (
+            AddTaskTool,
+            CompleteTaskTool,
+            ListTasksTool,
+            StartTaskTool,
+            UpdateTaskTool,
+        )
 
         store = GoogleTasksStore(self.workspace)
         state = DailyState(self.workspace)
@@ -301,22 +301,10 @@ class AgentLoop:
         in April and nobody noticed until July. Now the tools always exist and an
         unauthenticated one explains itself and names the fix.
         """
-        from argon.google.auth import GoogleAuth
         from argon.google.service import google_tools
 
         for tool in google_tools(self.workspace):
             self.tools.register(tool)
-
-        stale = {
-            account: state
-            for account, state in GoogleAuth(self.workspace).status().items()
-            if state != "ok"
-        }
-        if stale:
-            logger.warning(
-                "Google accounts needing re-auth: {}",
-                ", ".join(f"{a} ({s})" for a, s in sorted(stale.items())),
-            )
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""

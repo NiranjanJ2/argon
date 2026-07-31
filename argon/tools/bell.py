@@ -6,9 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from argon.productivity.bell import SCHEDULES, ScheduleManager
 from argon.tools.base import Tool
-from argon.productivity.bell import ScheduleManager
-from argon.productivity.bell import SCHEDULES
 
 
 class ScheduleTool(Tool):

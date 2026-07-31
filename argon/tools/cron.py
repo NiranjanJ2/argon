@@ -4,9 +4,8 @@ from contextvars import ContextVar
 from datetime import datetime
 from typing import Any
 
+from argon.services.cron import CronJobState, CronSchedule, CronService
 from argon.tools.base import Tool
-from argon.services.cron import CronService
-from argon.services.cron import CronJobState, CronSchedule
 
 
 class CronTool(Tool):

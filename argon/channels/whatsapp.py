@@ -26,10 +26,9 @@ import httpx
 from loguru import logger
 from pydantic import Field
 
-from argon.core.bus import OutboundMessage
-from argon.core.bus import MessageBus
 from argon.channels.base import BaseChannel
 from argon.config import Base
+from argon.core.bus import MessageBus, OutboundMessage
 
 # ── Module-level state for Flask→asyncio bridge ───────────────────────────────
 # Flask runs in a daemon thread; we hand messages to the async channel via these.

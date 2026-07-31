@@ -8,8 +8,7 @@ from typing import Any
 
 from loguru import logger
 
-from argon.core.bus import InboundMessage, OutboundMessage
-from argon.core.bus import MessageBus
+from argon.core.bus import InboundMessage, MessageBus, OutboundMessage
 
 
 class BaseChannel(ABC):

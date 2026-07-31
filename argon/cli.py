@@ -78,21 +78,32 @@ def gateway(
     rt = build_runtime(cfg)
 
     if cfg.api.enabled:
+        from argon.core.bus import OutboundMessage
+        from argon.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
+
         def agent_turn(message: str, session_key: str, timeout_s: float) -> str:
-            """Bridge a Flask request thread into the agent's event loop."""
-            channel, chat_id = ("ios", session_key)
-            if session_key.startswith("webhook:"):
-                # Webhooks speak for Niranjan, so the reply goes to his chat,
-                # not back down the HTTP response.
-                channel, chat_id = rt.pick_target()
-            fut = asyncio.run_coroutine_threadsafe(
-                rt.agent.process_direct(
+            """Bridge a Flask request thread into the agent's event loop.
+
+            A webhook (phone shortcut, automation) has no screen to read a reply
+            on, so its answer is delivered to Niranjan's chat as well as returned.
+            """
+            to_chat = session_key.startswith("webhook:")
+            channel, chat_id = rt.pick_target() if to_chat else ("ios", session_key)
+
+            async def turn() -> str:
+                resp = await rt.agent.process_direct(
                     message, session_key=session_key, channel=channel, chat_id=chat_id
-                ),
-                loop,
-            )
-            resp = fut.result(timeout=timeout_s)  # TimeoutError -> 504
-            return (resp.content if resp else "") or ""
+                )
+                text = (resp.content if resp else "") or ""
+                # process_direct returns None when the model already sent via the
+                # message tool — don't deliver it twice.
+                if to_chat and resp and text and text != EMPTY_FINAL_RESPONSE_MESSAGE:
+                    await rt.bus.publish_outbound(
+                        OutboundMessage(channel=channel, chat_id=chat_id, content=text)
+                    )
+                return text
+
+            return asyncio.run_coroutine_threadsafe(turn(), loop).result(timeout=timeout_s)
 
         register_agent_handler(agent_turn)
         start_api_server(cfg)
@@ -130,9 +141,9 @@ def chat(
     """Talk to Argon from the terminal (no Discord round-trip)."""
     from argon.core.bus import MessageBus
     from argon.core.loop import AgentLoop
+    from argon.paths import get_cron_store
     from argon.runtime import build_provider
     from argon.services.cron import CronService
-    from argon.paths import get_cron_store
     from argon.utils.helpers import sync_workspace_templates
 
     logger.enable("argon") if logs else logger.disable("argon")
@@ -333,7 +344,7 @@ def migrate(
     if dry_run:
         console.print("\n[yellow]Dry run — nothing written.[/yellow]")
     else:
-        console.print(f"\n[green]Done.[/green] Verify with: argon doctor")
+        console.print("\n[green]Done.[/green] Verify with: argon doctor")
 
 
 if __name__ == "__main__":
