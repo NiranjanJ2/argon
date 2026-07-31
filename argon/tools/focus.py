@@ -83,9 +83,13 @@ class SetFocusModeTool(Tool):
 
         # The phone applies this when it next reconciles, so promise intent, not
         # completion — saying "locked" when the phone is in a drawer is a lie.
-        actual = ios_mode.get_actual()
         window = f" until {desired['expires_at'][11:16]}" if desired["expires_at"] else ""
-        seen = f" Last heard from the phone at {actual['last_seen'][11:16]}." if actual["last_seen"] else (
-            " The phone has never checked in — it may not be paired yet."
-        )
-        return f"Focus mode '{mode}' requested{window}.{seen}"
+        requested = f"Focus mode '{mode}' requested{window}."
+
+        state, detail = ios_mode.convergence()
+        if state == "never_seen":
+            return f"{requested} The phone has never checked in — it may not be paired yet."
+        if state in ("stale", "diverged"):
+            # Worth saying plainly: the previous request never landed either.
+            return f"{requested} But {detail}. Do not assume it is locked."
+        return f"{requested} Waiting for the phone to pick it up."

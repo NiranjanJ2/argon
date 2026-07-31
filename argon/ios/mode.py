@@ -153,6 +153,58 @@ def record_device(payload: dict[str, Any]) -> dict[str, Any]:
     return device
 
 
+#: No report in this long and the phone is treated as gone. The app polls every
+#: 20s while foregrounded, so a few missed rounds is already meaningful.
+STALE_AFTER_MINUTES = 5
+
+
+def convergence() -> tuple[str, str]:
+    """Has the phone actually done what Argon asked? ``(state, detail)``.
+
+    A lock that fails on the phone is silent: the app's reconciler returns nil
+    on error and its caller only reports on success, so "tried and failed" looks
+    exactly like "phone is off". Comparing the version the phone last applied
+    against the version Argon published catches it without trusting the app to
+    confess — which matters, because the failure mode is Argon believing it
+    locked a phone that is wide open.
+    """
+    desired, actual = get_mode(), get_actual()
+    if desired["version"] == actual["version"]:
+        return "converged", ""
+
+    last_seen = actual.get("last_seen")
+    if not last_seen:
+        return "never_seen", "the phone has never checked in"
+
+    try:
+        seen = datetime.fromisoformat(last_seen)
+    except ValueError:
+        return "unknown", "unreadable last_seen"
+
+    age_min = (clock.now() - seen).total_seconds() / 60
+    if age_min > STALE_AFTER_MINUTES:
+        return "stale", f"last heard from the phone {int(age_min)}m ago"
+
+    since = desired.get("since")
+    if since:
+        try:
+            # It reported *after* this mode was published and still did not
+            # apply it — it saw the request and could not carry it out.
+            if seen > datetime.fromisoformat(since):
+                return "diverged", (
+                    f"the phone is online but still on v{actual['version']} "
+                    f"(asked for v{desired['version']}) — it could not apply this"
+                )
+        except ValueError:
+            pass
+    return "pending", "waiting for the phone to pick it up"
+
+
 def snapshot() -> dict[str, Any]:
     """The ``ios`` block of ``/v1/status``: what Argon wants, what the phone did."""
-    return {"desired": get_mode(), "actual": get_actual()}
+    state, detail = convergence()
+    return {
+        "desired": get_mode(),
+        "actual": get_actual(),
+        "convergence": {"state": state, "detail": detail},
+    }

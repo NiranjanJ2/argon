@@ -144,3 +144,59 @@ def test_the_device_token_is_stored():
     stored = ios_mode._read("device.json", {})
     assert stored["device_token"] == "abc123"
     assert stored["environment"] == "sandbox"
+
+
+# ---------------------------------------------------------------------------
+# convergence — catching a lock that never landed
+# ---------------------------------------------------------------------------
+
+
+def test_matching_versions_are_converged():
+    ios_mode.set_mode("off", reason="idle")
+    ios_mode.record_actual({"mode": "off", "version": ios_mode.get_mode()["version"]})
+    assert ios_mode.convergence()[0] == "converged"
+
+
+def test_a_phone_that_never_checked_in():
+    ios_mode.set_mode("lock_in", duration_min=60, reason="pset")
+    assert ios_mode.convergence()[0] == "never_seen"
+
+
+def test_a_phone_that_has_not_answered_yet_is_pending():
+    """Reported before the mode was published — it simply has not seen it."""
+    ios_mode.record_actual({"mode": "off", "version": 0})
+    ios_mode.set_mode("lock_in", duration_min=60, reason="pset")
+    assert ios_mode.convergence()[0] == "pending"
+
+
+def test_a_phone_that_answered_but_did_not_apply_has_diverged(monkeypatch):
+    """The real bug: the app's reconciler fails silently on a bad profile.
+
+    It reports *after* the request, still on the old version. Without this the
+    server cannot tell "tried and failed" from "phone is switched off".
+    """
+    ios_mode.set_mode("lock_in", duration_min=60, reason="pset")
+    later = datetime.now(LA) + timedelta(seconds=30)
+    monkeypatch.setattr("argon.ios.mode.clock.now", lambda: later)
+    ios_mode.record_actual({"mode": "off", "version": 0, "shielded": False})
+
+    state, detail = ios_mode.convergence()
+    assert state == "diverged"
+    assert "could not apply" in detail
+
+
+def test_a_silent_phone_goes_stale(monkeypatch):
+    ios_mode.record_actual({"mode": "off", "version": 0})
+    ios_mode.set_mode("lock_in", duration_min=60, reason="pset")
+
+    later = datetime.now(LA) + timedelta(minutes=ios_mode.STALE_AFTER_MINUTES + 1)
+    monkeypatch.setattr("argon.ios.mode.clock.now", lambda: later)
+    assert ios_mode.convergence()[0] == "stale"
+
+
+def test_snapshot_carries_convergence_without_breaking_the_app_contract():
+    snap = ios_mode.snapshot()
+    assert snap["convergence"]["state"]
+    # The Swift structs still find everything they decode; extra keys are ignored.
+    assert REQUIRED_DESIRED <= snap["desired"].keys()
+    assert REQUIRED_ACTUAL <= snap["actual"].keys()

@@ -59,6 +59,22 @@ class GetStatusTool(Tool):
         except Exception:
             pass
 
+        # Screen Time, but only when it is not the boring answer. The model
+        # needs to know when a block it asked for never landed on the phone.
+        try:
+            from argon.ios import mode as ios_mode
+
+            state, detail = ios_mode.convergence()
+            desired = ios_mode.get_mode()
+            if desired["mode"] != "off" or state != "converged":
+                result["phone_focus"] = {
+                    "requested": desired["mode"],
+                    "status": state,
+                    **({"detail": detail} if detail else {}),
+                }
+        except Exception:
+            pass
+
         return json.dumps(result, indent=2)
 
 
