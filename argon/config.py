@@ -90,6 +90,8 @@ class IosConfig(Base):
     """iOS app. APNs push is not wired yet — the app polls while foregrounded."""
 
     default_lock_minutes: int = 60
+    #: How long an emergency override blocks any new lock.
+    override_minutes: int = 120
 
 
 class ApiConfig(Base):

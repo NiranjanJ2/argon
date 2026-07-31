@@ -26,6 +26,7 @@ V1_ROUTES = [
     ("get", "/v1/ios/mode"),
     ("post", "/v1/ios/state"),
     ("post", "/v1/ios/register"),
+    ("post", "/v1/ios/override"),
 ]
 
 
@@ -458,3 +459,32 @@ def test_device_registration_stores_the_token(tmp_path, monkeypatch):
 def test_registration_without_a_token_is_rejected(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     assert client.post("/v1/ios/register", headers=AUTH, json={}).status_code == 400
+
+
+def test_the_override_endpoint_releases_and_holds(tmp_path, monkeypatch):
+    from argon.ios import mode as ios_mode
+
+    client = _client(tmp_path, monkeypatch)
+    ios_mode.set_mode("lock_in", duration_min=600, allow_early_end=False, reason="pset")
+
+    response = client.post("/v1/ios/override", headers=AUTH, json={"minutes": 60})
+
+    assert response.status_code == 200
+    assert response.get_json()["active"] is True
+    assert client.get("/v1/ios/mode", headers=AUTH).get_json()["mode"] == "off"
+    with pytest.raises(ios_mode.OverrideActive):
+        ios_mode.set_mode("lock_in", duration_min=30, reason="nope")
+
+
+def test_the_override_endpoint_can_clear(tmp_path, monkeypatch):
+    from argon.ios import mode as ios_mode
+
+    client = _client(tmp_path, monkeypatch)
+    client.post("/v1/ios/override", headers=AUTH, json={"minutes": 60})
+    client.post("/v1/ios/override", headers=AUTH, json={"clear": True})
+    assert ios_mode.override_status()[0] is False
+
+
+def test_an_override_with_no_minutes_uses_the_configured_default(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    assert client.post("/v1/ios/override", headers=AUTH, json={}).status_code == 200

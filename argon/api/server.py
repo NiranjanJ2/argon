@@ -234,6 +234,28 @@ def ios_state() -> Any:
     return jsonify({"ok": True, **ios_mode.record_actual(body)})
 
 
+@app.post("/v1/ios/override")
+@require_token
+def ios_override() -> Any:
+    """Emergency release: drop any block and refuse to impose one for a while.
+
+    Deliberately the simplest endpoint here — an escape hatch that needs a
+    working agent, a working model or a working phone is not an escape hatch.
+    """
+    from argon.ios import mode as ios_mode
+
+    body = _body()
+    if body.get("clear") is True:
+        ios_mode.clear_override()
+        return jsonify({"ok": True, "active": False})
+
+    minutes = body.get("minutes")
+    if not isinstance(minutes, int) or minutes <= 0:
+        minutes = _rt.config.ios.override_minutes if _rt.config else 120
+    record = ios_mode.engage_override(minutes, source=str(body.get("source") or "api"))
+    return jsonify({"ok": True, "active": True, **record})
+
+
 @app.post("/v1/ios/register")
 @require_token
 def ios_register() -> Any:

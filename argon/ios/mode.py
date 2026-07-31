@@ -14,6 +14,8 @@ import json
 from datetime import datetime, timedelta
 from typing import Any
 
+from loguru import logger
+
 from argon import clock
 from argon.paths import get_runtime_subdir
 
@@ -93,6 +95,47 @@ def get_mode() -> dict[str, Any]:
     return desired
 
 
+class OverrideActive(ValueError):
+    """Raised when a lock is attempted during an emergency override."""
+
+
+def override_status() -> tuple[bool, str | None]:
+    """``(active, until)`` for the emergency override."""
+    until = _read("override.json", {}).get("until")
+    if not until:
+        return False, None
+    try:
+        if datetime.fromisoformat(until) > clock.now():
+            return True, until
+    except ValueError:
+        return False, None
+    return False, until
+
+
+def engage_override(minutes: int, source: str = "phone") -> dict[str, Any]:
+    """Release any block and refuse to impose another for *minutes*.
+
+    Releasing alone is not enough: the phone re-applies the desired mode on
+    every poll, and Argon could publish a fresh lock a minute later. The
+    override is the part that makes "let me out" actually stick.
+    """
+    now = clock.now()
+    record = {
+        "until": _stamp(now + timedelta(minutes=max(1, int(minutes)))),
+        "since": _stamp(now),
+        "source": source,
+    }
+    _write("override.json", record)
+    set_mode("off", reason=f"emergency override ({source})")
+    logger.warning("Emergency override engaged until {} by {}", record["until"], source)
+    return record
+
+
+def clear_override() -> None:
+    """End an override early. Locks may be imposed again immediately."""
+    _write("override.json", {})
+
+
 def set_mode(
     mode: str,
     *,
@@ -103,6 +146,15 @@ def set_mode(
     """Publish a new desired mode and bump the version."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
+
+    # 'off' is always allowed — an escape hatch must never be able to jam shut.
+    if mode != "off":
+        active, until = override_status()
+        if active:
+            raise OverrideActive(
+                f"emergency override is active until {until}; no block can be "
+                "imposed before then"
+            )
 
     now = clock.now()
     expires_at = None
@@ -215,8 +267,10 @@ def convergence() -> tuple[str, str]:
 def snapshot() -> dict[str, Any]:
     """The ``ios`` block of ``/v1/status``: what Argon wants, what the phone did."""
     state, detail = convergence()
+    active, until = override_status()
     return {
         "desired": get_mode(),
         "actual": get_actual(),
         "convergence": {"state": state, "detail": detail},
+        "override": {"active": active, "until": until},
     }

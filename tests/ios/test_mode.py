@@ -241,3 +241,72 @@ def test_an_acknowledged_unlock_needs_no_shield():
         {"mode": "off", "version": desired["version"], "shielded": False}
     )
     assert ios_mode.convergence()[0] == "converged"
+
+
+# ---------------------------------------------------------------------------
+# Emergency override — "don't get stuck"
+# ---------------------------------------------------------------------------
+
+
+def test_an_override_releases_whatever_is_active():
+    ios_mode.set_mode("lock_in", duration_min=600, allow_early_end=False, reason="pset")
+    ios_mode.engage_override(120, source="cli")
+    assert ios_mode.get_mode()["mode"] == "off"
+
+
+def test_argon_cannot_impose_a_block_during_an_override():
+    """The whole point: releasing is useless if it re-locks a minute later."""
+    ios_mode.engage_override(120, source="phone")
+    for mode in ("lock_in", "school", "homework", "sleep"):
+        with pytest.raises(ios_mode.OverrideActive):
+            ios_mode.set_mode(mode, duration_min=30, reason="nope")
+    assert ios_mode.get_mode()["mode"] == "off"
+
+
+def test_off_is_always_allowed_during_an_override():
+    """An escape hatch must never be able to jam shut."""
+    ios_mode.engage_override(120)
+    assert ios_mode.set_mode("off", reason="fine")["mode"] == "off"
+
+
+def test_an_override_expires(monkeypatch):
+    ios_mode.engage_override(30)
+    later = datetime.now(LA) + timedelta(minutes=31)
+    monkeypatch.setattr("argon.ios.mode.clock.now", lambda: later)
+
+    assert ios_mode.override_status()[0] is False
+    assert ios_mode.set_mode("lock_in", duration_min=30, reason="ok")["mode"] == "lock_in"
+
+
+def test_an_override_can_be_ended_early():
+    ios_mode.engage_override(120)
+    ios_mode.clear_override()
+    assert ios_mode.override_status()[0] is False
+    assert ios_mode.set_mode("lock_in", duration_min=30, reason="ok")["mode"] == "lock_in"
+
+
+def test_a_corrupt_override_file_does_not_trap_anyone():
+    """Fail open: an unreadable override must not become a permanent lock."""
+    ios_mode._file("override.json").write_text("{ not json")
+    assert ios_mode.override_status()[0] is False
+
+
+def test_an_unparseable_until_does_not_trap_anyone():
+    ios_mode._file("override.json").write_text('{"until": "whenever"}')
+    assert ios_mode.override_status()[0] is False
+
+
+def test_the_override_shows_up_in_the_status_snapshot():
+    ios_mode.engage_override(120)
+    override = ios_mode.snapshot()["override"]
+    assert override["active"] is True
+    assert override["until"]
+
+
+async def test_the_focus_tool_refuses_during_an_override():
+    from argon.tools.focus import SetFocusModeTool
+
+    ios_mode.engage_override(120)
+    result = await SetFocusModeTool(60).execute(mode="lock_in", reason="try it")
+    assert "Not applied" in result
+    assert ios_mode.get_mode()["mode"] == "off"

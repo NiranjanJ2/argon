@@ -121,6 +121,43 @@ one — so the model can see a block did not land.
 With no APNs key, `stale` is also the ordinary state whenever the app is
 backgrounded; that ambiguity disappears once push is wired.
 
+## Emergency override
+
+Getting out must not depend on the thing you are trying to get out of. There
+are three independent releases, and **any one of them alone is enough**:
+
+| | Needs | Use when |
+|---|---|---|
+| `argon unlock` | SSH to the box | anything at all is broken |
+| `POST /v1/ios/override` | the HTTP API | from the app, a laptop, a Shortcut |
+| Emergency Access in the app | nothing — no network | the server is unreachable |
+
+Releasing on its own is not enough, and this is the part that is easy to get
+wrong: the app re-applies the server's desired mode on **every poll**, roughly
+every 20 seconds, with no version guard. A plain unlock is therefore undone
+almost immediately, and Argon could publish a fresh lock a minute later anyway.
+So an override does two things — it releases, *and* it refuses to let any block
+be imposed until it expires (`ios.overrideMinutes`, default 120).
+
+```sh
+argon unlock                  # release, hold for 2 hours
+argon unlock --minutes 30     # shorter window
+argon unlock --clear          # end the override now
+```
+
+`argon unlock` edits the desired-state files directly, so it works with the
+gateway stopped — verified with `argon.service` killed, and the override
+survives a restart. `set_mode("off")` is always permitted during an override:
+an escape hatch must never be able to jam shut. `set_focus_mode` refuses
+outright and tells the model not to work around it.
+
+On the phone, foqos's existing Emergency Access now also engages a **local**
+override (`ArgonOverride`, a plain UserDefaults date). While it is set the
+reconciler refuses any non-off mode without asking anyone, so it works in
+airplane mode; it tells the server too, best-effort, so the two do not fight.
+An unreadable or unparseable override file reads as *inactive* — this fails
+open on purpose, so a corrupt file can never become a permanent lock.
+
 ## Screen Time
 
 `POST /v1/screentime` accepts whatever shape you send and appends

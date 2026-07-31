@@ -26,7 +26,8 @@ class SetFocusModeTool(Tool):
             "(a deadline he has not started, a work session he asked you to protect), "
             "not as a general nudge. Always give a reason; he sees it in the app. "
             "Use 'off' to release. Set allow_early_end to false only when he asked "
-            "for that in advance."
+            "for that in advance. If an emergency override is active this refuses "
+            "outright — that is deliberate; do not try to work around it."
         )
 
     @property
@@ -71,12 +72,17 @@ class SetFocusModeTool(Tool):
         if mode != "off" and not duration:
             duration = self._default_minutes
 
-        desired = ios_mode.set_mode(
-            mode,
-            duration_min=duration,
-            allow_early_end=bool(kwargs.get("allow_early_end", True)),
-            reason=str(kwargs.get("reason") or ""),
-        )
+        try:
+            desired = ios_mode.set_mode(
+                mode,
+                duration_min=duration,
+                allow_early_end=bool(kwargs.get("allow_early_end", True)),
+                reason=str(kwargs.get("reason") or ""),
+            )
+        except ios_mode.OverrideActive as exc:
+            # Niranjan pulled the emergency release. Do not argue with it, and
+            # do not pretend the block was applied.
+            return f"Not applied: {exc}. Leave it alone until then."
 
         if mode == "off":
             return "Screen Time block released."

@@ -355,3 +355,36 @@ def migrate(
 
 if __name__ == "__main__":
     app()
+
+
+# ---------------------------------------------------------------------------
+# unlock
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def unlock(
+    minutes: int = typer.Option(
+        None, "--minutes", "-m", help="How long to block any new lock."
+    ),
+    clear: bool = typer.Option(False, "--clear", help="End the override now."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Emergency release: drop any Screen Time block and refuse to impose another.
+
+    Deliberately does not need the gateway, the model or the phone to be
+    working — an escape hatch with dependencies is not an escape hatch. It
+    edits the desired-state files directly, so it works even if `argon
+    gateway` is dead.
+    """
+    from argon.ios import mode as ios_mode
+
+    cfg = _load(config)
+    if clear:
+        ios_mode.clear_override()
+        console.print("[yellow]Override cleared.[/yellow] Locks may be imposed again.")
+        return
+
+    record = ios_mode.engage_override(minutes or cfg.ios.override_minutes, source="cli")
+    console.print(f"[green]Unlocked.[/green] No block can be imposed until {record['until']}.")
+    console.print("[dim]The phone applies this the next time the app is open.[/dim]")
