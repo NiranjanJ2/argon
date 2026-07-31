@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,8 @@ class ScheduleTool(Tool):
             "Query Whitney High School bell schedule. "
             "Actions: current_period (what period is it right now + time remaining), "
             "today_schedule (full today's schedule), "
-            "set_schedule_type (override today's schedule for special days), "
+            "set_schedule_type (override a day's schedule; 'none' cancels school for a "
+            "holiday or break, and start_date/end_date cover a range), "
             "list_schedule_types (see all valid schedule type names)."
         )
 
@@ -47,6 +49,14 @@ class ScheduleTool(Tool):
                     "type": "string",
                     "description": "Schedule type for set_schedule_type (e.g. 'minimum_day', 'activity'). Use 'none' for a holiday or break.",
                 },
+                "start_date": {
+                    "type": "string",
+                    "description": "YYYY-MM-DD. Defaults to today. With end_date, covers a range.",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "YYYY-MM-DD, inclusive. Use for a multi-day break.",
+                },
             },
             "required": ["action"],
         }
@@ -65,8 +75,20 @@ class ScheduleTool(Tool):
             if not schedule_type:
                 return "Error: schedule_type required."
             try:
-                self._mgr.set_override(schedule_type)
-                return f"Schedule set to '{schedule_type}' for today."
+                start = (
+                    date.fromisoformat(kwargs["start_date"])
+                    if kwargs.get("start_date")
+                    else None
+                )
+                if kwargs.get("end_date"):
+                    count = self._mgr.set_override_range(
+                        schedule_type,
+                        start or date.today(),
+                        date.fromisoformat(kwargs["end_date"]),
+                    )
+                    return f"Schedule set to '{schedule_type}' for {count} day(s)."
+                self._mgr.set_override(schedule_type, start)
+                return f"Schedule set to '{schedule_type}' for {start or 'today'}."
             except ValueError as e:
                 return f"Error: {e}"
 

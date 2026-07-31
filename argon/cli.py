@@ -233,7 +233,7 @@ def doctor(
     Argon fails quietly by design — a dead Google token just means those tools
     never register. This surfaces that instead of letting it rot for months.
     """
-    from argon.google.auth import ACCOUNT_SCOPES, GoogleAuth
+    from argon.google.auth import ACCOUNT_SCOPES, OPTIONAL_ACCOUNTS, GoogleAuth
 
     logger.disable("argon")  # the checks below log their own failures
     cfg = _load(config)
@@ -261,9 +261,15 @@ def doctor(
         auth = GoogleAuth(cfg.workspace_path)
         for account in ACCOUNT_SCOPES:
             state, detail = auth.verify(account)
-            mark = ok if state == "ok" else bad
-            console.print(f"{mark} google    {account}: {state}")
-            if detail:
+            optional = account in OPTIONAL_ACCOUNTS
+            if state == "ok":
+                mark = ok
+            else:
+                mark = warn if optional else bad
+            note = " [dim](optional)[/dim]" if optional else ""
+            console.print(f"{mark} google    {account}: {state}{note}")
+            # An optional account's remedy is noise — it is expected to be dead.
+            if detail and not optional:
                 console.print(f"           [dim]{detail}[/dim]")
     else:
         console.print(f"{warn} google    disabled in config")

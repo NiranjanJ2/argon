@@ -159,3 +159,25 @@ def test_no_school_override_cancels_a_weekday(tmp_path, monkeypatch):
     assert mgr.get_schedule_type() is None
     assert mgr.is_school_day() is False
     assert mgr.get_current_period()["status"] == "no_school"
+
+
+def test_a_range_override_covers_every_day(tmp_path, monkeypatch):
+    """Breaks are weeks long; without this the weekday default claimed summer."""
+    from datetime import date
+
+    mgr = _manager(tmp_path, monkeypatch, MONDAY, 11, 0)
+    count = mgr.set_override_range("none", date(2026, 7, 31), date(2026, 8, 11))
+
+    assert count == 12
+    assert mgr.is_school_day(date(2026, 8, 3)) is False
+    assert mgr.is_school_day(date(2026, 8, 11)) is False
+    # The day after the range is untouched — school resumes on its own.
+    assert mgr.is_school_day(date(2026, 8, 12)) is True
+
+
+def test_a_backwards_range_is_rejected(tmp_path, monkeypatch):
+    from datetime import date
+
+    mgr = _manager(tmp_path, monkeypatch, MONDAY, 11, 0)
+    with pytest.raises(ValueError):
+        mgr.set_override_range("none", date(2026, 8, 11), date(2026, 7, 31))

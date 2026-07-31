@@ -75,12 +75,12 @@ def build_runtime(config: Config) -> Runtime:
     agent = AgentLoop(config, bus, provider, cron_service=cron, session_manager=sessions)
 
     if config.google.enabled:
-        from argon.google.auth import GoogleAuth
+        from argon.google.auth import OPTIONAL_ACCOUNTS, GoogleAuth
 
         stale = {
             account: state
             for account, state in GoogleAuth(config.workspace_path).status().items()
-            if state != "ok"
+            if state != "ok" and account not in OPTIONAL_ACCOUNTS
         }
         if stale:
             logger.warning(

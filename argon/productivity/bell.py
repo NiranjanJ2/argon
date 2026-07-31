@@ -7,7 +7,7 @@ Times are 24-hour integers, e.g. 8:30 AM = 830, 1:30 PM = 1330.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 from argon.clock import now as _now_local
@@ -191,6 +191,21 @@ class ScheduleManager:
         overrides = self._load_overrides()
         overrides[target.isoformat()] = schedule_type
         self._save_overrides(overrides)
+
+    def set_override_range(self, schedule_type: str, start: date, end: date) -> int:
+        """Apply an override to every date in ``start``..``end`` inclusive.
+
+        Breaks are the common case and they are weeks long: without this the
+        weekday default quietly claimed school all summer. Returns the count.
+        """
+        if end < start:
+            raise ValueError("end must not precede start")
+        day, count = start, 0
+        while day <= end:
+            self.set_override(schedule_type, day)
+            day += timedelta(days=1)
+            count += 1
+        return count
 
     def clear_override(self, for_date: date | None = None) -> None:
         target = for_date or _now_local().date()

@@ -53,6 +53,12 @@ ACCOUNT_SCOPES: dict[str, list[str]] = {
     ],
 }
 
+#: Accounts that may be unauthenticated without anything being wrong.
+#: ``trigger`` only ever existed to mail an SMS gateway that tripped a Shortcut;
+#: the iOS app drives Screen Time directly now, so a dead grant here is expected
+#: rather than a fault. Re-auth still works if the mail path is wanted again.
+OPTIONAL_ACCOUNTS = frozenset({"trigger"})
+
 #: Loopback port used by the consent flow. Fixed so it can be SSH-forwarded.
 LOOPBACK_PORT = 8765
 
