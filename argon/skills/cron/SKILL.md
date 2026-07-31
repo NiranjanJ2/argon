@@ -1,57 +1,25 @@
 ---
 name: cron
-description: Schedule reminders and recurring tasks.
+description: Schedule reminders and future tasks with the cron tool.
 ---
 
 # Cron
 
-Use the `cron` tool to schedule reminders or recurring tasks.
+`cron` schedules future messages. It only exists while the gateway is running — if it isn't in your tool list, say so rather than promising a reminder.
 
-## Three Modes
+`message` is an instruction executed at fire time, and its result is delivered to him. For a plain reminder, write the instruction so the result *is* the reminder ("Tell Niranjan to leave for the lab").
 
-1. **Reminder** - message is sent directly to user
-2. **Task** - message is a task description, agent executes and sends result
-3. **One-time** - runs once at a specific time, then auto-deletes
+## Timing
 
-## Examples
+| He says | Use |
+|---|---|
+| every 20 minutes | `every_seconds=1200` |
+| every day at 8am | `cron_expr="0 8 * * *"` |
+| weekdays at 5pm | `cron_expr="0 17 * * 1-5"` |
+| at a specific time | `at="<ISO datetime>"` — compute it from the current time; the job deletes itself after firing |
 
-Fixed reminder:
-```
-cron(action="add", message="Time to take a break!", every_seconds=1200)
-```
+Times default to his configured timezone (Pacific). Only pass `tz` for a different IANA zone.
 
-Dynamic task (agent executes each time):
-```
-cron(action="add", message="Check HKUDS/nanobot GitHub stars and report", every_seconds=600)
-```
+## Managing
 
-One-time scheduled task (compute ISO datetime from current time):
-```
-cron(action="add", message="Remind me about the meeting", at="<ISO datetime>")
-```
-
-Timezone-aware cron:
-```
-cron(action="add", message="Morning standup", cron_expr="0 9 * * 1-5", tz="America/Vancouver")
-```
-
-List/remove:
-```
-cron(action="list")
-cron(action="remove", job_id="abc123")
-```
-
-## Time Expressions
-
-| User says | Parameters |
-|-----------|------------|
-| every 20 minutes | every_seconds: 1200 |
-| every hour | every_seconds: 3600 |
-| every day at 8am | cron_expr: "0 8 * * *" |
-| weekdays at 5pm | cron_expr: "0 17 * * 1-5" |
-| 9am Vancouver time daily | cron_expr: "0 9 * * *", tz: "America/Vancouver" |
-| at a specific time | at: ISO datetime string (compute from current time) |
-
-## Timezone
-
-Use `tz` with `cron_expr` to schedule in a specific IANA timezone. Without `tz`, the server's local timezone is used.
+`cron(action="list")` to see jobs, `cron(action="remove", job_id=...)` to clear one. You cannot add a job from inside a running cron job.

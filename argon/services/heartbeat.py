@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
@@ -77,12 +78,24 @@ class HeartbeatService:
         return self.workspace / "HEARTBEAT.md"
 
     def _read_heartbeat_file(self) -> str | None:
-        if self.heartbeat_file.exists():
-            try:
-                return self.heartbeat_file.read_text(encoding="utf-8")
-            except Exception:
-                return None
-        return None
+        """Return the file, or None when it holds no actual tasks.
+
+        A template HEARTBEAT.md is all headings and HTML comments. Returning it
+        anyway made every tick spend an LLM call to conclude "nothing to do" —
+        48 pointless calls a day. Strip the scaffolding and check what is left.
+        """
+        if not self.heartbeat_file.exists():
+            return None
+        try:
+            content = self.heartbeat_file.read_text(encoding="utf-8")
+        except Exception:
+            return None
+        body = re.sub(r"<!--.*?-->", "", content, flags=re.S)
+        body = "\n".join(
+            line for line in body.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+        return content if body.strip() else None
 
     async def _decide(self, content: str) -> tuple[str, str]:
         """Phase 1: ask LLM to decide skip/run via virtual tool call.

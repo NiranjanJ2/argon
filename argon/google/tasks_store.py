@@ -24,9 +24,13 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
-_TZ = ZoneInfo("America/Los_Angeles")
+from loguru import logger
+
+from argon.google.classroom import classroom_due
+from argon.google.service import LOCAL_TZ
+
+_TZ = LOCAL_TZ
 _MARKER = "~argon~"
 _TASKLIST_NAME = "Argon"
 
@@ -97,36 +101,22 @@ def _to_task(gt: dict[str, Any]) -> dict[str, Any]:
 # Classroom helpers
 # ---------------------------------------------------------------------------
 
-def _parse_classroom_due(assignment: dict[str, Any]) -> str | None:
-    """Convert Classroom dueDate/dueTime dicts to ISO datetime string."""
-    due_date = assignment.get("dueDate")
-    if not due_date:
-        return None
-    try:
-        hour = (assignment.get("dueTime") or {}).get("hours", 23)
-        minute = (assignment.get("dueTime") or {}).get("minutes", 59)
-        dt = datetime(
-            due_date["year"], due_date["month"], due_date["day"],
-            hour, minute, tzinfo=_TZ,
-        )
-        return dt.isoformat()
-    except Exception:
-        return None
+def _due_stamp(dt: datetime) -> str:
+    """Google Tasks stores dates only — normalize to midnight RFC3339."""
+    return dt.strftime("%Y-%m-%dT00:00:00.000Z")
 
 
 def _infer_priority(assignment: dict[str, Any]) -> str:
-    due_str = _parse_classroom_due(assignment)
-    if not due_str:
+    """High if due within a day, medium within three, else low."""
+    due = classroom_due(assignment)
+    if due is None:
         return "medium"
-    try:
-        delta_h = (datetime.fromisoformat(due_str) - _now()).total_seconds() / 3600
-        if delta_h < 24:
-            return "high"
-        if delta_h < 72:
-            return "medium"
-        return "low"
-    except Exception:
+    delta_h = (due - _now()).total_seconds() / 3600
+    if delta_h < 24:
+        return "high"
+    if delta_h < 72:
         return "medium"
+    return "low"
 
 
 # ---------------------------------------------------------------------------
@@ -143,11 +133,15 @@ class GoogleTasksStore:
 
     def __init__(self, workspace: Path) -> None:
         self._workspace = workspace
+        self._service = None       # cached API client
         self._tl_id: str | None = None  # cached task list ID
 
     def _svc(self):
-        from argon.google.service import build_google_service
-        return build_google_service(self._workspace, "tasks", "v1", "work")
+        """Google Tasks client for the work account, built once per store."""
+        if self._service is None:
+            from argon.google.service import build_google_service
+            self._service = build_google_service(self._workspace, "tasks", "v1", "work")
+        return self._service
 
     def _tl(self) -> str:
         """Get (or create) the Argon task list ID, cached for the session."""
@@ -164,11 +158,13 @@ class GoogleTasksStore:
 
     def _resolve(self, svc, task_id: str) -> dict[str, Any] | None:
         """Find a task by exact Google Tasks ID or by title substring match."""
+        from googleapiclient.errors import HttpError
+
         tl = self._tl()
         try:
             return svc.tasks().get(tasklist=tl, task=task_id).execute()
-        except Exception:
-            pass
+        except HttpError:
+            pass  # not an ID — fall through to a title search
         items = svc.tasks().list(
             tasklist=tl, showCompleted=False, maxResults=100
         ).execute().get("items", [])
@@ -182,11 +178,11 @@ class GoogleTasksStore:
     # Read operations
     # ------------------------------------------------------------------
 
-    def get_all(self) -> list[dict[str, Any]]:
-        """Return all pending tasks sorted by priority then due date."""
-        svc = self._svc()
-        items = svc.tasks().list(
-            tasklist=self._tl(), showCompleted=False, maxResults=100,
+    def get_all(self, *, include_done: bool = False) -> list[dict[str, Any]]:
+        """Return tasks sorted by priority then due date (pending only by default)."""
+        items = self._svc().tasks().list(
+            tasklist=self._tl(), showCompleted=include_done,
+            showHidden=include_done, maxResults=100,
         ).execute().get("items", [])
         tasks = [_to_task(t) for t in items]
         _p = {"high": 0, "medium": 1, "low": 2}
@@ -228,9 +224,9 @@ class GoogleTasksStore:
             body["notes"] = encoded
         if due:
             try:
-                body["due"] = datetime.fromisoformat(due).strftime("%Y-%m-%dT00:00:00.000Z")
-            except Exception:
-                pass
+                body["due"] = _due_stamp(datetime.fromisoformat(due))
+            except ValueError:
+                logger.warning(f"add_task: unparseable due date {due!r}, task created without one")
 
         created = self._svc().tasks().insert(tasklist=self._tl(), body=body).execute()
         return _to_task(created)
@@ -256,11 +252,11 @@ class GoogleTasksStore:
             return None
         meta, notes = _decode_meta(target.get("notes"))
         meta["sat"] = _now().isoformat()
-        svc.tasks().patch(
+        updated = svc.tasks().patch(
             tasklist=self._tl(), task=target["id"],
             body={"notes": _encode_meta(meta, notes)},
         ).execute()
-        return _to_task(target)
+        return _to_task(updated)
 
     def complete_task(self, task_id: str) -> dict[str, Any] | None:
         """Complete a task. Returns the completed task dict (with time_actual_min) or None."""
@@ -278,17 +274,19 @@ class GoogleTasksStore:
                 started = datetime.fromisoformat(meta["sat"])
                 actual_min = int((_now() - started).total_seconds() / 60)
                 meta["act"] = actual_min
-            except Exception:
-                pass
+            except ValueError:
+                logger.warning(f"complete_task: bad start timestamp {meta['sat']!r}")
         meta.pop("sat", None)  # clear start time on completion
 
         body: dict[str, Any] = {"status": "completed"}
         encoded = _encode_meta(meta, notes)
         if encoded:
             body["notes"] = encoded
-        svc.tasks().patch(tasklist=self._tl(), task=target["id"], body=body).execute()
+        updated = svc.tasks().patch(
+            tasklist=self._tl(), task=target["id"], body=body
+        ).execute()
 
-        result = _to_task(target)
+        result = _to_task(updated)
         result["time_actual_min"] = actual_min
         return result
 
@@ -310,51 +308,47 @@ class GoogleTasksStore:
 
     def carry_over_task(self, task_id: str) -> bool:
         """Push due date to tomorrow."""
-        svc = self._svc()
-        target = self._resolve(svc, task_id)
-        if not target:
-            return False
-        tomorrow = (_now() + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0,
-        )
-        svc.tasks().patch(
-            tasklist=self._tl(), task=target["id"],
-            body={"due": tomorrow.strftime("%Y-%m-%dT00:00:00.000Z")},
-        ).execute()
-        return True
+        return self.update_due(task_id, (_now() + timedelta(days=1)).isoformat())
 
     def update_due(self, task_id: str, due_iso: str) -> bool:
         """Set an arbitrary due date (ISO 8601 string)."""
+        try:
+            due_dt = datetime.fromisoformat(due_iso)
+        except ValueError:
+            logger.warning(f"update_due: unparseable due date {due_iso!r}")
+            return False
         svc = self._svc()
         target = self._resolve(svc, task_id)
         if not target:
             return False
-        try:
-            due_dt = datetime.fromisoformat(due_iso)
-            svc.tasks().patch(
-                tasklist=self._tl(), task=target["id"],
-                body={"due": due_dt.strftime("%Y-%m-%dT00:00:00.000Z")},
-            ).execute()
-            return True
-        except Exception:
-            return False
+        svc.tasks().patch(
+            tasklist=self._tl(), task=target["id"], body={"due": _due_stamp(due_dt)},
+        ).execute()
+        return True
 
     def bulk_add_from_classroom(self, assignments: list[dict[str, Any]]) -> int:
         """Add Classroom assignments as tasks, skipping duplicates by classroom_id."""
-        existing = self.get_all()
-        existing_cids = {t["classroom_id"] for t in existing if t.get("classroom_id")}
+        # Completed tasks count as duplicates too, or finished work reappears.
+        existing_cids = {
+            t["classroom_id"]
+            for t in self.get_all(include_done=True)
+            if t.get("classroom_id")
+        }
         added = 0
         for a in assignments:
             cid = a.get("id")
             if cid and cid in existing_cids:
                 continue
+            due = classroom_due(a)
             self.add_task(
                 title=a.get("title", "Untitled"),
                 source="classroom",
-                due=_parse_classroom_due(a),
+                due=due.isoformat() if due else None,
                 subject=a.get("course_name"),
                 classroom_id=cid,
                 priority=_infer_priority(a),
             )
+            if cid:
+                existing_cids.add(cid)
             added += 1
         return added

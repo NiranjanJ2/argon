@@ -1,8 +1,8 @@
 /**
- * Argon WhatsApp bridge — whatsapp-web.js ↔ nanobot HTTP glue.
+ * Argon WhatsApp bridge — whatsapp-web.js <-> Argon HTTP glue.
  *
  * Env vars (all optional, shown with defaults):
- *   NANOBOT_WEBHOOK_URL  http://localhost:3995/whatsapp/incoming
+ *   ARGON_WEBHOOK_URL    http://localhost:3995/whatsapp/incoming
  *   WA_BRIDGE_PORT       3996
  *   WA_DATA_PATH         ./wwebjs_auth  (relative to CWD when launched)
  *
@@ -17,7 +17,7 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const qrcode = require('qrcode-terminal');
 
-const WEBHOOK_URL   = process.env.NANOBOT_WEBHOOK_URL || 'http://localhost:3995/whatsapp/incoming';
+const WEBHOOK_URL   = process.env.ARGON_WEBHOOK_URL || process.env.NANOBOT_WEBHOOK_URL || 'http://localhost:3995/whatsapp/incoming';
 const BRIDGE_PORT   = parseInt(process.env.WA_BRIDGE_PORT || '3996', 10);
 const WA_DATA_PATH  = process.env.WA_DATA_PATH || './wwebjs_auth';
 

@@ -1,5 +1,4 @@
-"""Whitney High School bell schedules and current-period resolution."""
-
+"""Whitney High School bell schedules and current-period resolution.
 
 Each schedule is a list of (label, start_hhmm, end_hhmm) tuples.
 Times are 24-hour integers, e.g. 8:30 AM = 830, 1:30 PM = 1330.
@@ -136,7 +135,6 @@ SCHEDULE_DISPLAY_NAMES: dict[str, str] = {
 }
 
 
-from __future__ import annotations
 
 import json
 from datetime import date, datetime, time, timedelta

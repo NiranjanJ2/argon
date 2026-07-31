@@ -1,8 +1,8 @@
-"""WhatsApp channel — bridges whatsapp-web.js subprocess to the nanobot MessageBus.
+"""WhatsApp channel — bridges whatsapp-web.js subprocess to the Argon MessageBus.
 
 Setup (one-time):
   1. cd whatsapp_bridge && npm install
-  2. nanobot gateway  (bridge auto-starts; scan QR code with phone)
+  2. argon gateway  (bridge auto-starts; scan QR code with phone)
   3. Session is saved — subsequent starts reconnect silently.
 
 Config keys (under channels.whatsapp in config.json):
@@ -92,11 +92,12 @@ class WhatsAppChannel(BaseChannel):
             "allowFrom": [],
         }
 
-    def __init__(self, config: Any, bus: MessageBus) -> None:
+    def __init__(self, config: Any, bus: MessageBus, webhook_port: int = 3995) -> None:
         if isinstance(config, dict):
             config = WhatsAppConfig.model_validate(config)
         super().__init__(config, bus)
         self.config: WhatsAppConfig = config
+        self.webhook_port = webhook_port
         self._bridge_proc: subprocess.Popen | None = None
         self._http: httpx.AsyncClient | None = None
 
@@ -228,7 +229,8 @@ class WhatsAppChannel(BaseChannel):
             logger.error("WhatsApp: node not found in PATH. Install Node.js >= 18.")
             return None
 
-        auth_dir = str(bridge_dir / "wwebjs_auth")
+        from argon.paths import get_bridge_auth_dir
+        auth_dir = str(get_bridge_auth_dir())
         env_extras = {
             "WA_BRIDGE_PORT": str(self.config.bridge_port),
             "WA_DATA_PATH": auth_dir,

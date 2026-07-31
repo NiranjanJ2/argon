@@ -1,16 +1,18 @@
 # Heartbeat Tasks
 
-This file is checked every 30 minutes by your nanobot agent.
-Add tasks below that you want the agent to work on periodically.
+<!--
+Argon re-reads this file on the configured heartbeat interval and works any task listed
+under Active Tasks. With no task lines (only headings and comments), the heartbeat is skipped.
 
-If this file has no tasks (only headers and comments), the agent will skip the heartbeat.
+Keep every line of guidance inside an HTML comment or behind a heading — plain prose here
+counts as a task and will make Argon run the heartbeat on an otherwise empty file.
+-->
 
 ## Active Tasks
 
-<!-- Add your periodic tasks below this line -->
+<!-- Add periodic tasks below this line -->
 
 
 ## Completed
 
-<!-- Move completed tasks here or delete them -->
-
+<!-- Move finished tasks here or delete them -->

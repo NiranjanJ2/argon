@@ -18,7 +18,6 @@ from argon.core.context import ContextBuilder
 from argon.core.hook import AgentHook, AgentHookContext, CompositeHook
 from argon.core.memory import MemoryConsolidator
 from argon.core.runner import AgentRunSpec, AgentRunner
-from argon.agent.subagent import SubagentManager
 from argon.tools.cron import CronTool
 from argon.core.skills import BUILTIN_SKILLS_DIR
 from argon.tools.fs import ReadFileTool
@@ -28,7 +27,7 @@ from argon.tools.web import WebFetchTool, WebSearchTool
 from argon.core.bus import InboundMessage, OutboundMessage
 from argon.core.commands import CommandContext, CommandRouter, register_builtin_commands
 from argon.core.bus import MessageBus
-from argon.config import AgentDefaults
+from argon.config import Config
 from argon.providers.base import LLMProvider
 from argon.core.session import Session, SessionManager
 from argon.utils.helpers import image_placeholder_text, truncate_text
@@ -161,85 +160,52 @@ class AgentLoop:
 
     def __init__(
         self,
+        config: Config,
         bus: MessageBus,
         provider: LLMProvider,
-        workspace: Path,
+        *,
         model: str | None = None,
-        max_iterations: int | None = None,
-        context_window_tokens: int | None = None,
-        context_block_limit: int | None = None,
-        max_tool_result_chars: int | None = None,
-        provider_retry_mode: str = "standard",
-        web_config: WebToolsConfig | None = None,
-        exec_config: ExecToolConfig | None = None,
         cron_service: CronService | None = None,
-        restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
-        mcp_servers: dict | None = None,
-        channels_config: ChannelsConfig | None = None,
-        timezone: str | None = None,
         hooks: list[AgentHook] | None = None,
-        google_enabled: bool = False,
-        trigger_email: str | None = None,
-        trigger_password: str | None = None,
-        trigger_phone: str | None = None,
-        idle_session_reset_hours: float = 0.0,
-        max_session_messages: int = 0,
+        register_tools: bool = True,
     ):
-        from argon.config import ExecToolConfig, WebToolsConfig
+        """Build a loop from config.
 
-        defaults = AgentDefaults()
+        *model* overrides ``agents.defaults.model`` — the heartbeat runs on a
+        cheaper model than interactive chat, and that is the only difference
+        between the two loops the gateway creates.
+        """
+        defaults = config.agents.defaults
+        self.config = config
         self.bus = bus
-        self.channels_config = channels_config
+        self.channels_config = config.channels
         self.provider = provider
-        self.workspace = workspace
-        self.model = model or provider.get_default_model()
-        self.max_iterations = (
-            max_iterations if max_iterations is not None else defaults.max_tool_iterations
-        )
-        self.context_window_tokens = (
-            context_window_tokens
-            if context_window_tokens is not None
-            else defaults.context_window_tokens
-        )
-        self.context_block_limit = context_block_limit
-        self.max_tool_result_chars = (
-            max_tool_result_chars
-            if max_tool_result_chars is not None
-            else defaults.max_tool_result_chars
-        )
-        self.provider_retry_mode = provider_retry_mode
-        self.web_config = web_config or WebToolsConfig()
-        self.exec_config = exec_config or ExecToolConfig()
+        self.workspace = config.workspace_path
+        self.model = model or defaults.model
+        self.max_iterations = defaults.max_tool_iterations
+        self.context_window_tokens = defaults.context_window_tokens
+        self.context_block_limit = defaults.context_block_limit
+        self.max_tool_result_chars = defaults.max_tool_result_chars
+        self.provider_retry_mode = defaults.provider_retry_mode
+        self.web_config = config.tools.web
+        self.exec_config = config.tools.exec
         self.cron_service = cron_service
-        self.restrict_to_workspace = restrict_to_workspace
-        self.google_enabled = google_enabled
-        self._trigger_email = trigger_email
-        self._trigger_password = trigger_password
-        self._trigger_phone = trigger_phone
+        self.restrict_to_workspace = config.tools.restrict_to_workspace
+        self.google_enabled = config.google.enabled
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
 
-        self.context = ContextBuilder(workspace, timezone=timezone)
-        self.sessions = session_manager or SessionManager(workspace)
+        self.context = ContextBuilder(self.workspace, timezone=defaults.timezone)
+        self.sessions = session_manager or SessionManager(self.workspace)
         self.tools = ToolRegistry()
         self.runner = AgentRunner(provider)
-        self.subagents = SubagentManager(
-            provider=provider,
-            workspace=workspace,
-            bus=bus,
-            model=self.model,
-            web_config=self.web_config,
-            max_tool_result_chars=self.max_tool_result_chars,
-            exec_config=self.exec_config,
-            restrict_to_workspace=restrict_to_workspace,
-        )
 
-        self.idle_session_reset_hours = idle_session_reset_hours
-        self.max_session_messages = max_session_messages
+        self.idle_session_reset_hours = defaults.idle_session_reset_hours
+        self.max_session_messages = defaults.max_session_messages
         self._running = False
-        self._mcp_servers = mcp_servers or {}
+        self._mcp_servers = config.tools.mcp_servers
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
@@ -252,16 +218,17 @@ class AgentLoop:
             asyncio.Semaphore(_max) if _max > 0 else None
         )
         self.memory_consolidator = MemoryConsolidator(
-            workspace=workspace,
+            workspace=self.workspace,
             provider=provider,
             model=self.model,
             sessions=self.sessions,
-            context_window_tokens=context_window_tokens,
+            context_window_tokens=self.context_window_tokens,
             build_messages=self.context.build_messages,
             get_tool_definitions=self.tools.get_definitions,
             max_completion_tokens=provider.generation.max_tokens,
         )
-        self._register_default_tools()
+        if register_tools:
+            self._register_default_tools()
         self.commands = CommandRouter()
         register_builtin_commands(self.commands)
 
@@ -320,10 +287,10 @@ class AgentLoop:
         # Always available — handles missing Google auth gracefully
         self.tools.register(GetDailyOverviewTool(self.workspace))
 
-        # Phone notifications (email trigger → iOS Shortcuts)
-        if self._trigger_email and self._trigger_password and self._trigger_phone:
+        # Phone lockdown (mail → SMS gateway → iOS Shortcut)
+        if self.config.lockdown.configured:
             from argon.tools.lockdown import SendPhoneNotificationTool
-            self.tools.register(SendPhoneNotificationTool(self._trigger_email, self._trigger_password, self._trigger_phone))
+            self.tools.register(SendPhoneNotificationTool(self.config.lockdown))
 
     def _register_google_tools(self) -> None:
         """Register Google API tools (only those whose accounts are authenticated)."""

@@ -36,12 +36,21 @@ class ChannelManager:
         self._init_channels()
 
     def _init_channels(self) -> None:
-        """Initialize channels discovered via pkgutil scan + entry_points plugins."""
-        from argon.channels.registry import discover_all
+        """Initialize the channels enabled in config."""
+        from argon.channels.discord import DiscordChannel
+        from argon.channels.whatsapp import WhatsAppChannel
 
-        groq_key = self.config.providers.groq.api_key
+        # Two channels, named explicitly. The upstream pkgutil + entry_points
+        # plugin discovery existed to support a dozen chat platforms this fork
+        # does not have.
+        available: dict[str, type[BaseChannel]] = {
+            "discord": DiscordChannel,
+            "whatsapp": WhatsAppChannel,
+        }
+        groq = self.config.providers.get("groq")
+        groq_key = groq.api_key if groq else ""
 
-        for name, cls in discover_all().items():
+        for name, cls in available.items():
             section = getattr(self.config.channels, name, None)
             if section is None:
                 continue
@@ -53,7 +62,11 @@ class ChannelManager:
             if not enabled:
                 continue
             try:
-                channel = cls(section, self.bus)
+                channel = (
+                    cls(section, self.bus, webhook_port=self.config.api.port)
+                    if name == "whatsapp"
+                    else cls(section, self.bus)
+                )
                 channel.transcription_api_key = groq_key
                 self.channels[name] = channel
                 logger.info("{} channel enabled", cls.display_name)

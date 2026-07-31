@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from typing import Any
 
-from argon.google.service import GoogleAPITool, build_google_service
+from argon.google.service import GoogleAPITool
 
 _ACCOUNTS = ("work", "school")
+
+_HEADERS = ("From", "To", "Subject", "Date")
+_TAG_RE = re.compile(r"<[^>]+>")
 
 
 class GmailTool(GoogleAPITool):
     """Read Gmail on work and school accounts."""
+
+    api = "gmail"
+    api_version = "v1"
 
     @property
     def name(self) -> str:
@@ -81,8 +88,8 @@ class GmailTool(GoogleAPITool):
         if account not in _ACCOUNTS:
             return f"Error: account must be one of {_ACCOUNTS}."
 
-        max_results = kwargs.get("max_results", 10)
-        svc = build_google_service(self._workspace, "gmail", "v1", account)
+        max_results = max(1, min(int(kwargs.get("max_results", 10)), 50))
+        svc = self._svc(account)
 
         if action == "get_profile":
             profile = svc.users().getProfile(userId="me").execute()
@@ -95,8 +102,8 @@ class GmailTool(GoogleAPITool):
         if action == "list_labels":
             result = svc.users().labels().list(userId="me").execute()
             labels = [
-                {"id": l["id"], "name": l.get("name"), "type": l.get("type")}
-                for l in result.get("labels", [])
+                {"id": lb["id"], "name": lb.get("name"), "type": lb.get("type")}
+                for lb in result.get("labels", [])
             ]
             return json.dumps(labels, indent=2)
 
@@ -105,24 +112,17 @@ class GmailTool(GoogleAPITool):
             if kwargs.get("query"):
                 params["q"] = kwargs["query"]
             if kwargs.get("label_ids"):
-                label_ids = kwargs["label_ids"]
-                if isinstance(label_ids, str):
-                    try:
-                        label_ids = json.loads(label_ids)
-                    except Exception:
-                        label_ids = [label_ids]
-                params["labelIds"] = label_ids
-            result = svc.users().messages().list(**params).execute()
-            messages = result.get("messages", [])
-            # Fetch snippet for each
-            summaries = []
-            for msg_ref in messages[:max_results]:
-                msg = svc.users().messages().get(
-                    userId="me", id=msg_ref["id"],
-                    format="metadata",
-                    metadataHeaders=["From", "To", "Subject", "Date"],
-                ).execute()
-                summaries.append(_fmt_message_summary(msg))
+                params["labelIds"] = kwargs["label_ids"]
+            refs = svc.users().messages().list(**params).execute().get("messages", [])
+            summaries = [
+                _fmt_message_summary(
+                    svc.users().messages().get(
+                        userId="me", id=ref["id"],
+                        format="metadata", metadataHeaders=list(_HEADERS),
+                    ).execute()
+                )
+                for ref in refs[:max_results]
+            ]
             return json.dumps(summaries, indent=2)
 
         if action == "get_message":
@@ -130,11 +130,13 @@ class GmailTool(GoogleAPITool):
             if not message_id:
                 return "Error: message_id required for get_message."
             include_body = kwargs.get("include_body", True)
-            fmt = "full" if include_body else "metadata"
             msg = svc.users().messages().get(
-                userId="me", id=message_id, format=fmt
+                userId="me", id=message_id, format="full" if include_body else "metadata",
             ).execute()
-            return json.dumps(_fmt_message_full(msg, include_body=include_body), indent=2)
+            result = _fmt_message_summary(msg, snippet_chars=None)
+            if include_body:
+                result["body"] = _extract_body(msg.get("payload") or {})
+            return json.dumps(result, indent=2)
 
         return f"Error: Unknown action '{action}'."
 
@@ -146,50 +148,48 @@ def _get_header(headers: list[dict], name: str) -> str:
     return ""
 
 
-def _extract_body(payload: dict, max_chars: int = 8000) -> str:
-    """Recursively extract plain-text body from a message payload."""
-    mime = payload.get("mimeType", "")
-    body_data = (payload.get("body") or {}).get("data")
+def _b64(data: str) -> str:
+    """Decode Gmail's url-safe base64, padding it correctly first."""
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode(
+        "utf-8", errors="replace"
+    )
 
-    if mime == "text/plain" and body_data:
-        text = base64.urlsafe_b64decode(body_data + "==").decode("utf-8", errors="replace")
-        return text[:max_chars]
 
-    parts = payload.get("parts") or []
-    for part in parts:
-        text = _extract_body(part, max_chars)
-        if text:
-            return text
+def _find_part(payload: dict, mime_type: str) -> str:
+    """Depth-first search for the first body of *mime_type*, decoded."""
+    if payload.get("mimeType") == mime_type:
+        data = (payload.get("body") or {}).get("data")
+        if data:
+            return _b64(data)
+    for part in payload.get("parts") or []:
+        found = _find_part(part, mime_type)
+        if found:
+            return found
     return ""
 
 
-def _fmt_message_summary(msg: dict) -> dict:
+def _extract_body(payload: dict, max_chars: int = 8000) -> str:
+    """Plain-text body, falling back to de-tagged HTML for HTML-only mail."""
+    text = _find_part(payload, "text/plain")
+    if not text:
+        html = _find_part(payload, "text/html")
+        if html:
+            text = _TAG_RE.sub(" ", html)
+            text = re.sub(r"[ \t]+", " ", text)
+            text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
+    return text[:max_chars]
+
+
+def _fmt_message_summary(msg: dict, snippet_chars: int | None = 200) -> dict:
     headers = (msg.get("payload") or {}).get("headers") or []
+    snippet = msg.get("snippet", "")
     return {
         "id": msg.get("id"),
         "threadId": msg.get("threadId"),
-        "snippet": msg.get("snippet", "")[:200],
+        "snippet": snippet[:snippet_chars] if snippet_chars else snippet,
         "from": _get_header(headers, "From"),
         "to": _get_header(headers, "To"),
         "subject": _get_header(headers, "Subject"),
         "date": _get_header(headers, "Date"),
         "labelIds": msg.get("labelIds", []),
     }
-
-
-def _fmt_message_full(msg: dict, include_body: bool = True) -> dict:
-    payload = msg.get("payload") or {}
-    headers = payload.get("headers") or []
-    result = {
-        "id": msg.get("id"),
-        "threadId": msg.get("threadId"),
-        "snippet": msg.get("snippet", ""),
-        "from": _get_header(headers, "From"),
-        "to": _get_header(headers, "To"),
-        "subject": _get_header(headers, "Subject"),
-        "date": _get_header(headers, "Date"),
-        "labelIds": msg.get("labelIds", []),
-    }
-    if include_body:
-        result["body"] = _extract_body(payload)
-    return result

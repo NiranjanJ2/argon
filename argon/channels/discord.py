@@ -150,7 +150,12 @@ if DISCORD_AVAILABLE:
                 )
 
         async def send_outbound(self, msg: OutboundMessage) -> None:
-            """Send a nanobot outbound message using Discord transport rules."""
+            """Send an outbound message using Discord transport rules."""
+            # Discord ids are snowflakes. A non-numeric chat_id means something
+            # upstream routed badly; drop it rather than raise inside the send.
+            if not str(msg.chat_id).isdigit():
+                logger.error("Discord: refusing to send to non-numeric chat_id {!r}", msg.chat_id)
+                return
             channel_id = int(msg.chat_id)
 
             channel = self.get_channel(channel_id)
@@ -273,7 +278,7 @@ class DiscordChannel(BaseChannel):
     async def start(self) -> None:
         """Start the Discord client."""
         if not DISCORD_AVAILABLE:
-            logger.error("discord.py not installed. Run: pip install nanobot-ai[discord]")
+            logger.error("discord.py not installed. Run: pip install 'discord.py>=2.5'")
             return
 
         if not self.config.token:

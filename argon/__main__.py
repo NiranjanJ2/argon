@@ -1,6 +1,4 @@
-"""
-Entry point for running nanobot as a module: python -m nanobot
-"""
+"""Entry point for ``python -m argon``."""
 
 from argon.cli import app
 

@@ -1,4 +1,4 @@
-"""MCP client: connects to MCP servers and wraps their tools as native nanobot tools."""
+"""MCP client: connects to MCP servers and wraps their tools as native Argon tools."""
 
 import asyncio
 from contextlib import AsyncExitStack
@@ -75,7 +75,7 @@ def _normalize_schema_for_openai(schema: Any) -> dict[str, Any]:
 
 
 class MCPToolWrapper(Tool):
-    """Wraps a single MCP server tool as a nanobot Tool."""
+    """Wraps a single MCP server tool as an Argon Tool."""
 
     def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30):
         self._session = session

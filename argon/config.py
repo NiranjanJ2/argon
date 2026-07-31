@@ -1,43 +1,50 @@
-"""Configuration schema and loading."""
+"""Configuration schema and loading.
 
+Config lives at ``~/.argon/config.json``: camelCase on disk, snake_case in
+Python.  Every LLM endpoint Argon talks to is OpenAI-compatible, so providers are
+just a name -> {apiKey, apiBase} map and ``agents.defaults.provider`` picks one.
+"""
 
+from __future__ import annotations
+
+import json
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
+import pydantic
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
-from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
+from pydantic.alias_generators import to_camel
+
+from argon.paths import argon_home, get_config_path
+
+# Convenience defaults, so a provider entry usually needs only an apiKey.
+KNOWN_API_BASES: dict[str, str] = {
+    "nim": "https://integrate.api.nvidia.com/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "openai": "https://api.openai.com/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "ollama": "http://localhost:11434/v1",
+}
 
 
 class Base(BaseModel):
-    """Base model that accepts both camelCase and snake_case keys."""
+    """Accepts both camelCase and snake_case keys."""
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
-class ChannelsConfig(Base):
-    """Configuration for chat channels.
 
-    Built-in and plugin channel configs are stored as extra fields (dicts).
-    Each channel parses its own config in __init__.
-    Per-channel "streaming": true enables streaming output (requires send_delta impl).
-    """
-
-    model_config = ConfigDict(extra="allow")
-
-    send_progress: bool = True  # stream agent's text progress to the channel
-    send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
-    send_max_retries: int = Field(default=3, ge=0, le=10)  # Max delivery attempts (initial send included)
+class ProviderConfig(Base):
+    api_key: str = ""
+    api_base: str | None = None
+    extra_headers: dict[str, str] | None = None
 
 
 class AgentDefaults(Base):
-    """Default agent configuration."""
-
-    workspace: str = "."
-    model: str = "nvidia/llama-3.1-nemotron-ultra-253b-v1"
-    fallback_model: str | None = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
-    provider: str = (
-        "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
-    )
+    model: str = "openai/gpt-oss-20b"
+    fallback_model: str | None = None
+    provider: str = "nim"
     max_tokens: int = 8192
     context_window_tokens: int = 65_536
     context_block_limit: int | None = None
@@ -45,322 +52,214 @@ class AgentDefaults(Base):
     max_tool_iterations: int = 25
     max_tool_result_chars: int = 16_000
     provider_retry_mode: Literal["standard", "persistent"] = "standard"
-    reasoning_effort: str | None = None  # low / medium / high - enables LLM thinking mode
-    timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"
-    idle_session_reset_hours: float = 0.0  # Clear raw chat history after N hours idle (0 = disabled)
-    max_session_messages: int = 0  # Keep only last N raw messages per session (0 = disabled, token-based only)
+    reasoning_effort: str | None = None
+    timezone: str = "America/Los_Angeles"
+    # Clear raw chat history after N hours idle (0 = never).
+    idle_session_reset_hours: float = 0.167
+    # Hard cap on raw messages kept per session (0 = token-based only).
+    # Left at 0 a single cron session grew to 14MB and was rewritten on every save.
+    max_session_messages: int = 60
 
 
 class AgentsConfig(Base):
-    """Agent configuration."""
-
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
 
 
-class ProviderConfig(Base):
-    """LLM provider configuration."""
+class ChannelsConfig(Base):
+    """Per-channel settings (discord, whatsapp) live in extra fields as dicts."""
 
-    api_key: str = ""
-    api_base: str | None = None
-    extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="allow")
 
-
-class ProvidersConfig(Base):
-    """Configuration for LLM providers."""
-
-    custom: ProviderConfig = Field(default_factory=ProviderConfig)  # Any OpenAI-compatible endpoint
-    anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
-    openai: ProviderConfig = Field(default_factory=ProviderConfig)
-    openrouter: ProviderConfig = Field(default_factory=ProviderConfig)
-    deepseek: ProviderConfig = Field(default_factory=ProviderConfig)
-    groq: ProviderConfig = Field(default_factory=ProviderConfig)
-    zhipu: ProviderConfig = Field(default_factory=ProviderConfig)
-    dashscope: ProviderConfig = Field(default_factory=ProviderConfig)
-    vllm: ProviderConfig = Field(default_factory=ProviderConfig)
-    ollama: ProviderConfig = Field(default_factory=ProviderConfig)  # Ollama local models
-    ovms: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenVINO Model Server (OVMS)
-    gemini: ProviderConfig = Field(default_factory=ProviderConfig)
-    moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
-    minimax: ProviderConfig = Field(default_factory=ProviderConfig)
-    mistral: ProviderConfig = Field(default_factory=ProviderConfig)
-    stepfun: ProviderConfig = Field(default_factory=ProviderConfig)  # Step Fun (阶跃星辰)
-    xiaomi_mimo: ProviderConfig = Field(default_factory=ProviderConfig)  # Xiaomi MIMO (小米)
-    aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
-    siliconflow: ProviderConfig = Field(default_factory=ProviderConfig)  # SiliconFlow (硅基流动)
-    volcengine: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine (火山引擎)
-    volcengine_coding_plan: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine Coding Plan
-    byteplus: ProviderConfig = Field(default_factory=ProviderConfig)  # BytePlus (VolcEngine international)
-    byteplus_coding_plan: ProviderConfig = Field(default_factory=ProviderConfig)  # BytePlus Coding Plan
-    nim: ProviderConfig = Field(default_factory=ProviderConfig)  # NVIDIA NIM (OpenAI-compatible)
-    openai_codex: ProviderConfig = Field(default_factory=ProviderConfig, exclude=True)  # OpenAI Codex (OAuth)
-    github_copilot: ProviderConfig = Field(default_factory=ProviderConfig, exclude=True)  # Github Copilot (OAuth)
+    send_progress: bool = True
+    send_tool_hints: bool = False
+    send_max_retries: int = Field(default=3, ge=0, le=10)
 
 
-class GoogleConfig(Base):
-    """Google API integration configuration."""
+class LockdownConfig(Base):
+    """Phone lockdown — mail to an SMS gateway fires an iOS Shortcut."""
 
-    enabled: bool = False  # Set true after running: nanobot google-auth <account>
+    email: str = ""
+    password: str = ""
+    phone: str = ""
 
-
-class HeartbeatConfig(Base):
-    """Heartbeat service configuration."""
-
-    enabled: bool = True
-    interval_s: int = 30 * 60  # 30 minutes
-    keep_recent_messages: int = 8
-    model: str | None = None      # Override model for heartbeat tasks (default: agents.defaults.model)
-    provider: str | None = None   # Override provider name for heartbeat tasks (e.g. "nim")
+    @property
+    def configured(self) -> bool:
+        return bool(self.email and self.password and self.phone)
 
 
 class ApiConfig(Base):
-    """OpenAI-compatible API server configuration."""
+    """Local HTTP surface: WhatsApp bridge webhook + the iOS app."""
 
-    host: str = "127.0.0.1"  # Safer default: local-only bind.
-    port: int = 8900
-    timeout: float = 120.0  # Per-request timeout in seconds.
+    enabled: bool = True
+    host: str = "0.0.0.0"
+    port: int = 3995
+    token: str = ""  # bearer token required by /v1/* endpoints
+
+
+class HeartbeatConfig(Base):
+    enabled: bool = True
+    interval_s: int = 30 * 60
+    keep_recent_messages: int = 8
+    model: str | None = None
+    provider: str | None = None
 
 
 class GatewayConfig(Base):
-    """Gateway/server configuration."""
-
-    host: str = "0.0.0.0"
-    port: int = 18790
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 
-class WebSearchConfig(Base):
-    """Web search tool configuration."""
+class GoogleConfig(Base):
+    enabled: bool = True
 
-    provider: str = "duckduckgo"  # brave, tavily, duckduckgo, searxng, jina
+
+class WebSearchConfig(Base):
+    provider: str = "duckduckgo"
     api_key: str = ""
-    base_url: str = ""  # SearXNG base URL
+    base_url: str = ""
     max_results: int = 5
 
 
 class WebToolsConfig(Base):
-    """Web tools configuration."""
-
     enable: bool = True
-    proxy: str | None = (
-        None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
-    )
+    proxy: str | None = None
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)
 
 
 class ExecToolConfig(Base):
-    """Shell exec tool configuration."""
-
-    enable: bool = True
+    enable: bool = False
     timeout: int = 60
     path_append: str = ""
 
-class MCPServerConfig(Base):
-    """MCP server connection configuration (stdio or HTTP)."""
 
-    type: Literal["stdio", "sse", "streamableHttp"] | None = None  # auto-detected if omitted
-    command: str = ""  # Stdio: command to run (e.g. "npx")
-    args: list[str] = Field(default_factory=list)  # Stdio: command arguments
-    env: dict[str, str] = Field(default_factory=dict)  # Stdio: extra env vars
-    url: str = ""  # HTTP/SSE: endpoint URL
-    headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: custom headers
-    tool_timeout: int = 30  # seconds before a tool call is cancelled
-    enabled_tools: list[str] = Field(default_factory=lambda: ["*"])  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all tools; [] = no tools
+class MCPServerConfig(Base):
+    type: Literal["stdio", "sse", "streamableHttp"] | None = None
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    url: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+    tool_timeout: int = 30
+    enabled_tools: list[str] = Field(default_factory=lambda: ["*"])
+
 
 class ToolsConfig(Base):
-    """Tools configuration."""
-
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
-    restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
+    restrict_to_workspace: bool = False
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
 class Config(BaseSettings):
-    """Root configuration for argon."""
+    """Root configuration."""
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
-    providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
+    providers: dict[str, ProviderConfig] = Field(default_factory=dict)
+    lockdown: LockdownConfig = Field(default_factory=LockdownConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     google: GoogleConfig = Field(default_factory=GoogleConfig)
 
-    @property
-    def workspace_path(self) -> Path:
-        """Get expanded workspace path."""
-        return Path(self.agents.defaults.workspace).expanduser()
-
-    def _match_provider(
-        self, model: str | None = None
-    ) -> tuple["ProviderConfig | None", str | None]:
-        """Match provider config and its registry name. Returns (config, spec_name)."""
-        from argon.providers.registry import PROVIDERS, find_by_name
-
-        forced = self.agents.defaults.provider
-        if forced != "auto":
-            spec = find_by_name(forced)
-            if spec:
-                p = getattr(self.providers, spec.name, None)
-                return (p, spec.name) if p else (None, None)
-            return None, None
-
-        model_lower = (model or self.agents.defaults.model).lower()
-        model_normalized = model_lower.replace("-", "_")
-        model_prefix = model_lower.split("/", 1)[0] if "/" in model_lower else ""
-        normalized_prefix = model_prefix.replace("-", "_")
-
-        def _kw_matches(kw: str) -> bool:
-            kw = kw.lower()
-            return kw in model_lower or kw.replace("-", "_") in model_normalized
-
-        # Explicit provider prefix wins — prevents `github-copilot/...codex` matching openai_codex.
-        for spec in PROVIDERS:
-            p = getattr(self.providers, spec.name, None)
-            if p and model_prefix and normalized_prefix == spec.name:
-                if spec.is_oauth or spec.is_local or p.api_key:
-                    return p, spec.name
-
-        # Match by keyword (order follows PROVIDERS registry)
-        for spec in PROVIDERS:
-            p = getattr(self.providers, spec.name, None)
-            if p and any(_kw_matches(kw) for kw in spec.keywords):
-                if spec.is_oauth or spec.is_local or p.api_key:
-                    return p, spec.name
-
-        # Fallback: configured local providers can route models without
-        # provider-specific keywords (for example plain "llama3.2" on Ollama).
-        # Prefer providers whose detect_by_base_keyword matches the configured api_base
-        # (e.g. Ollama's "11434" in "http://localhost:11434") over plain registry order.
-        local_fallback: tuple[ProviderConfig, str] | None = None
-        for spec in PROVIDERS:
-            if not spec.is_local:
-                continue
-            p = getattr(self.providers, spec.name, None)
-            if not (p and p.api_base):
-                continue
-            if spec.detect_by_base_keyword and spec.detect_by_base_keyword in p.api_base:
-                return p, spec.name
-            if local_fallback is None:
-                local_fallback = (p, spec.name)
-        if local_fallback:
-            return local_fallback
-
-        # Fallback: gateways first, then others (follows registry order)
-        # OAuth providers are NOT valid fallbacks — they require explicit model selection
-        for spec in PROVIDERS:
-            if spec.is_oauth:
-                continue
-            p = getattr(self.providers, spec.name, None)
-            if p and p.api_key:
-                return p, spec.name
-        return None, None
-
-    def get_provider(self, model: str | None = None) -> ProviderConfig | None:
-        """Get matched provider config (api_key, api_base, extra_headers). Falls back to first available."""
-        p, _ = self._match_provider(model)
-        return p
-
-    def get_provider_name(self, model: str | None = None) -> str | None:
-        """Get the registry name of the matched provider (e.g. "deepseek", "openrouter")."""
-        _, name = self._match_provider(model)
-        return name
-
-    def get_api_key(self, model: str | None = None) -> str | None:
-        """Get API key for the given model. Falls back to first available key."""
-        p = self.get_provider(model)
-        return p.api_key if p else None
-
-    def get_api_base(self, model: str | None = None) -> str | None:
-        """Get API base URL for the given model. Applies default URLs for gateway/local providers."""
-        from argon.providers.registry import find_by_name
-
-        p, name = self._match_provider(model)
-        if p and p.api_base:
-            return p.api_base
-        # Only gateways get a default api_base here. Standard providers
-        # resolve their base URL from the registry in the provider constructor.
-        if name:
-            spec = find_by_name(name)
-            if spec and (spec.is_gateway or spec.is_local) and spec.default_api_base:
-                return spec.default_api_base
-        return None
-
     model_config = ConfigDict(env_prefix="ARGON_", env_nested_delimiter="__")
 
+    @property
+    def workspace_path(self) -> Path:
+        """Data root. Code and state are deliberately not the same directory."""
+        return argon_home()
 
-import json
-from pathlib import Path
+    def resolve_provider(self, name: str | None = None) -> tuple[str, ProviderConfig]:
+        """Return (name, config) for the active provider.
 
-import pydantic
-from loguru import logger
+        Falls back to the first provider holding credentials, so a mistyped name
+        degrades to something usable instead of a hard crash at startup.
+        """
+        wanted = name or self.agents.defaults.provider
+        p = self.providers.get(wanted)
+        if p is not None and (p.api_key or p.api_base):
+            return wanted, p
+        for candidate, cfg in self.providers.items():
+            if cfg.api_key or cfg.api_base:
+                logger.warning(
+                    "Provider {!r} has no credentials; using {!r}", wanted, candidate
+                )
+                return candidate, cfg
+        return wanted, p or ProviderConfig()
 
-from argon.config import Config
+    def api_base_for(self, name: str) -> str | None:
+        p = self.providers.get(name)
+        if p and p.api_base:
+            return p.api_base
+        return KNOWN_API_BASES.get(name)
 
-# Global variable to store current config path (for multi-instance support)
-_current_config_path: Path | None = None
+
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+_config_path_override: Path | None = None
 
 
 def set_config_path(path: Path) -> None:
-    """Set the current config path (used to derive data directory)."""
-    global _current_config_path
-    _current_config_path = path
+    global _config_path_override
+    _config_path_override = path
 
 
-def get_config_path() -> Path:
-    """Get the configuration file path."""
-    if _current_config_path:
-        return _current_config_path
-    return Path.home() / ".nanobot" / "config.json"
+def config_path() -> Path:
+    return _config_path_override or get_config_path()
 
 
-def load_config(config_path: Path | None = None) -> Config:
-    """
-    Load configuration from file or create default.
+def _migrate(data: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade a pre-rename (nanobot) config in memory. Never writes back."""
+    defaults = data.get("agents", {}).get("defaults", {})
+    # workspace is no longer configurable — state always lives in ~/.argon.
+    defaults.pop("workspace", None)
+    defaults.pop("memoryWindow", None)
 
-    Args:
-        config_path: Optional path to config file. Uses default if not provided.
+    # Providers used to be a fixed object with ~24 mostly-empty entries.
+    providers = data.get("providers")
+    if isinstance(providers, dict):
+        data["providers"] = {
+            name: cfg
+            for name, cfg in providers.items()
+            if isinstance(cfg, dict) and (cfg.get("apiKey") or cfg.get("apiBase"))
+        }
 
-    Returns:
-        Loaded configuration object.
-    """
-    path = config_path or get_config_path()
+    # Lockdown credentials used to hide inside the channels blob.
+    channels = data.get("channels")
+    if isinstance(channels, dict):
+        moved = {
+            "email": channels.pop("triggerEmail", ""),
+            "password": channels.pop("triggerPassword", ""),
+            "phone": channels.pop("triggerPhone", ""),
+        }
+        channels.pop("pushcutToken", None)
+        channels.pop("pushcut_token", None)
+        if any(moved.values()) and "lockdown" not in data:
+            data["lockdown"] = moved
 
-    if path.exists():
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-            data = _migrate_config(data)
-            return Config.model_validate(data)
-        except (json.JSONDecodeError, ValueError, pydantic.ValidationError) as e:
-            logger.warning(f"Failed to load config from {path}: {e}")
-            logger.warning("Using default configuration.")
-
-    return Config()
-
-
-def save_config(config: Config, config_path: Path | None = None) -> None:
-    """
-    Save configuration to file.
-
-    Args:
-        config: Configuration to save.
-        config_path: Optional path to save to. Uses default if not provided.
-    """
-    path = config_path or get_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    data = config.model_dump(mode="json", by_alias=True)
-
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-def _migrate_config(data: dict) -> dict:
-    """Migrate old config formats to current."""
-    # Move tools.exec.restrictToWorkspace → tools.restrictToWorkspace
     tools = data.get("tools", {})
     exec_cfg = tools.get("exec", {})
     if "restrictToWorkspace" in exec_cfg and "restrictToWorkspace" not in tools:
         tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
     return data
+
+
+def load_config(path: Path | None = None) -> Config:
+    """Load config from disk, falling back to defaults if absent or invalid."""
+    target = path or config_path()
+    if target.exists():
+        try:
+            return Config.model_validate(_migrate(json.loads(target.read_text(encoding="utf-8"))))
+        except (json.JSONDecodeError, ValueError, pydantic.ValidationError) as e:
+            logger.warning("Failed to load config from {}: {} — using defaults", target, e)
+    return Config()
+
+
+def save_config(config: Config, path: Path | None = None) -> None:
+    target = path or config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(config.model_dump(by_alias=True, mode="json"), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )

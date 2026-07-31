@@ -3,36 +3,44 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
-from argon.google.service import GoogleAPITool, build_google_service
-
-_TZ = ZoneInfo("America/Los_Angeles")
+from argon.google.service import LOCAL_TZ, GoogleAPITool
 
 
-def _fmt_due(due_date: dict | None, due_time: dict | None = None) -> str | None:
+def classroom_due(coursework: dict) -> datetime | None:
+    """Due datetime of a Classroom courseWork item, or None if it has no due date.
+
+    Classroom splits the deadline across ``dueDate`` (UTC calendar date) and an
+    optional ``dueTime``; a missing time means end of day.
+    """
+    due_date = coursework.get("dueDate")
     if not due_date:
         return None
+    due_time = coursework.get("dueTime") or {}
     try:
-        h = (due_time or {}).get("hours", 23)
-        mi = (due_time or {}).get("minutes", 59)
         return datetime(
-            due_date["year"], due_date["month"], due_date["day"], h, mi, tzinfo=_TZ
-        ).isoformat()
-    except Exception:
+            due_date["year"],
+            due_date["month"],
+            due_date["day"],
+            due_time.get("hours", 23),
+            due_time.get("minutes", 59),
+            tzinfo=LOCAL_TZ,
+        )
+    except (KeyError, TypeError, ValueError):
         return None
 
 
-def _fmt_coursework(cw: dict) -> dict:
-    desc = cw.get("description", "")
+def _fmt_coursework(cw: dict, *, full_description: bool = False) -> dict:
+    desc = cw.get("description") or None
+    due = classroom_due(cw)
     return {
         "id": cw.get("id"),
         "course_id": cw.get("courseId"),
         "title": cw.get("title"),
-        "description": desc[:400] if desc else None,
-        "due": _fmt_due(cw.get("dueDate"), cw.get("dueTime")),
+        "description": desc if full_description or not desc else desc[:400],
+        "due": due.isoformat() if due else None,
         "type": cw.get("workType"),
         "max_points": cw.get("maxPoints"),
         "state": cw.get("state"),
@@ -40,9 +48,69 @@ def _fmt_coursework(cw: dict) -> dict:
     }
 
 
+def _by_due(item: dict) -> str:
+    """Sort key placing undated work last."""
+    return item.get("due") or "9999"
+
+
+def active_courses(svc) -> list[dict]:
+    """Courses the student is currently enrolled in."""
+    return svc.courses().list(
+        studentId="me", courseStates=["ACTIVE"]
+    ).execute().get("courses", [])
+
+
+def upcoming_assignments(svc, days_ahead: int = 30) -> tuple[list[dict], list[str]]:
+    """Published assignments due within *days_ahead*, plus any courses that failed.
+
+    Shared by ``get_all_assignments`` and the daily overview so both agree on
+    what "upcoming" means.
+    """
+    from googleapiclient.errors import HttpError
+
+    now = datetime.now(LOCAL_TZ)
+    cutoff = now + timedelta(days=days_ahead)
+
+    assignments: list[dict] = []
+    unreadable: list[str] = []
+    for course in active_courses(svc):
+        try:
+            works = svc.courses().courseWork().list(
+                courseId=course["id"],
+                courseWorkStates=["PUBLISHED"],
+                pageSize=50,
+            ).execute().get("courseWork", [])
+        except HttpError as exc:
+            # One locked-down course must not blank out every other course.
+            unreadable.append(f"{course.get('name', course['id'])}: {exc.reason}")
+            continue
+        for cw in works:
+            due = classroom_due(cw)
+            if due is None or not (now < due <= cutoff):
+                continue
+            item = _fmt_coursework(cw)
+            item["course_name"] = course.get("name", "")
+            assignments.append(item)
+
+    assignments.sort(key=_by_due)
+    return assignments, unreadable
+
+
+class ClassroomTool(GoogleAPITool):
+    """Shared config for every Classroom tool (school account, Classroom v1)."""
+
+    api = "classroom"
+    api_version = "v1"
+    account = "school"
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+
 # ---------------------------------------------------------------------------
 
-class GetCoursesTool(GoogleAPITool):
+class GetCoursesTool(ClassroomTool):
     """List active Google Classroom courses (school account)."""
 
     @property
@@ -57,16 +125,10 @@ class GetCoursesTool(GoogleAPITool):
         )
 
     @property
-    def read_only(self) -> bool:
-        return True
-
-    @property
     def parameters(self) -> dict[str, Any]:
         return {"type": "object", "properties": {}, "required": []}
 
-    def _run(self, kwargs: dict) -> str:
-        svc = build_google_service(self._workspace, "classroom", "v1", "school")
-        result = svc.courses().list(studentId="me", courseStates=["ACTIVE"]).execute()
+    def _run(self, kwargs: dict[str, Any]) -> str:
         courses = [
             {
                 "id": c["id"],
@@ -74,14 +136,14 @@ class GetCoursesTool(GoogleAPITool):
                 "section": c.get("section"),
                 "room": c.get("room"),
             }
-            for c in result.get("courses", [])
+            for c in active_courses(self._svc())
         ]
         return json.dumps(courses, indent=2)
 
 
 # ---------------------------------------------------------------------------
 
-class GetCourseAssignmentsTool(GoogleAPITool):
+class GetCourseAssignmentsTool(ClassroomTool):
     """Get assignments for a specific course."""
 
     @property
@@ -94,10 +156,6 @@ class GetCourseAssignmentsTool(GoogleAPITool):
             "Get assignments for a specific Google Classroom course. "
             "Use get_courses first to get the course_id."
         )
-
-    @property
-    def read_only(self) -> bool:
-        return True
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -116,21 +174,21 @@ class GetCourseAssignmentsTool(GoogleAPITool):
             "required": ["course_id"],
         }
 
-    def _run(self, kwargs: dict) -> str:
-        course_id = kwargs["course_id"]
-        limit = int(kwargs.get("limit", 20))
-        svc = build_google_service(self._workspace, "classroom", "v1", "school")
-        result = svc.courses().courseWork().list(
-            courseId=course_id, pageSize=limit
+    def _run(self, kwargs: dict[str, Any]) -> str:
+        result = self._svc().courses().courseWork().list(
+            courseId=kwargs["course_id"],
+            courseWorkStates=["PUBLISHED"],
+            pageSize=int(kwargs.get("limit", 20)),
         ).execute()
-        items = [_fmt_coursework(cw) for cw in result.get("courseWork", [])]
-        items.sort(key=lambda x: x.get("due") or "9999")
+        items = sorted(
+            (_fmt_coursework(cw) for cw in result.get("courseWork", [])), key=_by_due
+        )
         return json.dumps(items, indent=2)
 
 
 # ---------------------------------------------------------------------------
 
-class GetAllAssignmentsTool(GoogleAPITool):
+class GetAllAssignmentsTool(ClassroomTool):
     """Get all assignments due in the coming month across all courses."""
 
     @property
@@ -145,10 +203,6 @@ class GetAllAssignmentsTool(GoogleAPITool):
         )
 
     @property
-    def read_only(self) -> bool:
-        return True
-
-    @property
     def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
@@ -161,55 +215,19 @@ class GetAllAssignmentsTool(GoogleAPITool):
             "required": [],
         }
 
-    def _run(self, kwargs: dict) -> str:
-        days_ahead = int(kwargs.get("days_ahead", 30))
-        svc = build_google_service(self._workspace, "classroom", "v1", "school")
-
-        now = datetime.now(_TZ)
-        cutoff = now.date() + timedelta(days=days_ahead)
-
-        courses_result = svc.courses().list(
-            studentId="me", courseStates=["ACTIVE"]
-        ).execute()
-        courses = {
-            c["id"]: c.get("name", "")
-            for c in courses_result.get("courses", [])
-        }
-
-        assignments = []
-        for course_id, course_name in courses.items():
-            try:
-                cw_result = svc.courses().courseWork().list(
-                    courseId=course_id, pageSize=50
-                ).execute()
-                for cw in cw_result.get("courseWork", []):
-                    due = cw.get("dueDate")
-                    if not due:
-                        continue
-                    try:
-                        due_time = cw.get("dueTime") or {}
-                        due_dt = datetime(
-                            due["year"], due["month"], due["day"],
-                            due_time.get("hours", 23), due_time.get("minutes", 59),
-                            tzinfo=_TZ,
-                        )
-                        if due_dt <= now or due_dt.date() > cutoff:
-                            continue
-                    except (KeyError, ValueError):
-                        continue
-                    item = _fmt_coursework(cw)
-                    item["course_name"] = course_name
-                    assignments.append(item)
-            except Exception:
-                continue
-
-        assignments.sort(key=lambda x: x.get("due") or "9999")
-        return json.dumps({"count": len(assignments), "assignments": assignments}, indent=2)
+    def _run(self, kwargs: dict[str, Any]) -> str:
+        assignments, unreadable = upcoming_assignments(
+            self._svc(), int(kwargs.get("days_ahead", 30))
+        )
+        payload: dict[str, Any] = {"count": len(assignments), "assignments": assignments}
+        if unreadable:
+            payload["courses_unreadable"] = unreadable
+        return json.dumps(payload, indent=2)
 
 
 # ---------------------------------------------------------------------------
 
-class GetAssignmentInfoTool(GoogleAPITool):
+class GetAssignmentInfoTool(ClassroomTool):
     """Get full details and submission status for a specific assignment."""
 
     @property
@@ -222,10 +240,6 @@ class GetAssignmentInfoTool(GoogleAPITool):
             "Get full details and submission status for a specific assignment. "
             "Requires course_id and assignment_id (from get_courses / get_course_assignments)."
         )
-
-    @property
-    def read_only(self) -> bool:
-        return True
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -244,44 +258,41 @@ class GetAssignmentInfoTool(GoogleAPITool):
             "required": ["course_id", "assignment_id"],
         }
 
-    def _run(self, kwargs: dict) -> str:
+    def _run(self, kwargs: dict[str, Any]) -> str:
+        from googleapiclient.errors import HttpError
+
         course_id = kwargs["course_id"]
         assignment_id = kwargs["assignment_id"]
-        svc = build_google_service(self._workspace, "classroom", "v1", "school")
+        svc = self._svc()
 
         cw = svc.courses().courseWork().get(
             courseId=course_id, id=assignment_id
         ).execute()
-        result = _fmt_coursework(cw)
+        result = _fmt_coursework(cw, full_description=True)
 
-        # Include full description without truncation
-        result["description"] = cw.get("description")
-
-        # Submission status
+        # Submission state is a bonus — report why it is absent, keep the rest.
         try:
-            subs = svc.courses().courseWork().studentSubmissions().list(
-                courseId=course_id,
-                courseWorkId=assignment_id,
-                userId="me",
-            ).execute()
-            sub_list = subs.get("studentSubmissions", [])
-            if sub_list:
-                sub = sub_list[0]
-                result["submission"] = {
-                    "state": sub.get("state"),
-                    "late": sub.get("late", False),
-                    "draft_grade": sub.get("draftGrade"),
-                    "assigned_grade": sub.get("assignedGrade"),
-                }
-        except Exception:
-            pass
+            submissions = svc.courses().courseWork().studentSubmissions().list(
+                courseId=course_id, courseWorkId=assignment_id, userId="me",
+            ).execute().get("studentSubmissions", [])
+        except HttpError as exc:
+            result["submission_error"] = exc.reason
+            submissions = []
+        if submissions:
+            sub = submissions[0]
+            result["submission"] = {
+                "state": sub.get("state"),
+                "late": sub.get("late", False),
+                "draft_grade": sub.get("draftGrade"),
+                "assigned_grade": sub.get("assignedGrade"),
+            }
 
         return json.dumps(result, indent=2)
 
 
 # ---------------------------------------------------------------------------
 
-class GetCourseStreamTool(GoogleAPITool):
+class GetCourseStreamTool(ClassroomTool):
     """Get recent announcements and posts from a course stream."""
 
     @property
@@ -294,10 +305,6 @@ class GetCourseStreamTool(GoogleAPITool):
             "Get recent announcements and posts from a Google Classroom course stream. "
             "Use get_courses first to get the course_id."
         )
-
-    @property
-    def read_only(self) -> bool:
-        return True
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -316,30 +323,24 @@ class GetCourseStreamTool(GoogleAPITool):
             "required": ["course_id"],
         }
 
-    def _run(self, kwargs: dict) -> str:
+    def _run(self, kwargs: dict[str, Any]) -> str:
         course_id = kwargs["course_id"]
         limit = int(kwargs.get("limit", 10))
-        svc = build_google_service(self._workspace, "classroom", "v1", "school")
 
-        items = []
-
-        try:
-            result = svc.courses().announcements().list(
-                courseId=course_id, pageSize=limit
-            ).execute()
-            for ann in result.get("announcements", []):
-                text = ann.get("text", "")
-                items.append({
-                    "type": "announcement",
-                    "id": ann.get("id"),
-                    "text": text[:600] if text else None,
-                    "created": ann.get("creationTime"),
-                    "updated": ann.get("updateTime"),
-                    "state": ann.get("state"),
-                    "link": ann.get("alternateLink"),
-                })
-        except Exception:
-            pass
-
+        result = self._svc().courses().announcements().list(
+            courseId=course_id, pageSize=limit
+        ).execute()
+        items = [
+            {
+                "type": "announcement",
+                "id": ann.get("id"),
+                "text": (ann.get("text") or "")[:600] or None,
+                "created": ann.get("creationTime"),
+                "updated": ann.get("updateTime"),
+                "state": ann.get("state"),
+                "link": ann.get("alternateLink"),
+            }
+            for ann in result.get("announcements", [])
+        ]
         items.sort(key=lambda x: x.get("updated") or "", reverse=True)
         return json.dumps({"course_id": course_id, "stream": items[:limit]}, indent=2)

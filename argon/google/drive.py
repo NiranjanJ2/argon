@@ -5,13 +5,53 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from argon.google.service import GoogleAPITool, build_google_service
+from argon.google.service import GoogleAPITool
 
 _ACCOUNTS = ("personal", "work", "school")
+
+_FIELDS = "id,name,mimeType,size,modifiedTime,parents,webViewLink,description"
+
+#: Google Workspace types have no bytes to download; export them instead.
+_EXPORT_MAP = {
+    "application/vnd.google-apps.document": "text/plain",
+    "application/vnd.google-apps.spreadsheet": "text/csv",
+    "application/vnd.google-apps.presentation": "text/plain",
+}
+
+#: Cap on returned file content, sized for a single tool result.
+_MAX_CONTENT = 16000
+
+
+def _fmt_file(f: dict) -> dict:
+    out = {
+        "id": f.get("id"),
+        "name": f.get("name"),
+        "mimeType": f.get("mimeType"),
+        "size": f.get("size"),
+        "modifiedTime": f.get("modifiedTime"),
+        "parents": f.get("parents"),
+        "webViewLink": f.get("webViewLink"),
+        "description": f.get("description"),
+    }
+    # Only present on get_file_metadata, which asks for extra fields.
+    if "shared" in f:
+        out["shared"] = f.get("shared")
+    if f.get("owners"):
+        out["owners"] = [o.get("emailAddress") for o in f["owners"]]
+    return out
+
+
+def _decode(content: Any) -> str:
+    if isinstance(content, bytes):
+        content = content.decode("utf-8", errors="replace")
+    return str(content)[:_MAX_CONTENT]
 
 
 class DriveTool(GoogleAPITool):
     """Read Google Drive files across personal, work, and school accounts."""
+
+    api = "drive"
+    api_version = "v3"
 
     @property
     def name(self) -> str:
@@ -79,27 +119,22 @@ class DriveTool(GoogleAPITool):
         if account not in _ACCOUNTS:
             return f"Error: account must be one of {_ACCOUNTS}."
 
-        page_size = kwargs.get("page_size", 20)
-        svc = build_google_service(self._workspace, "drive", "v3", account)
-
-        _FIELDS = "id, name, mimeType, size, modifiedTime, parents, webViewLink, description"
+        page_size = max(1, min(int(kwargs.get("page_size", 20)), 1000))
+        svc = self._svc(account)
 
         if action == "list_files":
-            folder_id = kwargs.get("folder_id")
-            include_trashed = kwargs.get("include_trashed", False)
-            q_parts = []
-            if folder_id:
-                q_parts.append(f"'{folder_id}' in parents")
-            if not include_trashed:
-                q_parts.append("trashed = false")
-            q = " and ".join(q_parts) if q_parts else None
+            clauses = []
+            if kwargs.get("folder_id"):
+                clauses.append(f"'{kwargs['folder_id']}' in parents")
+            if not kwargs.get("include_trashed", False):
+                clauses.append("trashed = false")
             params: dict[str, Any] = {
                 "pageSize": page_size,
                 "fields": f"files({_FIELDS})",
                 "orderBy": "modifiedTime desc",
             }
-            if q:
-                params["q"] = q
+            if clauses:
+                params["q"] = " and ".join(clauses)
             result = svc.files().list(**params).execute()
             return json.dumps([_fmt_file(f) for f in result.get("files", [])], indent=2)
 
@@ -120,8 +155,7 @@ class DriveTool(GoogleAPITool):
             if not file_id:
                 return "Error: file_id required for get_file_metadata."
             f = svc.files().get(
-                fileId=file_id,
-                fields=f"{_FIELDS}, permissions, shared, owners",
+                fileId=file_id, fields=f"{_FIELDS},shared,owners(emailAddress)",
             ).execute()
             return json.dumps(_fmt_file(f), indent=2)
 
@@ -129,35 +163,27 @@ class DriveTool(GoogleAPITool):
             file_id = kwargs.get("file_id")
             if not file_id:
                 return "Error: file_id required for read_file."
-            # Get metadata first to determine mime type
-            meta = svc.files().get(fileId=file_id, fields="mimeType, name").execute()
+            meta = svc.files().get(fileId=file_id, fields="mimeType,name").execute()
             mime = meta.get("mimeType", "")
 
-            # Google Workspace docs: export as plain text
-            _EXPORT_MAP = {
-                "application/vnd.google-apps.document": "text/plain",
-                "application/vnd.google-apps.spreadsheet": "text/csv",
-                "application/vnd.google-apps.presentation": "text/plain",
-            }
             if mime in _EXPORT_MAP:
-                content = svc.files().export(
-                    fileId=file_id, mimeType=_EXPORT_MAP[mime]
-                ).execute()
-                if isinstance(content, bytes):
-                    content = content.decode("utf-8", errors="replace")
-                return content[:16000]  # cap to tool result limit
-
-            # Binary / other: return metadata only
-            if not mime.startswith("text/"):
-                return f"File '{meta.get('name')}' is binary ({mime}). Use get_file_metadata for details."
-
-            content = svc.files().get_media(fileId=file_id).execute()
-            if isinstance(content, bytes):
-                content = content.decode("utf-8", errors="replace")
-            return content[:16000]
+                return _decode(
+                    svc.files().export(fileId=file_id, mimeType=_EXPORT_MAP[mime]).execute()
+                )
+            if mime.startswith("application/vnd.google-apps."):
+                return (
+                    f"File '{meta.get('name')}' is a Google {mime.rsplit('.', 1)[-1]} "
+                    "and cannot be read as text."
+                )
+            if not (mime.startswith("text/") or mime in ("application/json", "application/xml")):
+                return (
+                    f"File '{meta.get('name')}' is binary ({mime}). "
+                    "Use get_file_metadata for details."
+                )
+            return _decode(svc.files().get_media(fileId=file_id).execute())
 
         if action == "list_shared_drives":
-            result = svc.drives().list(pageSize=page_size).execute()
+            result = svc.drives().list(pageSize=min(page_size, 100)).execute()
             drives = [
                 {"id": d["id"], "name": d.get("name")}
                 for d in result.get("drives", [])
@@ -165,16 +191,3 @@ class DriveTool(GoogleAPITool):
             return json.dumps(drives, indent=2)
 
         return f"Error: Unknown action '{action}'."
-
-
-def _fmt_file(f: dict) -> dict:
-    return {
-        "id": f.get("id"),
-        "name": f.get("name"),
-        "mimeType": f.get("mimeType"),
-        "size": f.get("size"),
-        "modifiedTime": f.get("modifiedTime"),
-        "parents": f.get("parents"),
-        "webViewLink": f.get("webViewLink"),
-        "description": f.get("description"),
-    }

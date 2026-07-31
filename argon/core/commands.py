@@ -85,7 +85,6 @@ class CommandRouter:
         return None
 
 
-from __future__ import annotations
 
 import asyncio
 import os
@@ -93,7 +92,6 @@ import sys
 
 from argon import __version__
 from argon.core.bus import OutboundMessage
-from argon.core.commands import CommandContext, CommandRouter
 from argon.utils.helpers import build_status_content
 from argon.utils.restart import set_restart_notice_to_env
 
@@ -109,9 +107,7 @@ async def cmd_stop(ctx: CommandContext) -> OutboundMessage:
             await t
         except (asyncio.CancelledError, Exception):
             pass
-    sub_cancelled = await loop.subagents.cancel_by_session(msg.session_key)
-    total = cancelled + sub_cancelled
-    content = f"Stopped {total} task(s)." if total else "No active task to stop."
+    content = f"Stopped {cancelled} task(s)." if cancelled else "No active task to stop."
     return OutboundMessage(
         channel=msg.channel, chat_id=msg.chat_id, content=content,
         metadata=dict(msg.metadata or {})
@@ -125,7 +121,7 @@ async def cmd_restart(ctx: CommandContext) -> OutboundMessage:
 
     async def _do_restart():
         await asyncio.sleep(1)
-        os.execv(sys.executable, [sys.executable, "-m", "nanobot"] + sys.argv[1:])
+        os.execv(sys.executable, [sys.executable, "-m", "argon"] + sys.argv[1:])
 
     asyncio.create_task(_do_restart())
     return OutboundMessage(
@@ -215,7 +211,7 @@ async def cmd_help(ctx: CommandContext) -> OutboundMessage:
 def build_help_text() -> str:
     """Build canonical help text shared across channels."""
     lines = [
-        "🐈 nanobot commands:",
+        "◈ argon commands:",
         "/new — Start a new conversation (saves context to memory)",
         "/clear-context — Hard reset, discard current session entirely",
         "/clear-memory — Wipe all long-term memory",

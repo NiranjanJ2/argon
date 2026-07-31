@@ -1,10 +1,4 @@
-"""
-nanobot - A lightweight AI agent framework
-"""
+"""Argon — Niranjan's personal assistant."""
 
-__version__ = "0.1.4.post6"
-__logo__ = "🐈"
-
-from argon.nanobot import Nanobot, RunResult
-
-__all__ = ["Nanobot", "RunResult"]
+__version__ = "2.0.0"
+__logo__ = "◈"

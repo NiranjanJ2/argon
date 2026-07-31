@@ -5,15 +5,12 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
-from argon.google.service import GoogleAPITool, build_google_service
-
-_TZ = ZoneInfo("America/Los_Angeles")
+from argon.google.service import LOCAL_TZ, GoogleAPITool
 
 
 def _now() -> datetime:
-    return datetime.now(_TZ)
+    return datetime.now(LOCAL_TZ)
 
 
 def _fmt_event(e: dict) -> dict:
@@ -25,16 +22,35 @@ def _fmt_event(e: dict) -> dict:
         "start": e.get("start"),
         "end": e.get("end"),
         "status": e.get("status"),
-        "attendees": [a.get("email") for a in e.get("attendees", [])],
+        "attendees": [a.get("email") for a in e.get("attendees") or []],
         "htmlLink": e.get("htmlLink"),
     }
 
 
-def _svc(workspace):
-    return build_google_service(workspace, "calendar", "v3", "work")
+def _as_body(value: Any) -> dict:
+    """Accept an event body as a dict or a JSON string."""
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
 
 
-class GetTodayEventsTool(GoogleAPITool):
+class CalendarTool(GoogleAPITool):
+    """Shared config for every Calendar tool (work account, Calendar v3)."""
+
+    api = "calendar"
+    api_version = "v3"
+    account = "work"
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    @staticmethod
+    def _calendar_id(kwargs: dict[str, Any]) -> str:
+        return kwargs.get("calendar_id") or "primary"
+
+
+class GetTodayEventsTool(CalendarTool):
     """Get today's calendar events."""
 
     @property
@@ -46,18 +62,13 @@ class GetTodayEventsTool(GoogleAPITool):
         return "Get all Google Calendar events for today (work account, primary calendar)."
 
     @property
-    def read_only(self) -> bool:
-        return True
-
-    @property
     def parameters(self) -> dict[str, Any]:
         return {"type": "object", "properties": {}, "required": []}
 
     def _run(self, kwargs: dict[str, Any]) -> str:
-        now = _now()
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = _now().replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1)
-        items = _svc(self._workspace).events().list(
+        items = self._svc().events().list(
             calendarId="primary",
             timeMin=start.isoformat(),
             timeMax=end.isoformat(),
@@ -68,7 +79,7 @@ class GetTodayEventsTool(GoogleAPITool):
         return json.dumps([_fmt_event(e) for e in items], indent=2)
 
 
-class ListCalendarEventsTool(GoogleAPITool):
+class ListCalendarEventsTool(CalendarTool):
     """List calendar events over a date range."""
 
     @property
@@ -80,10 +91,6 @@ class ListCalendarEventsTool(GoogleAPITool):
         return "List Google Calendar events between two ISO 8601 datetimes."
 
     @property
-    def read_only(self) -> bool:
-        return True
-
-    @property
     def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
@@ -91,14 +98,14 @@ class ListCalendarEventsTool(GoogleAPITool):
                 "time_min": {"type": "string", "description": "ISO 8601 start datetime."},
                 "time_max": {"type": "string", "description": "ISO 8601 end datetime."},
                 "calendar_id": {"type": "string", "description": "Calendar ID (default: primary)."},
-                "max_results": {"type": "integer", "description": "Max events to return (default 20)."},
+                "max_results": {"type": "integer", "description": "Max events (default 20)."},
             },
             "required": ["time_min", "time_max"],
         }
 
     def _run(self, kwargs: dict[str, Any]) -> str:
-        items = _svc(self._workspace).events().list(
-            calendarId=kwargs.get("calendar_id", "primary"),
+        items = self._svc().events().list(
+            calendarId=self._calendar_id(kwargs),
             timeMin=kwargs["time_min"],
             timeMax=kwargs["time_max"],
             maxResults=kwargs.get("max_results", 20),
@@ -108,7 +115,7 @@ class ListCalendarEventsTool(GoogleAPITool):
         return json.dumps([_fmt_event(e) for e in items], indent=2)
 
 
-class CreateCalendarEventTool(GoogleAPITool):
+class CreateCalendarEventTool(CalendarTool):
     """Create a calendar event."""
 
     @property
@@ -142,16 +149,14 @@ class CreateCalendarEventTool(GoogleAPITool):
         }
 
     def _run(self, kwargs: dict[str, Any]) -> str:
-        body = kwargs["event_body"]
-        if isinstance(body, str):
-            body = json.loads(body)
-        event = _svc(self._workspace).events().insert(
-            calendarId=kwargs.get("calendar_id", "primary"), body=body,
+        event = self._svc().events().insert(
+            calendarId=self._calendar_id(kwargs),
+            body=_as_body(kwargs["event_body"]),
         ).execute()
         return f"Created: {event.get('id')} — {event.get('summary', '')}"
 
 
-class UpdateCalendarEventTool(GoogleAPITool):
+class UpdateCalendarEventTool(CalendarTool):
     """Update a calendar event."""
 
     @property
@@ -179,18 +184,15 @@ class UpdateCalendarEventTool(GoogleAPITool):
         }
 
     def _run(self, kwargs: dict[str, Any]) -> str:
-        body = kwargs["event_body"]
-        if isinstance(body, str):
-            body = json.loads(body)
-        event = _svc(self._workspace).events().patch(
-            calendarId=kwargs.get("calendar_id", "primary"),
+        event = self._svc().events().patch(
+            calendarId=self._calendar_id(kwargs),
             eventId=kwargs["event_id"],
-            body=body,
+            body=_as_body(kwargs["event_body"]),
         ).execute()
         return f"Updated: {event.get('id')} — {event.get('summary', '')}"
 
 
-class DeleteCalendarEventTool(GoogleAPITool):
+class DeleteCalendarEventTool(CalendarTool):
     """Delete a calendar event."""
 
     @property
@@ -217,14 +219,14 @@ class DeleteCalendarEventTool(GoogleAPITool):
         }
 
     def _run(self, kwargs: dict[str, Any]) -> str:
-        _svc(self._workspace).events().delete(
-            calendarId=kwargs.get("calendar_id", "primary"),
+        self._svc().events().delete(
+            calendarId=self._calendar_id(kwargs),
             eventId=kwargs["event_id"],
         ).execute()
         return f"Deleted event {kwargs['event_id']}."
 
 
-class ListCalendarsTool(GoogleAPITool):
+class ListCalendarsTool(CalendarTool):
     """List all calendars on the work account."""
 
     @property
@@ -236,15 +238,11 @@ class ListCalendarsTool(GoogleAPITool):
         return "List all Google Calendars on the work account."
 
     @property
-    def read_only(self) -> bool:
-        return True
-
-    @property
     def parameters(self) -> dict[str, Any]:
         return {"type": "object", "properties": {}, "required": []}
 
     def _run(self, kwargs: dict[str, Any]) -> str:
-        items = _svc(self._workspace).calendarList().list().execute().get("items", [])
+        items = self._svc().calendarList().list().execute().get("items", [])
         result = [
             {"id": c["id"], "summary": c.get("summary", ""), "primary": c.get("primary", False)}
             for c in items

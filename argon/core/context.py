@@ -16,7 +16,7 @@ from argon.utils.helpers import build_assistant_message, detect_image_mime
 class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
 
-    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
+    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md"]
 
     def __init__(self, workspace: Path, timezone: str | None = None):
         self.workspace = workspace
@@ -64,7 +64,7 @@ Skills with available="false" need dependencies installed first - you can try in
         """Get the core identity/runtime section.
 
         If SOUL.md exists in the workspace, the persona is defined there — skip the
-        generic 'You are nanobot' text so it doesn't conflict with the custom identity.
+        generic assistant text so it does not conflict with the custom identity.
         Always include workspace paths and guidelines regardless.
         """
         workspace_path = str(self.workspace.expanduser().resolve())
@@ -72,7 +72,7 @@ Skills with available="false" need dependencies installed first - you can try in
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
         soul_exists = (self.workspace / "SOUL.md").exists()
 
-        persona_block = "" if soul_exists else "You are nanobot, a helpful AI assistant.\n\n"
+        persona_block = "" if soul_exists else "You are Argon, a personal assistant.\n\n"
 
         return f"""{persona_block}## Runtime
 {runtime}

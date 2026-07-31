@@ -76,7 +76,7 @@ def current_time_str(timezone: str | None = None) -> str:
 
 _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
 _TOOL_RESULT_PREVIEW_CHARS = 1200
-_TOOL_RESULTS_DIR = ".nanobot/tool-results"
+_TOOL_RESULTS_DIR = "tool-results"
 _TOOL_RESULT_RETENTION_SECS = 7 * 24 * 60 * 60
 _TOOL_RESULT_MAX_BUCKETS = 32
 
@@ -409,7 +409,7 @@ def build_status_content(
     if cached and last_in:
         token_line += f" ({cached * 100 // last_in}% cached)"
     return "\n".join([
-        f"\U0001f408 nanobot v{version}",
+        f"\u25c8 argon v{version}",
         f"\U0001f9e0 Model: {model}",
         token_line,
         f"\U0001f4da Context: {ctx_used_str}/{ctx_total_str} ({ctx_pct}%)",
@@ -422,7 +422,7 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     """Sync bundled templates to workspace. Only creates missing files."""
     from importlib.resources import files as pkg_files
     try:
-        tpl = pkg_files("nanobot") / "templates"
+        tpl = pkg_files("argon") / "prompts"
     except Exception:
         return []
     if not tpl.is_dir():
@@ -440,7 +440,7 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     for item in tpl.iterdir():
         if item.name.endswith(".md") and not item.name.startswith("."):
             _write(item, workspace / item.name)
-    _write(tpl / "memory" / "MEMORY.md", workspace / "memory" / "MEMORY.md")
+    _write(None, workspace / "memory" / "MEMORY.md")
     _write(None, workspace / "memory" / "HISTORY.md")
     (workspace / "skills").mkdir(exist_ok=True)
 
