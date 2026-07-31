@@ -46,6 +46,8 @@ class AgentDefaults(Base):
     provider_retry_mode: Literal["standard", "persistent"] = "standard"
     reasoning_effort: str | None = None  # low / medium / high - enables LLM thinking mode
     timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"
+    idle_session_reset_hours: float = 0.0  # Clear raw chat history after N hours idle (0 = disabled)
+    max_session_messages: int = 0  # Keep only last N raw messages per session (0 = disabled, token-based only)
 
 
 class AgentsConfig(Base):
@@ -88,6 +90,7 @@ class ProvidersConfig(Base):
     volcengine_coding_plan: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine Coding Plan
     byteplus: ProviderConfig = Field(default_factory=ProviderConfig)  # BytePlus (VolcEngine international)
     byteplus_coding_plan: ProviderConfig = Field(default_factory=ProviderConfig)  # BytePlus Coding Plan
+    nim: ProviderConfig = Field(default_factory=ProviderConfig)  # NVIDIA NIM (OpenAI-compatible)
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig, exclude=True)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig, exclude=True)  # Github Copilot (OAuth)
 
@@ -104,6 +107,8 @@ class HeartbeatConfig(Base):
     enabled: bool = True
     interval_s: int = 30 * 60  # 30 minutes
     keep_recent_messages: int = 8
+    model: str | None = None      # Override model for heartbeat tasks (default: agents.defaults.model)
+    provider: str | None = None   # Override provider name for heartbeat tasks (e.g. "nim")
 
 
 class ApiConfig(Base):

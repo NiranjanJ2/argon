@@ -87,14 +87,17 @@ class GetDailyOverviewTool(Tool):
             from nanobot.google.base import build_google_service
             svc = build_google_service(self._workspace, "classroom", "v1", "school")
             cutoff = now + timedelta(days=7)
-            courses = svc.courses().list(courseStates=["ACTIVE"]).execute().get("courses", [])
+            courses = svc.courses().list(studentId="me", courseStates=["ACTIVE"]).execute().get("courses", [])
             assignments: list[dict] = []
             for course in courses:
-                works = svc.courses().courseWork().list(
-                    courseId=course["id"],
-                    courseWorkStates=["PUBLISHED"],
-                    maxResults=30,
-                ).execute().get("courseWork", [])
+                try:
+                    works = svc.courses().courseWork().list(
+                        courseId=course["id"],
+                        courseWorkStates=["PUBLISHED"],
+                        pageSize=30,
+                    ).execute().get("courseWork", [])
+                except Exception:
+                    continue
                 for w in works:
                     due = w.get("dueDate")
                     if not due:
@@ -105,7 +108,7 @@ class GetDailyOverviewTool(Tool):
                         due_dt = datetime(
                             due["year"], due["month"], due["day"], hour, minute, tzinfo=_TZ,
                         )
-                        if now <= due_dt <= cutoff:
+                        if now < due_dt <= cutoff:
                             assignments.append({
                                 "title": w.get("title"),
                                 "course": course.get("name"),

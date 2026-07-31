@@ -23,22 +23,34 @@ _SAVE_MEMORY_TOOL = [
         "type": "function",
         "function": {
             "name": "save_memory",
-            "description": "Save the memory consolidation result to persistent storage.",
+            "description": "Report whether this conversation has anything worth saving to long-term memory.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["skip", "save"],
+                        "description": (
+                            "skip = nothing significant to save (expected for most conversations). "
+                            "save = conversation contains something that will meaningfully affect future interactions."
+                        ),
+                    },
                     "history_entry": {
                         "type": "string",
-                        "description": "A paragraph summarizing key events/decisions/topics. "
-                        "Start with [YYYY-MM-DD HH:MM]. Include detail useful for grep search.",
+                        "description": (
+                            "Required when action=save. A brief log entry starting with [YYYY-MM-DD HH:MM]. "
+                            "One or two sentences max. Only include what matters for future context."
+                        ),
                     },
                     "memory_update": {
                         "type": "string",
-                        "description": "Full updated long-term memory as markdown. Include all existing "
-                        "facts plus new ones. Return unchanged if nothing new.",
+                        "description": (
+                            "Required when action=save. Full updated MEMORY.md content as markdown. "
+                            "Carry forward all existing facts and add only the new significant ones."
+                        ),
                     },
                 },
-                "required": ["history_entry", "memory_update"],
+                "required": ["action"],
             },
         },
     }
@@ -117,21 +129,49 @@ class MemoryStore:
         provider: LLMProvider,
         model: str,
     ) -> bool:
-        """Consolidate the provided message chunk into MEMORY.md + HISTORY.md."""
+        """Consolidate the provided message chunk into MEMORY.md + HISTORY.md.
+
+        Uses a selective prompt: most conversations produce action=skip and nothing
+        is written. Only explicit save requests or significant personal context
+        from Niranjan result in a write.
+        """
         if not messages:
             return True
 
         current_memory = self.read_long_term()
-        prompt = f"""Process this conversation and call the save_memory tool with your consolidation.
+        prompt = f"""Review this conversation and call save_memory with your decision.
+
+SAVE only when the conversation contains:
+- Something Niranjan explicitly asked to save or remember ("remember that...", "save this for later", etc.)
+- Significant personal context that will change how you respond in future conversations
+  (e.g. "I'm on spring break this week", "I switched schools", "I have a new job", important preferences)
+- A major decision or life event that isn't already in memory
+
+DO NOT save:
+- Tasks added, completed, or scheduled — these belong in the task system, not memory
+- Calendar events, reminders, or one-off requests
+- Routine Q&A, homework help, questions answered in this conversation
+- Anything already captured in the current memory below
+
+Saving nothing (action=skip) is the correct and expected outcome for most conversations.
+Only override this if the bar above is clearly met.
 
 ## Current Long-term Memory
 {current_memory or "(empty)"}
 
-## Conversation to Process
+## Conversation
 {self._format_messages(messages)}"""
 
         chat_messages = [
-            {"role": "system", "content": "You are a memory consolidation agent. Call the save_memory tool with your consolidation of the conversation."},
+            {
+                "role": "system",
+                "content": (
+                    "You are a selective memory agent for Niranjan's personal assistant. "
+                    "Your job is to decide what — if anything — is worth saving to long-term memory. "
+                    "Be conservative: most conversations contain nothing worth saving. "
+                    "Call save_memory with action=skip unless the bar is clearly met."
+                ),
+            },
             {"role": "user", "content": prompt},
         ]
 
@@ -170,15 +210,17 @@ class MemoryStore:
                 logger.warning("Memory consolidation: unexpected save_memory arguments")
                 return self._fail_or_raw_archive(messages)
 
-            if "history_entry" not in args or "memory_update" not in args:
-                logger.warning("Memory consolidation: save_memory payload missing required fields")
-                return self._fail_or_raw_archive(messages)
+            action = args.get("action", "save")
+            if action == "skip":
+                self._consecutive_failures = 0
+                logger.info("Memory consolidation: nothing significant to save (skip)")
+                return True
 
-            entry = args["history_entry"]
-            update = args["memory_update"]
+            entry = args.get("history_entry")
+            update = args.get("memory_update")
 
-            if entry is None or update is None:
-                logger.warning("Memory consolidation: save_memory payload contains null required fields")
+            if not entry or not update:
+                logger.warning("Memory consolidation: action=save but missing history_entry or memory_update")
                 return self._fail_or_raw_archive(messages)
 
             entry = _ensure_text(entry).strip()
@@ -192,7 +234,7 @@ class MemoryStore:
                 self.write_long_term(update)
 
             self._consecutive_failures = 0
-            logger.info("Memory consolidation done for {} messages", len(messages))
+            logger.info("Memory consolidation: saved {} messages to memory", len(messages))
             return True
         except Exception:
             logger.exception("Memory consolidation failed")
@@ -302,6 +344,47 @@ class MemoryConsolidator:
             if await self.consolidate_messages(messages):
                 return True
         return True
+
+    async def consolidate_and_trim(self, session: Session, keep_recent: int) -> None:
+        """Archive old messages and maintain a bounded sliding window of raw history.
+
+        After each turn, anything older than the last `keep_recent` messages is
+        consolidated into MEMORY.md/HISTORY.md and removed from the raw session.
+        This ensures important facts are always persisted without accumulating a
+        long chat log.
+        """
+        if keep_recent <= 0 or not session.messages:
+            return
+
+        total = len(session.messages)
+        if total <= keep_recent:
+            return
+
+        cutoff = total - keep_recent
+        if cutoff <= session.last_consolidated:
+            return
+
+        lock = self.get_lock(session.key)
+        async with lock:
+            # Re-check under lock — another background task may have already advanced.
+            cutoff = len(session.messages) - keep_recent
+            if cutoff <= session.last_consolidated:
+                return
+
+            chunk = session.messages[session.last_consolidated:cutoff]
+            if not chunk:
+                return
+
+            logger.info(
+                "Sliding-window consolidation for {}: archiving {} msg(s), keeping {}",
+                session.key, len(chunk), keep_recent,
+            )
+            if not await self.consolidate_messages(chunk):
+                return
+
+            session.last_consolidated = cutoff
+            session.retain_recent_legal_suffix(keep_recent)
+            self.sessions.save(session)
 
     async def maybe_consolidate_by_tokens(self, session: Session) -> None:
         """Loop: archive old messages until prompt fits within safe budget.

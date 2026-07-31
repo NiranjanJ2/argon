@@ -438,6 +438,38 @@ def _make_provider(config: Config):
     return provider
 
 
+def _make_heartbeat_provider(config: Config, main_provider):
+    """Return (provider, model) for heartbeat tasks.
+
+    If gateway.heartbeat.provider is set and the named provider has an API key,
+    a separate provider instance is created for heartbeat — keeping it off the
+    main provider's rate limits. Otherwise falls back to the main provider.
+    """
+    from nanobot.providers.base import GenerationSettings
+
+    hb_cfg = config.gateway.heartbeat
+    provider_name = hb_cfg.provider
+    if not provider_name:
+        return main_provider, config.agents.defaults.model
+
+    p = getattr(config.providers, provider_name, None)
+    if not (p and p.api_key):
+        return main_provider, config.agents.defaults.model
+
+    from nanobot.providers.openai_compat_provider import OpenAICompatProvider
+    model = hb_cfg.model or config.agents.defaults.model
+    hb_provider = OpenAICompatProvider(
+        api_key=p.api_key,
+        api_base=p.api_base,
+        default_model=model,
+    )
+    hb_provider.generation = GenerationSettings(
+        temperature=config.agents.defaults.temperature,
+        max_tokens=config.agents.defaults.max_tokens,
+    )
+    return hb_provider, model
+
+
 def _load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
     """Load config and optionally override the active workspace."""
     from nanobot.config.loader import load_config, set_config_path
@@ -665,6 +697,33 @@ def gateway(
         trigger_email=(config.channels.model_extra or {}).get("triggerEmail"),
         trigger_password=(config.channels.model_extra or {}).get("triggerPassword"),
         trigger_phone=(config.channels.model_extra or {}).get("triggerPhone"),
+        idle_session_reset_hours=config.agents.defaults.idle_session_reset_hours,
+        max_session_messages=config.agents.defaults.max_session_messages,
+    )
+
+    # Create a separate agent loop for heartbeat tasks so they run on NIM
+    # and don't eat into the Groq rate limits used for interactive messages.
+    hb_cfg = config.gateway.heartbeat
+    hb_provider, hb_model = _make_heartbeat_provider(config, provider)
+    hb_agent = AgentLoop(
+        bus=bus,
+        provider=hb_provider,
+        workspace=config.workspace_path,
+        model=hb_model,
+        max_iterations=config.agents.defaults.max_tool_iterations,
+        context_window_tokens=config.agents.defaults.context_window_tokens,
+        web_config=config.tools.web,
+        context_block_limit=config.agents.defaults.context_block_limit,
+        max_tool_result_chars=config.agents.defaults.max_tool_result_chars,
+        exec_config=config.tools.exec,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
+        session_manager=session_manager,
+        channels_config=config.channels,
+        timezone=config.agents.defaults.timezone,
+        google_enabled=config.google.enabled,
+        trigger_email=(config.channels.model_extra or {}).get("triggerEmail"),
+        trigger_password=(config.channels.model_extra or {}).get("triggerPassword"),
+        trigger_phone=(config.channels.model_extra or {}).get("triggerPhone"),
     )
 
     # Set cron callback (needs agent)
@@ -748,7 +807,7 @@ def gateway(
         async def _silent(*_args, **_kwargs):
             pass
 
-        resp = await agent.process_direct(
+        resp = await hb_agent.process_direct(
             tasks,
             session_key="heartbeat",
             channel=channel,
@@ -758,9 +817,9 @@ def gateway(
 
         # Keep a small tail of heartbeat history so the loop stays bounded
         # without losing all short-term context between runs.
-        session = agent.sessions.get_or_create("heartbeat")
+        session = hb_agent.sessions.get_or_create("heartbeat")
         session.retain_recent_legal_suffix(hb_cfg.keep_recent_messages)
-        agent.sessions.save(session)
+        hb_agent.sessions.save(session)
 
         return resp.content if resp else ""
 
@@ -772,11 +831,10 @@ def gateway(
             return  # No external channel available to deliver to
         await bus.publish_outbound(OutboundMessage(channel=channel, chat_id=chat_id, content=response))
 
-    hb_cfg = config.gateway.heartbeat
     heartbeat = HeartbeatService(
         workspace=config.workspace_path,
-        provider=provider,
-        model=agent.model,
+        provider=hb_provider,
+        model=hb_model,
         on_execute=on_heartbeat_execute,
         on_notify=on_heartbeat_notify,
         interval_s=hb_cfg.interval_s,

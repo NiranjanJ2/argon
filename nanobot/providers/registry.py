@@ -339,6 +339,15 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="openai_compat",
         default_api_base="https://api.groq.com/openai/v1",
     ),
+    # NVIDIA NIM: OpenAI-compatible hosted inference (gpt-oss-*, llama-*, etc.)
+    ProviderSpec(
+        name="nim",
+        keywords=("nim", "nvapi", "nvidia", "gpt-oss", "gpt_oss"),
+        env_key="NIM_API_KEY",
+        display_name="NVIDIA NIM",
+        backend="openai_compat",
+        default_api_base="https://integrate.api.nvidia.com/v1",
+    ),
 )
 
 

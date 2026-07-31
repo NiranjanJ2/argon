@@ -289,7 +289,9 @@ def estimate_prompt_tokens(
     """Estimate prompt tokens with tiktoken.
 
     Counts all fields that providers send to the LLM: content, tool_calls,
-    reasoning_content, tool_call_id, name, plus per-message framing overhead.
+    tool_call_id, name, plus per-message framing overhead.
+    reasoning_content is intentionally excluded — it is stored in session
+    history but stripped before every LLM call and never counts against prompt.
     """
     try:
         enc = tiktoken.get_encoding("cl100k_base")
@@ -308,10 +310,6 @@ def estimate_prompt_tokens(
             tc = msg.get("tool_calls")
             if tc:
                 parts.append(json.dumps(tc, ensure_ascii=False))
-
-            rc = msg.get("reasoning_content")
-            if isinstance(rc, str) and rc:
-                parts.append(rc)
 
             for key in ("name", "tool_call_id"):
                 value = msg.get(key)
@@ -350,10 +348,6 @@ def estimate_message_tokens(message: dict[str, Any]) -> int:
             parts.append(value)
     if message.get("tool_calls"):
         parts.append(json.dumps(message["tool_calls"], ensure_ascii=False))
-
-    rc = message.get("reasoning_content")
-    if isinstance(rc, str) and rc:
-        parts.append(rc)
 
     payload = "\n".join(parts)
     if not payload:

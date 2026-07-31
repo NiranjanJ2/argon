@@ -8,6 +8,7 @@ import re
 import os
 import time
 from contextlib import AsyncExitStack, nullcontext
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -182,6 +183,8 @@ class AgentLoop:
         trigger_email: str | None = None,
         trigger_password: str | None = None,
         trigger_phone: str | None = None,
+        idle_session_reset_hours: float = 0.0,
+        max_session_messages: int = 0,
     ):
         from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -233,6 +236,8 @@ class AgentLoop:
             restrict_to_workspace=restrict_to_workspace,
         )
 
+        self.idle_session_reset_hours = idle_session_reset_hours
+        self.max_session_messages = max_session_messages
         self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
@@ -289,7 +294,6 @@ class AgentLoop:
             ListTasksTool, AddTaskTool, StartTaskTool, CompleteTaskTool, UpdateTaskTool,
         )
         from nanobot.tools.status import GetStatusTool, SetModeTool, LogNoteTool, ReadLogTool
-        from nanobot.tools.memory import RememberTool, ForgetTool
         from nanobot.tools.daily_overview import GetDailyOverviewTool
 
         store = GoogleTasksStore(self.workspace)
@@ -312,10 +316,6 @@ class AgentLoop:
         self.tools.register(SetModeTool(state, log, habits))
         self.tools.register(LogNoteTool(state, log))
         self.tools.register(ReadLogTool(log))
-
-        # Long-term memory (daily memory = log_note + read_log above)
-        self.tools.register(RememberTool(self.workspace))
-        self.tools.register(ForgetTool(self.workspace))
 
         # Always available — handles missing Google auth gracefully
         self.tools.register(GetDailyOverviewTool(self.workspace))
@@ -590,6 +590,38 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
 
+    async def _maybe_reset_idle_session(self, session: Session) -> None:
+        """Consolidate and clear session if it has been idle past the threshold.
+
+        Uses the last message timestamp (not session.updated_at, which resets to
+        'now' on every disk load and is therefore unreliable for gap detection).
+        """
+        if self.idle_session_reset_hours <= 0 or not session.messages:
+            return
+        last_ts_str = session.messages[-1].get("timestamp")
+        if not last_ts_str:
+            return
+        try:
+            last_time = datetime.fromisoformat(last_ts_str)
+        except (ValueError, TypeError):
+            return
+        idle_seconds = (datetime.now() - last_time).total_seconds()
+        if idle_seconds < self.idle_session_reset_hours * 3600:
+            return
+        # Snapshot unconsolidated messages, clear session immediately so the
+        # new message is not blocked, then archive in the background.
+        unconsolidated = session.messages[session.last_consolidated:]
+        session.retain_recent_legal_suffix(0)
+        self.sessions.save(session)
+        logger.info(
+            "Conversation boundary: session {} reset after {:.0f}m gap",
+            session.key, idle_seconds / 60,
+        )
+        if unconsolidated:
+            self._schedule_background(
+                self.memory_consolidator.archive_messages(unconsolidated)
+            )
+
     async def _process_message(
         self,
         msg: InboundMessage,
@@ -642,6 +674,7 @@ class AgentLoop:
         if result := await self.commands.dispatch(ctx):
             return result
 
+        await self._maybe_reset_idle_session(session)
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
@@ -701,7 +734,12 @@ class AgentLoop:
         self._save_turn(session, all_msgs, 1 + len(history))
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
-        self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+        if self.max_session_messages > 0:
+            self._schedule_background(
+                self.memory_consolidator.consolidate_and_trim(session, self.max_session_messages)
+            )
+        else:
+            self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None

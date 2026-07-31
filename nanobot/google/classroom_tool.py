@@ -165,8 +165,8 @@ class GetAllAssignmentsTool(GoogleAPITool):
         days_ahead = int(kwargs.get("days_ahead", 30))
         svc = build_google_service(self._workspace, "classroom", "v1", "school")
 
-        today = date.today()
-        cutoff = today + timedelta(days=days_ahead)
+        now = datetime.now(_TZ)
+        cutoff = now.date() + timedelta(days=days_ahead)
 
         courses_result = svc.courses().list(
             studentId="me", courseStates=["ACTIVE"]
@@ -187,8 +187,13 @@ class GetAllAssignmentsTool(GoogleAPITool):
                     if not due:
                         continue
                     try:
-                        due_date = date(due["year"], due["month"], due["day"])
-                        if due_date < today or due_date > cutoff:
+                        due_time = cw.get("dueTime") or {}
+                        due_dt = datetime(
+                            due["year"], due["month"], due["day"],
+                            due_time.get("hours", 23), due_time.get("minutes", 59),
+                            tzinfo=_TZ,
+                        )
+                        if due_dt <= now or due_dt.date() > cutoff:
                             continue
                     except (KeyError, ValueError):
                         continue
