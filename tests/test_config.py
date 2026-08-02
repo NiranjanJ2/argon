@@ -2,7 +2,7 @@
 
 The fixtures here mirror the shape of the real ``~/.nanobot/config.json`` that
 was migrated by hand: a fixed ~24-entry ``providers`` object of which two had
-credentials, lockdown secrets hidden in the ``channels`` blob, and an ``api``
+credentials, dead trigger secrets in the ``channels`` blob, and an ``api``
 section that used to mean an OpenAI-compatible server on port 8900.
 """
 
@@ -126,35 +126,10 @@ def test_custom_provider_is_renamed_for_every_known_api_base():
     assert unmatched == []
 
 
-def test_lockdown_credentials_lifted_out_of_channels():
-    out = _migrate(legacy_config())
-    assert out["lockdown"] == {
-        "email": "niranjan@example.com",
-        "password": "app-password",
-        "phone": "5551234567",
-    }
-    # The secrets must not remain in the channels blob, which channels iterate.
-    assert "triggerEmail" not in out["channels"]
-    assert "triggerPassword" not in out["channels"]
-    assert "triggerPhone" not in out["channels"]
-    assert "pushcutToken" not in out["channels"]
-    # Real channel config is untouched.
-    assert out["channels"]["discord"]["token"] == "discord-token"
 
 
-def test_lockdown_not_synthesised_when_no_trigger_creds():
-    data = legacy_config()
-    for key in ("triggerEmail", "triggerPassword", "triggerPhone"):
-        data["channels"].pop(key)
-    out = _migrate(data)
-    assert "lockdown" not in out
 
 
-def test_existing_lockdown_section_wins_over_channel_creds():
-    data = legacy_config()
-    data["lockdown"] = {"email": "new@example.com", "password": "p", "phone": "999"}
-    out = _migrate(data)
-    assert out["lockdown"]["email"] == "new@example.com"
 
 
 def test_zero_max_session_messages_is_replaced_by_the_new_default():
@@ -199,7 +174,6 @@ def test_migrate_is_a_no_op_on_an_already_current_config():
     current = {
         "agents": {"defaults": {"provider": "nim", "maxSessionMessages": 60}},
         "providers": {"nim": {"apiKey": "k"}},
-        "lockdown": {"email": "a@b.c", "password": "p", "phone": "1"},
         "api": {"token": "t", "port": 3995},
     }
     assert _migrate(copy.deepcopy(current)) == current
@@ -212,7 +186,6 @@ def test_load_config_migrates_a_file_end_to_end(tmp_path):
     cfg = load_config(path)
 
     assert set(cfg.providers) == {"nim", "groq"}
-    assert cfg.lockdown.configured is True
     assert cfg.agents.defaults.max_session_messages == 60
     assert cfg.api.port == 3995
     assert cfg.api.token == ""
@@ -270,3 +243,17 @@ def test_resolve_provider_returns_an_empty_config_when_nothing_is_credentialled(
     name, provider = cfg.resolve_provider("nim")
     assert name == "nim"
     assert provider.api_key == ""
+
+
+def test_dead_trigger_credentials_are_dropped():
+    """The mail -> SMS lockdown is gone; its mail password should not linger."""
+    out = _migrate({"channels": {
+        "triggerEmail": "a@b.c", "triggerPassword": "secret", "triggerPhone": "1",
+        "pushcutToken": "tok", "discord": {"enabled": True},
+    }})
+    assert "lockdown" not in out
+    assert out["channels"] == {"discord": {"enabled": True}}
+
+
+def test_an_existing_lockdown_section_is_discarded():
+    assert "lockdown" not in _migrate({"lockdown": {"email": "a@b.c", "password": "p"}})

@@ -24,7 +24,6 @@ Compared with `hmac.compare_digest`. An empty `api.token` fails closed — every
 | `GET` | `/v1/status` | — | widget payload, below |
 | `POST` | `/v1/screentime` | any object | `{"ok": true, "date": "YYYY-MM-DD"}` |
 | `GET` | `/v1/screentime?date=` | — | `{"date", "count", "records"}` |
-| `POST` | `/v1/lockdown` | `{"state": "lock"\|"unlock", "trigger": bool}` | `{"ok","state","since","source","triggered"}` |
 | `POST` | `/v1/webhook/<name>` | `{"message": "..."}` | runs a turn and also delivers the reply to Discord |
 | `GET` | `/v1/ios/mode` | — | the desired focus mode alone |
 | `POST` | `/v1/ios/state` | `{"mode","version","shielded","applied_at","battery"}` | records what the phone applied |
@@ -47,7 +46,6 @@ never disagree:
   "lock_in_minutes": null,
   "school_period": {"status":"in_period","period":"Period 4",
                     "ends_at":"12:49","minutes_remaining":12},
-  "lockdown": {"state":"lock","since":"...","source":"ios"},
   "ios": {
     "desired": {"mode":"lock_in","version":41,"since":"2026-07-31T19:04:11-07:00",
                 "expires_at":"2026-07-31T21:00:00-07:00","allow_early_end":false,
@@ -176,13 +174,6 @@ Argon can reason over usage ("you've had 3h of Instagram and the pset isn't
 started") — `read_screentime(day, limit)` in `argon/api/server.py` is the
 in-process read path for it.
 
-## Lockdown
-
-Today lockdown is a mail to a carrier SMS gateway that trips an iOS Shortcut.
-`POST /v1/lockdown` records state and, with `"trigger": true`, also fires that
-mail. When the app can enforce Screen Time directly, point it at
-`argon.tools.lockdown.send_trigger` — that function is the single seam both the
-model's `send_phone_notification` tool and this endpoint go through.
 
 ## Replacing WhatsApp
 

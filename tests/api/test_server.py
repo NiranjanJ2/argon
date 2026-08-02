@@ -22,7 +22,6 @@ V1_ROUTES = [
     ("get", "/v1/status"),
     ("post", "/v1/screentime"),
     ("get", "/v1/screentime"),
-    ("post", "/v1/lockdown"),
     ("get", "/v1/ios/mode"),
     ("post", "/v1/ios/state"),
     ("post", "/v1/ios/register"),
@@ -307,7 +306,7 @@ def test_read_screentime_of_an_unreported_day_is_empty(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# /v1/status and /v1/lockdown
+# /v1/status
 # ---------------------------------------------------------------------------
 
 
@@ -318,56 +317,12 @@ def test_status_returns_the_widget_payload(tmp_path, monkeypatch):
     body = client.get("/v1/status", headers=AUTH).get_json()
 
     assert body["mode"] == "idle"
-    assert body["lockdown"] == {"state": "unknown", "since": None}
     assert "school_period" in body
 
 
-def test_lockdown_records_the_reported_state(tmp_path, monkeypatch):
-    client = _client(tmp_path, monkeypatch)
-
-    body = client.post("/v1/lockdown", json={"state": "lock"}, headers=AUTH).get_json()
-
-    assert body["ok"] is True
-    assert body["state"] == "lock"
-    assert body["triggered"] is False
-    assert client.get("/v1/status", headers=AUTH).get_json()["lockdown"]["state"] == "lock"
 
 
-def test_lockdown_rejects_an_unknown_state(tmp_path, monkeypatch):
-    client = _client(tmp_path, monkeypatch)
-    assert client.post("/v1/lockdown", json={"state": "sleep"}, headers=AUTH).status_code == 400
 
-
-def test_lockdown_trigger_needs_credentials(tmp_path, monkeypatch):
-    client = _client(tmp_path, monkeypatch)
-    response = client.post(
-        "/v1/lockdown", json={"state": "lock", "trigger": True}, headers=AUTH
-    )
-    assert response.status_code == 503
-
-
-@pytest.mark.xfail(
-    reason="argon/api/server.py:255 builds SendPhoneNotificationTool(email, password, phone) "
-           "but the tool takes a single LockdownConfig — the trigger path always 500s",
-)
-def test_lockdown_trigger_fires_the_tool(tmp_path, monkeypatch):
-    sent: list[str] = []
-    monkeypatch.setattr(
-        "argon.tools.lockdown.send_trigger",
-        lambda config, state: sent.append(state) or f"Trigger '{state}' sent to phone.",
-    )
-    client = _client(tmp_path, monkeypatch)
-    srv._rt.config.lockdown.email = "a@b.c"
-    srv._rt.config.lockdown.password = "p"
-    srv._rt.config.lockdown.phone = "5551234567"
-
-    response = client.post(
-        "/v1/lockdown", json={"state": "lock", "trigger": True}, headers=AUTH
-    )
-
-    assert response.status_code == 200
-    assert response.get_json()["triggered"] is True
-    assert sent == ["lockdown"]
 
 
 # ---------------------------------------------------------------------------

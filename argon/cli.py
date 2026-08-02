@@ -186,7 +186,7 @@ def chat(
 
 @app.command("google-auth")
 def google_auth(
-    account: str = typer.Argument(help="personal | work | school | trigger"),
+    account: str = typer.Argument(help="personal | work | school"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
     """Authenticate a Google account (prints a URL to open in your browser)."""
@@ -274,10 +274,6 @@ def doctor(
     else:
         console.print(f"{warn} google    disabled in config")
 
-    console.print(
-        f"{ok if cfg.lockdown.configured else warn} lockdown  "
-        f"{'configured' if cfg.lockdown.configured else 'not configured'}"
-    )
     console.print(
         f"{ok if cfg.api.token else warn} api       "
         f"{cfg.api.host}:{cfg.api.port} "

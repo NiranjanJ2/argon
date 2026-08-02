@@ -138,16 +138,6 @@ def read_screentime(day: str | None = None, limit: int = 200) -> list[dict[str, 
     return records[-limit:] if limit > 0 else []
 
 
-def _lockdown_file() -> Path:
-    return get_runtime_subdir("daily") / "lockdown.json"
-
-
-def _read_lockdown() -> dict[str, Any]:
-    """Last state the phone reported, or a placeholder if it never has."""
-    try:
-        return json.loads(_lockdown_file().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {"state": "unknown", "since": None}
 
 
 @app.get("/health")
@@ -206,7 +196,6 @@ def status() -> Any:
 
     ws = _rt.config.workspace_path if _rt.config else argon_home()
     data = json.loads(asyncio.run(GetStatusTool(DailyState(ws), ws).execute()))
-    data["lockdown"] = _read_lockdown()
     # The app decodes `ios.desired` and `ios.actual` into non-optional structs,
     # so both must always be complete objects — see argon/ios/mode.py.
     data["ios"] = ios_mode.snapshot()
@@ -297,34 +286,6 @@ def screentime_history() -> Any:
     return jsonify({"date": day, "count": len(records), "records": records})
 
 
-@app.post("/v1/lockdown")
-@require_token
-def lockdown() -> Any:
-    """Record the phone's lockdown state; with ``trigger`` also fire the Shortcut."""
-    body = _body()
-    state = body.get("state")
-    if state not in ("lock", "unlock"):
-        return jsonify({"error": "state must be 'lock' or 'unlock'"}), 400
-
-    record = {"state": state, "since": _now().isoformat(), "source": "ios"}
-    _lockdown_file().write_text(json.dumps(record, indent=2), encoding="utf-8")
-
-    triggered = False
-    if body.get("trigger") is True:
-        cfg = _rt.config.lockdown if _rt.config else None
-        if cfg is None or not cfg.configured:
-            return jsonify({"error": "lockdown trigger not configured"}), 503
-        from argon.tools.lockdown import send_trigger
-
-        # send_trigger is the shared seam the model's tool goes through too, so
-        # the phone and the agent can never disagree about how a lock is sent.
-        result = send_trigger(cfg, "lockdown" if state == "lock" else "unlock")
-        triggered = result.startswith("Trigger")
-        if not triggered:
-            logger.error("Lockdown trigger failed: {}", result)
-            return jsonify({"error": "trigger failed"}), 502
-
-    return jsonify({"ok": True, **record, "triggered": triggered})
 
 
 @app.errorhandler(Exception)

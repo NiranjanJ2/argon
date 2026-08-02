@@ -76,18 +76,6 @@ class ChannelsConfig(Base):
     send_max_retries: int = Field(default=3, ge=0, le=10)
 
 
-class LockdownConfig(Base):
-    """Phone lockdown — mail to an SMS gateway fires an iOS Shortcut."""
-
-    email: str = ""
-    password: str = ""
-    phone: str = ""
-
-    @property
-    def configured(self) -> bool:
-        return bool(self.email and self.password and self.phone)
-
-
 class IosConfig(Base):
     """iOS app. APNs push is not wired yet — the app polls while foregrounded."""
 
@@ -177,7 +165,6 @@ class Config(BaseSettings):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
-    lockdown: LockdownConfig = Field(default_factory=LockdownConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     ios: IosConfig = Field(default_factory=IosConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
@@ -293,18 +280,16 @@ def _migrate(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(data.get("api"), dict) and "token" not in data["api"]:
         data.pop("api")
 
-    # Lockdown credentials used to hide inside the channels blob.
+    # The phone was once locked by mailing an SMS gateway to trip a Shortcut.
+    # The iOS app drives Screen Time directly now, so these credentials — and
+    # the Pushcut token before them — are dead weight. Drop them on sight
+    # rather than carrying a mail password around for a path nothing calls.
     channels = data.get("channels")
     if isinstance(channels, dict):
-        moved = {
-            "email": channels.pop("triggerEmail", ""),
-            "password": channels.pop("triggerPassword", ""),
-            "phone": channels.pop("triggerPhone", ""),
-        }
-        channels.pop("pushcutToken", None)
-        channels.pop("pushcut_token", None)
-        if any(moved.values()) and "lockdown" not in data:
-            data["lockdown"] = moved
+        for dead in ("triggerEmail", "triggerPassword", "triggerPhone",
+                     "pushcutToken", "pushcut_token"):
+            channels.pop(dead, None)
+    data.pop("lockdown", None)
 
     tools = _section(data, "tools")
     exec_cfg = _section(data, "tools", "exec")
