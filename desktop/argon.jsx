@@ -68,9 +68,13 @@ export const render = ({ output }) => {
     );
   }
 
-  const desired = d.ios?.desired || {};
-  const actual = d.ios?.actual || {};
-  const conv = d.ios?.convergence || {};
+  // No optional chaining anywhere in this file: Übersicht transpiles it in its
+  // own bundler, and a syntax it rejects takes the whole widget out.
+  const ios = d.ios || {};
+  const desired = ios.desired || {};
+  const actual = ios.actual || {};
+  const conv = ios.convergence || {};
+  const period = d.school_period || {};
   const tasks = d.tasks || [];
   const off = desired.mode === "off";
   const drift = BAD.includes(conv.state);
@@ -96,9 +100,9 @@ export const render = ({ output }) => {
       {d.current_task && <Row label="Doing" value={d.current_task} />}
       {d.work_session_minutes ? <Row label="Working" value={d.work_session_minutes + "m"} /> : null}
       {d.lock_in_minutes ? <Row label="Locked in" value={d.lock_in_minutes + "m"} /> : null}
-      {d.school_period?.status === "in_period" && (
-        <Row label={d.school_period.period}
-             value={`ends ${d.school_period.ends_at} · ${d.school_period.minutes_remaining}m`} />
+      {period.status === "in_period" && (
+        <Row label={period.period}
+             value={`ends ${period.ends_at} · ${period.minutes_remaining}m`} />
       )}
 
       <h2>Checklist · {tasks.length}</h2>
@@ -114,7 +118,9 @@ export const render = ({ output }) => {
         </div>
       ))}
 
-      <div className="foot">{d.fetched_at?.slice(11, 19)}{d.tasks_cached ? " · cached" : ""}</div>
+      <div className="foot">
+        {(d.fetched_at || "").slice(11, 19)}{d.tasks_cached ? " · cached" : ""}
+      </div>
     </div>
   );
 };
