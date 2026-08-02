@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
@@ -135,6 +136,70 @@ class CheckInLedger:
         return len(self._load(clock.today_key())["said"])
 
 
+def _snooze_file(workspace: Path) -> Path:
+    return workspace / "daily" / "snooze.json"
+
+
+def snooze_until(workspace: Path) -> datetime | None:
+    """When check-ins may resume, or None."""
+    try:
+        stamp = json.loads(_snooze_file(workspace).read_text(encoding="utf-8"))["until"]
+        until = datetime.fromisoformat(stamp)
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+    return until if until > clock.now() else None
+
+
+def snooze(workspace: Path, hours: float, reason: str = "") -> datetime:
+    """Stop starting conversations for a while.
+
+    Niranjan said "tomorrow is a rest day", Argon replied "Rest day noted" —
+    and then nudged him five times the next day. It had written a note and
+    never changed any state the check-in gate reads, because ``set_mode`` was
+    never called. Telling Argon to back off has to land somewhere the gate
+    actually looks.
+    """
+    until = clock.now() + timedelta(hours=max(0.1, float(hours)))
+    path = _snooze_file(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"until": until.isoformat(), "reason": reason}, indent=2),
+        encoding="utf-8",
+    )
+    logger.info("Check-ins snoozed until {} ({})", until, reason or "no reason given")
+    return until
+
+
+def clear_snooze(workspace: Path) -> None:
+    _snooze_file(workspace).write_text("{}", encoding="utf-8")
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z']+", text.lower()) if len(w) > 3}
+
+
+def is_near_duplicate(text: str, previous: list[str], threshold: float = 0.5) -> bool:
+    """Is this just a rewording of something already sent?
+
+    The prompt already lists everything said today and says not to repeat it.
+    gpt-oss-20b ignored that and sent "Project due next week—let's lock in a
+    session to start it", then "Ready to lock in a session for the project due
+    next week?" two hours later. An instruction the model can ignore is not a
+    guard, so this checks mechanically.
+    """
+    current = _words(text)
+    if not current:
+        return False
+    for older in previous:
+        other = _words(older)
+        if not other:
+            continue
+        overlap = len(current & other) / len(current | other)
+        if overlap >= threshold:
+            return True
+    return False
+
+
 class ReminderService:
     """Decides when Argon has a reason to start a conversation."""
 
@@ -144,6 +209,7 @@ class ReminderService:
         timezone: str,
         on_check_in: Callable[[str], Awaitable[Any]],
         *,
+        on_day_rollover: Callable[[], Awaitable[Any]] | None = None,
         enabled: bool = True,
         max_per_day: int = 8,
         min_gap_minutes: int = 25,
@@ -154,6 +220,7 @@ class ReminderService:
         # Explicit tz wins (tests); otherwise the process-wide clock.
         self.tz = ZoneInfo(timezone) if timezone else clock.tz()
         self.on_check_in = on_check_in
+        self.on_day_rollover = on_day_rollover
         self.enabled = enabled
         self.max_per_day = max_per_day
         self.min_gap_minutes = min_gap_minutes
@@ -194,6 +261,33 @@ class ReminderService:
         except Exception:  # noqa: BLE001 — a bad schedule file must not mute Argon
             return False
 
+    def pending_task_count(self) -> int:
+        """How many real, open tasks exist. -1 when it cannot be determined."""
+        try:
+            from argon.google.tasks_store import GoogleTasksStore
+
+            return len(GoogleTasksStore(self.workspace).get_all())
+        except Exception:  # noqa: BLE001 — offline must not become a guess
+            return -1
+
+    def has_material(self) -> bool:
+        """Is there anything real to talk about?
+
+        This is the guard that was missing. With no tasks and no session, an
+        "idle" nudge has no legitimate content — and a prompt that orders the
+        model to write a message anyway leaves it one way to comply: invent one.
+        That is exactly what happened. Given a biography mentioning a UCLA lab
+        and nothing else to work with, it produced "How's the UCLA lab work
+        going?" and a "project due next week" that never existed, five times in
+        one day, on a day Niranjan had said was a rest day.
+
+        No material, no wake-up. Silence is the correct output, and it costs
+        nothing to be sure of it before spending a model call.
+        """
+        if self._state.get_work_session_duration_minutes():
+            return True
+        return self.pending_task_count() > 0
+
     def pick_occasion(self) -> Occasion | None:
         """The reason to reach out right now, or None. No model call involved."""
         now = self._now()
@@ -201,6 +295,9 @@ class ReminderService:
         mode = data.get("mode", "idle")
 
         if self._in_quiet_hours(now) or mode == "napping":
+            return None
+        if (until := snooze_until(self.workspace)) is not None:
+            logger.debug("Check-ins snoozed until {}", until)
             return None
         if self.ledger.spoken_count() >= self.max_per_day:
             return None
@@ -226,6 +323,10 @@ class ReminderService:
             return OCCASIONS["after_school"]
         if 20 <= hour < 22.5 and self._ready("evening", now):
             return OCCASIONS["evening"]
+
+        # Everything below is a nudge about work, so it needs work to exist.
+        if not self.has_material():
+            return None
         if self._ready("idle", now):
             return OCCASIONS["idle"]
         if (
@@ -249,21 +350,35 @@ class ReminderService:
             if already
             else "- nothing yet today"
         )
+        # What he actually said today, so a nudge can reference the real thing
+        # instead of reaching into biography for something plausible.
+        try:
+            from argon.core.journal import Journal
+
+            today_notes = Journal(self.workspace).read_day() or "(nothing recorded)"
+        except Exception:  # noqa: BLE001 — never let memory break the check-in
+            today_notes = "(nothing recorded)"
         return (
             f"It's {self._now():%-I:%M %p} and {occasion.blurb}.\n\n"
+            f"What Niranjan said or did today:\n{today_notes}\n\n"
             "First call get_status, and list_tasks if it would tell you anything.\n\n"
             f"Already sent today:\n{history}\n\n"
             "Now WRITE THE TEXT MESSAGE you would send Niranjan — one or two "
-            "sentences, unprompted, in your own voice, the way a friend texts. "
-            "Something real: a deadline he hasn't started, a session worth "
-            "acknowledging, something he mentioned earlier, or just asking how a "
-            "thing went.\n\n"
+            "sentences, unprompted, in your own voice, the way a friend texts.\n\n"
             "Reply with the message itself and nothing else — no preamble, no "
             "explanation, no quotes around it.\n\n"
-            f"Don't repeat anything listed above, even reworded. If there is "
-            f"genuinely nothing worth saying, reply with exactly {SKIP_TOKEN} "
-            "and nothing else — that is better than filler like "
-            '"just checking in!".'
+            "HARD RULE: only mention a task, deadline, project or piece of work "
+            "that appeared in the tool output you just read. Your background "
+            "notes describe who Niranjan is, not what he owes — 'research at a "
+            "UCLA lab' is a fact about his life, never an assignment. Do not "
+            "invent work, and do not ask how something is going unless a tool "
+            "just told you it exists. Inventing a deadline is much worse than "
+            "saying nothing: he cannot tell the difference from a real one, and "
+            "it costs him his trust in everything else you say.\n\n"
+            f"Don't repeat anything listed above, even reworded. If the tools "
+            f"showed no tasks and nothing is going on, reply with exactly "
+            f"{SKIP_TOKEN} and nothing else — that is the right answer far more "
+            'often than filler like "just checking in!".'
         )
 
     # -- lifecycle ---------------------------------------------------------
@@ -291,6 +406,14 @@ class ReminderService:
                 await asyncio.sleep(TICK_MINUTES * 60)
                 if not self._running:
                     break
+                # Yesterday's journal gets folded into long-term memory on the
+                # first tick of a new day; it rides this loop rather than
+                # spawning a second one for a once-daily job.
+                if self.on_day_rollover is not None:
+                    try:
+                        await self.on_day_rollover()
+                    except Exception:
+                        logger.exception("Day rollover failed")
                 await self.tick()
             except asyncio.CancelledError:
                 break
@@ -314,6 +437,9 @@ class ReminderService:
         text = (said or "").strip() if isinstance(said, str) else ""
         if is_silence(text):
             logger.debug("Check-in ({}): nothing to say", occasion.kind)
+            return ""
+        if is_near_duplicate(text, self.ledger.said_today()):
+            logger.info("Check-in ({}) suppressed as a reword: {}", occasion.kind, text[:60])
             return ""
         if text:
             self.ledger.record_said(occasion.kind, text, now)

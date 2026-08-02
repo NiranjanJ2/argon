@@ -33,6 +33,16 @@ _DEFAULT_OPENROUTER_HEADERS = {
 }
 
 
+def _clean_tool_name(name: Any) -> str:
+    """Strip Harmony control tokens the model glues onto a function name.
+
+    gpt-oss emits `list_tasks<|channel|>commentary`. Cleaning it here rather
+    than at the call site means logs, the progress hint the user sees, and the
+    transcript all carry the real name — not just the dispatch path.
+    """
+    return str(name or "").split("<|")[0].strip()
+
+
 def _short_tool_id() -> str:
     """9-char alphanumeric ID compatible with all providers (incl. Mistral)."""
     return "".join(secrets.choice(_ALNUM) for _ in range(9))
@@ -430,7 +440,7 @@ class OpenAICompatProvider(LLMProvider):
                 ec, prov, fn_prov = _extract_tc_extras(tc)
                 parsed_tool_calls.append(ToolCallRequest(
                     id=_short_tool_id(),
-                    name=str(fn.get("name") or ""),
+                    name=_clean_tool_name(fn.get("name")),
                     arguments=args if isinstance(args, dict) else {},
                     extra_content=ec,
                     provider_specific_fields=prov,
@@ -471,7 +481,7 @@ class OpenAICompatProvider(LLMProvider):
             ec, prov, fn_prov = _extract_tc_extras(tc)
             tool_calls.append(ToolCallRequest(
                 id=_short_tool_id(),
-                name=tc.function.name,
+                name=_clean_tool_name(tc.function.name),
                 arguments=args,
                 extra_content=ec,
                 provider_specific_fields=prov,

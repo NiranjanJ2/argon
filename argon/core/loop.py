@@ -298,6 +298,16 @@ class AgentLoop:
         from argon.tools.focus import SetFocusModeTool
         self.tools.register(SetFocusModeTool(self.config.ios.default_lock_minutes))
 
+        # "Rest day" has to land somewhere the check-in gate reads.
+        from argon.tools.quiet import CheckInStatusTool, SnoozeCheckInsTool
+        self.tools.register(SnoozeCheckInsTool(self.workspace))
+        self.tools.register(CheckInStatusTool(self.workspace))
+
+        # Writing down what Niranjan says, so it need never be invented.
+        from argon.tools.memory import RecallTool, RememberTool
+        self.tools.register(RememberTool(self.workspace))
+        self.tools.register(RecallTool(self.workspace))
+
     def _register_google_tools(self) -> None:
         """Register Google API tools unconditionally.
 

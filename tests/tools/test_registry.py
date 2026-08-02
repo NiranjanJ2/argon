@@ -63,3 +63,12 @@ def test_a_genuinely_unknown_tool_still_fails():
 async def test_a_polluted_call_executes_rather_than_erroring():
     result = await _registry().execute("list_tasks<|channel|>commentary", {})
     assert result == "ran"
+
+
+def test_the_provider_cleans_the_name_before_anyone_sees_it():
+    """Logs and the user-facing hint should show the real tool name."""
+    from argon.providers.openai_compat import _clean_tool_name
+
+    assert _clean_tool_name("list_tasks<|channel|>commentary") == "list_tasks"
+    assert _clean_tool_name("get_status") == "get_status"
+    assert _clean_tool_name(None) == ""

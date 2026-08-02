@@ -6,7 +6,7 @@ import platform
 from pathlib import Path
 from typing import Any
 
-from argon.core.memory import MemoryStore
+from argon.core.journal import Journal
 from argon.core.skills import SkillsLoader
 from argon.utils.helpers import build_assistant_message, current_time_str, detect_image_mime
 
@@ -19,7 +19,7 @@ class ContextBuilder:
     def __init__(self, workspace: Path, timezone: str | None = None):
         self.workspace = workspace
         self.timezone = timezone
-        self.memory = MemoryStore(workspace)
+        self.memory = Journal(workspace)
         self.skills = SkillsLoader(workspace)
 
     def build_system_prompt(
@@ -34,7 +34,7 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
-        memory = self.memory.get_memory_context()
+        memory = self.memory.context()
         if memory:
             parts.append(f"# Memory\n\n{memory}")
 
@@ -77,8 +77,8 @@ Skills with available="false" need dependencies installed first - you can try in
 
 ## Workspace
 {workspace_path}
-- Memory: {workspace_path}/memory/MEMORY.md
-- History: {workspace_path}/memory/HISTORY.md"""
+- Memory: {workspace_path}/memory/MEMORY.md (durable facts)
+- Today's notes: {workspace_path}/memory/days/"""
 
     @staticmethod
     def _build_runtime_context(

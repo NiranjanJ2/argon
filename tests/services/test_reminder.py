@@ -43,8 +43,13 @@ async def _silent(_prompt: str) -> str:
     return ""
 
 
-def _service(tmp_path, monkeypatch, now: datetime, handler=_silent, **kwargs):
-    """A service whose every clock is pinned to *now*."""
+def _service(tmp_path, monkeypatch, now: datetime, handler=_silent, *, tasks=3, **kwargs):
+    """A service whose every clock is pinned to *now*.
+
+    ``tasks`` stubs the pending-task count. It defaults to a non-zero value
+    because most tests are about *when* Argon speaks, not whether there is
+    anything to speak about — the no-material case is covered explicitly.
+    """
     monkeypatch.setenv("ARGON_HOME", str(tmp_path))
     clock = _Clock(now)
     day_key = lambda *_a, **_k: clock.now.strftime("%Y-%m-%d")  # noqa: E731
@@ -52,9 +57,12 @@ def _service(tmp_path, monkeypatch, now: datetime, handler=_silent, **kwargs):
     monkeypatch.setattr(state_mod, "_now", clock)
     monkeypatch.setattr(state_mod, "_today_key", day_key)
     monkeypatch.setattr(reminder_mod.clock, "today_key", day_key)
+    # snooze_until() reads the process clock, not the service's.
+    monkeypatch.setattr(reminder_mod.clock, "now", clock)
 
     service = ReminderService(tmp_path, "America/Los_Angeles", handler, **kwargs)
     monkeypatch.setattr(service, "_now", clock)
+    monkeypatch.setattr(service, "pending_task_count", lambda: tasks)
     return service, clock
 
 
@@ -263,3 +271,104 @@ def test_the_prompt_asks_for_a_message_not_a_decision(tmp_path, monkeypatch):
     assert reminder_mod.SKIP_TOKEN in prompt
     # The old phrasing is what produced "No.".
     assert "deciding whether" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Confabulation guard
+#
+# Live failure, 2026-08-01: with zero tasks and zero events, `idle` fired five
+# times and the model invented "the project due next week" and "How's the UCLA
+# lab work going?" — built out of a biography line in SOUL.md — on a day
+# Niranjan had explicitly called a rest day.
+# ---------------------------------------------------------------------------
+
+
+def test_no_tasks_means_no_idle_nudge(tmp_path, monkeypatch):
+    """A nudge about work needs work to exist, or the model invents some."""
+    service, _ = _service(tmp_path, monkeypatch, _at(13, 30), tasks=0)
+    assert service.pick_occasion() is None
+
+
+def test_pending_tasks_restore_the_idle_nudge(tmp_path, monkeypatch):
+    service, _ = _service(tmp_path, monkeypatch, _at(13, 30), tasks=3)
+    assert service.pick_occasion().kind == "idle"
+
+
+def test_an_unreadable_task_list_stays_quiet(tmp_path, monkeypatch):
+    """Offline must not be mistaken for 'nothing to lose by guessing'."""
+    service, _ = _service(tmp_path, monkeypatch, _at(13, 30), tasks=-1)
+    assert service.pick_occasion() is None
+
+
+def test_an_active_session_counts_as_material(tmp_path, monkeypatch):
+    service, clock = _service(tmp_path, monkeypatch, _at(13, 0), tasks=0)
+    _mode(service, "working")
+    clock.advance(40)
+    assert service.pick_occasion().kind == "session"
+
+
+# ---------------------------------------------------------------------------
+# Snooze
+# ---------------------------------------------------------------------------
+
+
+def test_a_snooze_silences_every_occasion(tmp_path, monkeypatch):
+    service, _ = _service(tmp_path, monkeypatch, _at(8, 30), tasks=5)
+    assert service.pick_occasion() is not None
+
+    reminder_mod.snooze(tmp_path, hours=24, reason="rest day")
+    assert service.pick_occasion() is None
+
+
+def test_a_snooze_expires(tmp_path, monkeypatch):
+    service, clock = _service(tmp_path, monkeypatch, _at(8, 30), tasks=5)
+    reminder_mod.snooze(tmp_path, hours=2, reason="nap")
+    assert service.pick_occasion() is None
+
+    clock.advance(3 * 60)
+    assert service.pick_occasion() is not None
+
+
+def test_a_snooze_can_be_lifted(tmp_path, monkeypatch):
+    service, _ = _service(tmp_path, monkeypatch, _at(8, 30), tasks=5)
+    reminder_mod.snooze(tmp_path, hours=24, reason="rest day")
+    reminder_mod.clear_snooze(tmp_path)
+    assert service.pick_occasion() is not None
+
+
+def test_a_corrupt_snooze_file_does_not_mute_argon_forever(tmp_path, monkeypatch):
+    (tmp_path / "daily").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "daily" / "snooze.json").write_text("{ not json")
+    assert reminder_mod.snooze_until(tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# Mechanical de-duplication
+# ---------------------------------------------------------------------------
+
+
+def test_the_actual_reworded_pair_from_the_incident_is_caught():
+    first = "Project due next week—let's lock in a session to start it."
+    second = "Ready to lock in a session for the project due next week?"
+    assert reminder_mod.is_near_duplicate(second, [first]) is True
+
+
+def test_a_genuinely_different_message_passes():
+    first = "Project due next week—let's lock in a session to start it."
+    second = "How'd the chem pset go?"
+    assert reminder_mod.is_near_duplicate(second, [first]) is False
+
+
+async def test_a_reworded_check_in_is_never_delivered(tmp_path, monkeypatch):
+    async def reword(_prompt: str) -> str:
+        return "Ready to lock in a session for the project due next week?"
+
+    service, clock = _service(tmp_path, monkeypatch, _at(13, 30), handler=reword, tasks=3)
+    service.ledger.record_said(
+        "idle",
+        "Project due next week—let's lock in a session to start it.",
+        clock.now - timedelta(hours=2),
+    )
+
+    assert await service.tick() == ""
+    assert service.ledger.spoken_count() == 1  # still only the original

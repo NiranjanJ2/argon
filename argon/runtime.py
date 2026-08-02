@@ -194,6 +194,20 @@ def build_runtime(config: Config) -> Runtime:
         timezone=config.agents.defaults.timezone,
     )
 
+    async def consolidate_yesterday() -> None:
+        """Fold the last finished day into long-term memory, once."""
+        from argon.core.journal import Journal, consolidate_day
+
+        journal = Journal(config.workspace_path)
+        day = journal.pending_day()
+        if day is None:
+            return
+        try:
+            await consolidate_day(journal, hb_provider, hb_model, day)
+            journal.sweep_old_days()
+        except Exception:
+            logger.exception("End-of-day consolidation failed for {}", day)
+
     async def on_check_in(prompt: str) -> str:
         """Run a check-in turn. Returns what actually reached Niranjan."""
         from argon.tools.message import MessageTool
@@ -220,6 +234,7 @@ def build_runtime(config: Config) -> Runtime:
         workspace=config.workspace_path,
         timezone=config.agents.defaults.timezone,
         on_check_in=on_check_in,
+        on_day_rollover=consolidate_yesterday,
         enabled=checkin_cfg.enabled,
         max_per_day=checkin_cfg.max_per_day,
         min_gap_minutes=checkin_cfg.min_gap_minutes,
