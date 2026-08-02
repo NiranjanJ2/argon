@@ -287,10 +287,13 @@ class AgentLoop:
         # Always available — handles missing Google auth gracefully
         self.tools.register(GetDailyOverviewTool(self.workspace))
 
-        # Phone lockdown (mail → SMS gateway → iOS Shortcut)
-        if self.config.lockdown.configured:
-            from argon.tools.lockdown import SendPhoneNotificationTool
-            self.tools.register(SendPhoneNotificationTool(self.config.lockdown))
+        # The legacy mail -> SMS -> Shortcut lockdown is deliberately NOT
+        # registered. It takes no duration, no reason and no confirmation, and
+        # the model reached for it over set_focus_mode: told "today I want to
+        # lock in for SAT prep" — a plan, not a command — it locked the phone
+        # on the spot at 1:37 AM. The path is also dead, since the `trigger`
+        # Google account is intentionally expired. set_focus_mode is the one
+        # way in, and it is bounded and reversible.
 
         # Screen Time via the iOS app. Registered unconditionally: the tool
         # reports when the phone has never checked in, which is more useful to
@@ -634,9 +637,13 @@ class AgentLoop:
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
-        if message_tool := self.tools.get("message"):
-            if isinstance(message_tool, MessageTool):
-                message_tool.start_turn()
+        # Any tool that cares about turn boundaries gets told. `message` uses it
+        # to avoid double-sending; `set_focus_mode` uses it to force a question
+        # out to Niranjan before it can block his phone at night.
+        for tool in (self.tools.get(name) for name in self.tools.tool_names):
+            start = getattr(tool, "start_turn", None)
+            if callable(start):
+                start()
 
         history = session.get_history(max_messages=0)
         status_context: str | None = None

@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+from argon import clock
 from argon.ios import mode as ios_mode
+from argon.paths import get_runtime_subdir
 from argon.tools.base import Tool
+
+
+#: Outside these hours a block needs explicit confirmation.
+NIGHT_START_HOUR = 23
+NIGHT_END_HOUR = 7
 
 
 class SetFocusModeTool(Tool):
@@ -13,6 +23,54 @@ class SetFocusModeTool(Tool):
 
     def __init__(self, default_lock_minutes: int = 60) -> None:
         self._default_minutes = default_lock_minutes
+        self._refused_this_turn = False
+
+    def start_turn(self) -> None:
+        """Called by the loop before each turn. See ``_night_block_refused``."""
+        self._refused_this_turn = False
+
+    def _night_block_refused(self) -> str | None:
+        """Refuse a night-time block until Niranjan has actually been asked.
+
+        A ``confirmed`` parameter is worthless here: faced with the first
+        version of this guard the model simply set ``confirmed: true`` itself
+        and locked the phone at 1:47 AM anyway. A flag the model controls is
+        not a guard, so consent is inferred from the shape of the conversation
+        instead. The first attempt is always refused and the refusal is
+        recorded; retrying inside the same turn is refused again, which leaves
+        the model no option but to end its turn and ask. Only once Niranjan has
+        replied — a new turn — does the recorded refusal let it through.
+        """
+        hour = clock.now().hour
+        if not (hour >= NIGHT_START_HOUR or hour < NIGHT_END_HOUR):
+            return None
+
+        if not self._refused_this_turn and self._asked_recently():
+            return None  # refused in an earlier turn, and he has since replied
+
+        self._refused_this_turn = True
+        self._record_refusal()
+        return (
+            f"Not applied: it is {clock.now():%-I:%M %p}. Ask Niranjan whether he "
+            "really wants his phone blocked right now, and only do it if he says "
+            "yes in his next message."
+        )
+
+    def _refusal_file(self) -> Path:
+        return get_runtime_subdir("ios") / "night_prompt.json"
+
+    def _record_refusal(self) -> None:
+        self._refusal_file().write_text(
+            json.dumps({"at": clock.now().isoformat()}), encoding="utf-8"
+        )
+
+    def _asked_recently(self, minutes: int = 30) -> bool:
+        try:
+            stamp = json.loads(self._refusal_file().read_text(encoding="utf-8"))["at"]
+            asked = datetime.fromisoformat(stamp)
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return False
+        return (clock.now() - asked).total_seconds() < minutes * 60
 
     @property
     def name(self) -> str:
@@ -26,8 +84,10 @@ class SetFocusModeTool(Tool):
             "(a deadline he has not started, a work session he asked you to protect), "
             "not as a general nudge. Always give a reason; he sees it in the app. "
             "Use 'off' to release. Set allow_early_end to false only when he asked "
-            "for that in advance. If an emergency override is active this refuses "
-            "outright — that is deliberate; do not try to work around it."
+            "for that in advance. Only call this when he is asking to be blocked "
+            "*now* — 'today I want to lock in' is a plan, not a request to lock "
+            "his phone this second. If an emergency override is active this "
+            "refuses outright — that is deliberate; do not work around it."
         )
 
     @property
@@ -71,6 +131,12 @@ class SetFocusModeTool(Tool):
         duration = kwargs.get("duration_min")
         if mode != "off" and not duration:
             duration = self._default_minutes
+
+        # "Today I want to lock in for SAT prep" is a plan, not an instruction
+        # to lock the phone now — and it was said at 1:37 AM, which is when
+        # Argon locked it.
+        if mode != "off" and (refusal := self._night_block_refused()):
+            return refusal
 
         try:
             desired = ios_mode.set_mode(

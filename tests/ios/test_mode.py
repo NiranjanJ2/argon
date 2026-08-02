@@ -310,3 +310,75 @@ async def test_the_focus_tool_refuses_during_an_override():
     result = await SetFocusModeTool(60).execute(mode="lock_in", reason="try it")
     assert "Not applied" in result
     assert ios_mode.get_mode()["mode"] == "off"
+
+
+# ---------------------------------------------------------------------------
+# Night guard
+#
+# Live, 01:37: "today i want to really lock in for SAT prep" -> Argon locked
+# the phone immediately. A plan is not a command, and 1:37 AM is not now.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_block_is_refused_late_at_night(monkeypatch):
+    from argon.tools.focus import SetFocusModeTool
+
+    night = datetime.now(LA).replace(hour=1, minute=37)
+    monkeypatch.setattr("argon.tools.focus.clock.now", lambda: night)
+
+    result = await SetFocusModeTool(60).execute(mode="lock_in", reason="SAT prep")
+
+    assert "Not applied" in result
+    assert ios_mode.get_mode()["mode"] == "off"
+
+
+async def test_the_model_cannot_confirm_on_his_behalf(monkeypatch):
+    """It set confirmed=true itself and locked the phone at 1:47 AM."""
+    from argon.tools.focus import SetFocusModeTool
+
+    night = datetime.now(LA).replace(hour=1, minute=37)
+    monkeypatch.setattr("argon.tools.focus.clock.now", lambda: night)
+    tool = SetFocusModeTool(60)
+
+    first = await tool.execute(mode="lock_in", reason="SAT prep", confirmed=True)
+    retry = await tool.execute(mode="lock_in", reason="SAT prep", confirmed=True)
+
+    assert "Not applied" in first
+    assert "Not applied" in retry, "a same-turn retry must not slip through"
+    assert ios_mode.get_mode()["mode"] == "off"
+
+
+async def test_a_night_block_goes_through_once_he_has_replied(monkeypatch):
+    """New turn after the refusal = he was actually asked."""
+    from argon.tools.focus import SetFocusModeTool
+
+    night = datetime.now(LA).replace(hour=1, minute=37)
+    monkeypatch.setattr("argon.tools.focus.clock.now", lambda: night)
+    tool = SetFocusModeTool(60)
+
+    assert "Not applied" in await tool.execute(mode="lock_in", reason="SAT prep")
+    tool.start_turn()  # Niranjan replied; the loop starts a fresh turn
+    await tool.execute(mode="lock_in", reason="he said yes")
+
+    assert ios_mode.get_mode()["mode"] == "lock_in"
+
+
+async def test_daytime_blocks_need_no_confirmation(monkeypatch):
+    from argon.tools.focus import SetFocusModeTool
+
+    noon = datetime.now(LA).replace(hour=12, minute=0)
+    monkeypatch.setattr("argon.tools.focus.clock.now", lambda: noon)
+
+    await SetFocusModeTool(60).execute(mode="lock_in", reason="pset")
+
+    assert ios_mode.get_mode()["mode"] == "lock_in"
+
+
+async def test_unblocking_is_never_refused_by_the_night_guard(monkeypatch):
+    """Getting out must work at any hour."""
+    from argon.tools.focus import SetFocusModeTool
+
+    night = datetime.now(LA).replace(hour=3, minute=0)
+    monkeypatch.setattr("argon.tools.focus.clock.now", lambda: night)
+
+    assert "released" in await SetFocusModeTool(60).execute(mode="off")
