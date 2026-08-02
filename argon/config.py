@@ -41,7 +41,7 @@ class ProviderConfig(Base):
 
 
 class AgentDefaults(Base):
-    model: str = "openai/gpt-oss-20b"
+    model: str = "openai/gpt-oss-120b"
     fallback_model: str | None = None
     provider: str = "nim"
     max_tokens: int = 8192
@@ -105,6 +105,8 @@ class ApiConfig(Base):
 
 class HeartbeatConfig(Base):
     enabled: bool = True
+    #: Background chatter runs small and cheap; interactive chat gets the 120b.
+    model: str | None = "openai/gpt-oss-20b"
     interval_s: int = 30 * 60
     keep_recent_messages: int = 8
     model: str | None = None
