@@ -43,7 +43,9 @@ class ProviderConfig(Base):
 class AgentDefaults(Base):
     model: str = "openai/gpt-oss-120b"
     fallback_model: str | None = None
-    provider: str = "nim"
+    provider: str = "groq"
+    #: Provider to fall back to when the primary refuses on billing or quota.
+    fallback_provider: str | None = "nim"
     max_tokens: int = 8192
     context_window_tokens: int = 65_536
     context_block_limit: int | None = None

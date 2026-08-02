@@ -29,10 +29,24 @@ from argon.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
 
 
 def build_provider(config: Config, *, provider_name: str | None = None,
-                   model: str | None = None) -> LLMProvider:
-    """Construct the LLM client for a named provider entry."""
+                   model: str | None = None, with_standby: bool = True) -> LLMProvider:
+    """Construct the LLM client for a named provider entry.
+
+    When a different provider is configured as the fallback and holds
+    credentials, it is attached as a standby: a billing or quota refusal then
+    degrades to the slower endpoint instead of taking Argon off the air.
+    """
     defaults = config.agents.defaults
     name, p = config.resolve_provider(provider_name)
+
+    standby = None
+    wanted = defaults.fallback_provider
+    if with_standby and wanted and wanted != name:
+        candidate = config.providers.get(wanted)
+        if candidate is not None and (candidate.api_key or candidate.api_base):
+            standby = build_provider(
+                config, provider_name=wanted, model=model, with_standby=False
+            )
     provider = OpenAICompatProvider(
         api_key=p.api_key or None,
         api_base=config.api_base_for(name),
@@ -40,6 +54,7 @@ def build_provider(config: Config, *, provider_name: str | None = None,
         fallback_model=defaults.fallback_model or None,
         extra_headers=p.extra_headers or None,
         spec=find_by_name(name),
+        standby=standby,
     )
     provider.generation = GenerationSettings(
         temperature=defaults.temperature,

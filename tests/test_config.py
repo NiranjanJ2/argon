@@ -219,9 +219,12 @@ def test_load_config_migrates_a_file_end_to_end(tmp_path):
 
 
 def test_load_config_falls_back_to_defaults_on_garbage(tmp_path):
+    from argon.config import AgentDefaults
+
     path = tmp_path / "config.json"
     path.write_text("{not json", encoding="utf-8")
-    assert load_config(path).agents.defaults.provider == "nim"
+    # The point is that a garbage file yields defaults, not which one is default.
+    assert load_config(path).agents.defaults.provider == AgentDefaults().provider
 
 
 # ---------------------------------------------------------------------------

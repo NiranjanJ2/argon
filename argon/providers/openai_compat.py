@@ -126,10 +126,17 @@ class OpenAICompatProvider(LLMProvider):
         fallback_model: str | None = None,
         extra_headers: dict[str, str] | None = None,
         spec: ProviderSpec | None = None,
+        standby: OpenAICompatProvider | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.fallback_model = fallback_model
+        #: Another provider to try when this one refuses on billing or quota.
+        #: Groq blocked the org on a spend alert in May and Argon simply
+        #: stopped answering — for months, with the failure visible only as
+        #: repeated errors in a log nobody read. Degrading to a slower provider
+        #: beats going silent.
+        self.standby = standby
         self.extra_headers = extra_headers or {}
         self._spec = spec
 
@@ -621,6 +628,20 @@ class OpenAICompatProvider(LLMProvider):
         msg = str(e).lower()
         return any(k in msg for k in ("model not found", "no such model", "not available", "does not exist"))
 
+    @staticmethod
+    def _is_provider_refusal(e: Exception) -> bool:
+        """True when the *provider* is refusing, not the model or the request."""
+        status = getattr(e, "status_code", None) or getattr(
+            getattr(e, "response", None), "status_code", None
+        )
+        if status in (401, 402, 403, 429, 503):
+            return True
+        msg = str(e).lower()
+        return any(k in msg for k in (
+            "spend", "quota", "billing", "insufficient", "rate limit",
+            "over capacity", "overloaded", "temporarily unavailable",
+        ))
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -646,6 +667,13 @@ class OpenAICompatProvider(LLMProvider):
                     return self._parse(await self._client.chat.completions.create(**kwargs))
                 except Exception as e2:
                     return self._handle_error(e2)
+            if self.standby is not None and self._is_provider_refusal(e):
+                from loguru import logger
+                logger.warning("Provider refused ({}); falling back to standby", str(e)[:120])
+                return await self.standby.chat(
+                    messages, tools, model, max_tokens, temperature,
+                    reasoning_effort, tool_choice,
+                )
             return self._handle_error(e)
 
     async def chat_stream(
