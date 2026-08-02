@@ -25,6 +25,9 @@ Compared with `hmac.compare_digest`. An empty `api.token` fails closed — every
 | `POST` | `/v1/screentime` | any object | `{"ok": true, "date": "YYYY-MM-DD"}` |
 | `GET` | `/v1/screentime?date=` | — | `{"date", "count", "records"}` |
 | `POST` | `/v1/webhook/<name>` | `{"message": "..."}` | runs a turn and also delivers the reply to Discord |
+| `GET` | `/v1/tasks` | — | `{"tasks", "state", "cached"}` — `?fresh=1` skips the cache |
+| `POST` | `/v1/tasks` | `{"title", "priority", "due", ...}` | the dashboard, after adding |
+| `PATCH` | `/v1/tasks/<id>` | `{"action"\|"priority"\|"due"}` | the dashboard, after mutating |
 | `GET` | `/v1/ios/mode` | — | the desired focus mode alone |
 | `POST` | `/v1/ios/state` | `{"mode","version","shielded","applied_at","battery"}` | records what the phone applied |
 | `POST` | `/v1/ios/register` | `{"device_token","environment","app_version"}` | stores the APNs token |
@@ -57,6 +60,44 @@ never disagree:
 ```
 
 `mode` is one of `idle | working | napping | lock_in | done`.
+
+## `/v1/tasks`
+
+The same Google Tasks store the agent writes to, so the app, the desktop
+readouts and Argon cannot hold different opinions about what is pending.
+Writes go through the agent's own tool classes (`AddTaskTool`,
+`CompleteTaskTool`, …) rather than straight to the store — the daily-log and
+habit side effects live in those tools, and a second write path would silently
+skip them.
+
+```json
+{
+  "tasks": [{"id": "abc", "title": "Chem pset", "priority": "high",
+             "due": "2026-08-05T00:00:00.000Z", "subject": "AP Chem",
+             "time_estimate_min": 45, "started_at": null, "done": false}],
+  "state": {"mode": "working", "current_task": "Chem pset",
+            "work_session_minutes": 42, "lock_in_minutes": 0},
+  "cached": true
+}
+```
+
+Reads are cached for `TASKS_TTL_S` (60 s) because the desktop widgets poll every
+few seconds and Google Tasks is a rate-limited network round-trip. Three
+consequences worth knowing:
+
+- **Writes bypass the cache** (`fresh=True`), so a task you just added is in the
+  response that acknowledges it.
+- **`state` is always live**, even on a cache hit — it is local, and the
+  work-session minute counter is one of the things the readouts exist to show.
+- **A failed refresh serves the last good list** with `error` set, instead of
+  failing the request. A widget that blanks out is indistinguishable from one
+  that is merely offline, and telling those apart is the entire point. Only a
+  failure with nothing cached yet is a `503`, and it still returns `"tasks": []`
+  so the client has something to render.
+
+`due` is date-only, stored by Google as midnight UTC. Localising it slides the
+day backwards anywhere west of London — a task due Aug 5 renders as "Aug 4,
+5pm". Compare calendar dates, not instants.
 
 ## Screen Time (`ios`)
 

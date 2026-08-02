@@ -13,6 +13,7 @@ import hmac
 import json
 import re
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +38,12 @@ MAX_MESSAGE_CHARS = 8_000
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 _LOOPBACK = {"127.0.0.1", "::1"}
+
+#: How long a task list read may be reused before Google is asked again.
+TASKS_TTL_S = 60.0
+#: (fetched_at_monotonic, tasks) of the last successful read.
+_tasks_cache: tuple[float, list[Any]] | None = None
+_tasks_lock = threading.Lock()
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 1_000_000  # 1 MB ceiling on any request body
@@ -140,6 +147,66 @@ def read_screentime(day: str | None = None, limit: int = 200) -> list[dict[str, 
 
 
 
+def _task_dependencies() -> tuple[Any, Any, Any, Any]:
+    """Build the same task-side dependencies used by the agent's tools."""
+    from argon.google.tasks_store import GoogleTasksStore
+    from argon.productivity.habits import HabitsTracker
+    from argon.productivity.log import DailyLog
+    from argon.productivity.state import DailyState
+
+    ws = _rt.config.workspace_path if _rt.config else argon_home()
+    return GoogleTasksStore(ws), DailyState(ws), DailyLog(ws), HabitsTracker(ws)
+
+
+def _cached_tasks(store: Any, *, fresh: bool = False) -> tuple[list[Any], dict[str, Any]]:
+    """The task list, reusing a recent read. Returns ``(tasks, meta)``.
+
+    The desktop widgets poll every few seconds and Google Tasks is a
+    rate-limited network round-trip, so the poll rate and the fetch rate are
+    deliberately decoupled. Writes pass ``fresh=True`` — a dashboard that still
+    showed the task you just completed would look broken.
+
+    A failed refresh serves the last good list with ``error`` set rather than
+    failing the request: a widget that blanks out is indistinguishable from one
+    that is merely offline, and the difference is the whole point of the thing.
+    """
+    global _tasks_cache
+
+    with _tasks_lock:
+        cached = _tasks_cache
+        if cached is not None and not fresh and (time.monotonic() - cached[0]) < TASKS_TTL_S:
+            return cached[1], {"cached": True}
+        try:
+            tasks = store.get_all()
+        except Exception as exc:  # noqa: BLE001 — a widget must still render
+            if cached is None:
+                raise
+            logger.warning("Task refresh failed, serving the last good list: {}", exc)
+            return cached[1], {"cached": True, "error": str(exc)}
+        _tasks_cache = (time.monotonic(), tasks)
+    return tasks, {"cached": False}
+
+
+def _task_dashboard(store: Any, state: Any, *, fresh: bool = False) -> dict[str, Any]:
+    """Shape the shared task store for the native iOS dashboard.
+
+    ``state`` is read live even on a cache hit: it is local, and the work-session
+    minute counter is one of the things the readouts are for.
+    """
+    tasks, meta = _cached_tasks(store, fresh=fresh)
+    current = state.get()
+    return {
+        "tasks": tasks,
+        **meta,
+        "state": {
+            "mode": current.get("mode", "idle"),
+            "current_task": current.get("current_task"),
+            "work_session_minutes": state.get_work_session_duration_minutes() or 0,
+            "lock_in_minutes": state.get_lock_in_duration_minutes() or 0,
+        },
+    }
+
+
 @app.get("/health")
 def health() -> Any:
     """Liveness probe — deliberately unauthenticated."""
@@ -189,10 +256,9 @@ def webhook(name: str) -> Any:
 @require_token
 def status() -> Any:
     """Widget payload, assembled by the same tool the agent calls."""
+    from argon.ios import mode as ios_mode
     from argon.productivity.state import DailyState
     from argon.tools.status import GetStatusTool
-
-    from argon.ios import mode as ios_mode
 
     ws = _rt.config.workspace_path if _rt.config else argon_home()
     data = json.loads(asyncio.run(GetStatusTool(DailyState(ws), ws).execute()))
@@ -200,6 +266,108 @@ def status() -> Any:
     # so both must always be complete objects — see argon/ios/mode.py.
     data["ios"] = ios_mode.snapshot()
     return jsonify(data)
+
+
+@app.get("/v1/tasks")
+@require_token
+def tasks_get() -> Any:
+    """Return the same Google Tasks-backed list and work state Argon uses.
+
+    Served from a short cache; ``?fresh=1`` forces a Google read.
+    """
+    try:
+        store, state, _, _ = _task_dependencies()
+        return jsonify(_task_dashboard(store, state, fresh=request.args.get("fresh") == "1"))
+    except Exception:
+        logger.exception("Could not load the iOS task dashboard")
+        return jsonify({"error": "task store unavailable", "tasks": []}), 503
+
+
+@app.post("/v1/tasks")
+@require_token
+def tasks_add() -> Any:
+    """Add a task through Argon's task tool so logging and metadata stay shared."""
+    from argon.tools.tasks import AddTaskTool
+
+    body = _body()
+    title = _text(body, "title")
+    if not title:
+        return jsonify({"error": "title required"}), 400
+
+    priority = body.get("priority", "medium")
+    source = body.get("source", "manual")
+    due = body.get("due")
+    estimate = body.get("time_estimate_min")
+    if priority not in {"high", "medium", "low"}:
+        return jsonify({"error": "bad priority"}), 400
+    if source not in {"manual", "classroom", "ucla", "club"}:
+        return jsonify({"error": "bad source"}), 400
+    if due is not None and (not isinstance(due, str) or not _DATE_RE.match(due)):
+        return jsonify({"error": "due must be YYYY-MM-DD"}), 400
+    if estimate is not None and (
+        isinstance(estimate, bool) or not isinstance(estimate, int) or estimate <= 0
+    ):
+        return jsonify({"error": "time_estimate_min must be a positive integer"}), 400
+
+    try:
+        store, state, log, _ = _task_dependencies()
+        kwargs = {
+            "title": title,
+            "priority": priority,
+            "source": source,
+            "due": due,
+            "subject": _text(body, "subject") or None,
+            "notes": _text(body, "notes") or None,
+            "time_estimate_min": estimate,
+        }
+        asyncio.run(AddTaskTool(store, log).execute(**kwargs))
+        return jsonify(_task_dashboard(store, state, fresh=True))
+    except Exception:
+        logger.exception("Could not add a task from the iOS dashboard")
+        return jsonify({"error": "task store unavailable"}), 503
+
+
+@app.patch("/v1/tasks/<task_id>")
+@require_token
+def tasks_update(task_id: str) -> Any:
+    """Start, complete, reprioritize, or reschedule a shared Argon task."""
+    from argon.tools.tasks import CompleteTaskTool, StartTaskTool, UpdateTaskTool
+
+    body = _body()
+    action = body.get("action")
+    priority = body.get("priority")
+    due = body.get("due")
+    if action not in {None, "start", "complete"}:
+        return jsonify({"error": "bad action"}), 400
+    if priority is not None and priority not in {"high", "medium", "low"}:
+        return jsonify({"error": "bad priority"}), 400
+    if due is not None and (not isinstance(due, str) or not _DATE_RE.match(due)):
+        return jsonify({"error": "due must be YYYY-MM-DD"}), 400
+    if action is None and priority is None and due is None:
+        return jsonify({"error": "no task mutation requested"}), 400
+
+    try:
+        store, state, log, habits = _task_dependencies()
+        result = ""
+        if action == "start":
+            result = asyncio.run(StartTaskTool(store, state, log).execute(task_id=task_id))
+        elif action == "complete":
+            result = asyncio.run(
+                CompleteTaskTool(store, state, log, habits).execute(task_id=task_id)
+            )
+        if result.startswith("No task matching") or result.startswith("No pending task matching"):
+            return jsonify({"error": "task not found"}), 404
+
+        if priority is not None or due is not None:
+            result = asyncio.run(
+                UpdateTaskTool(store).execute(task_id=task_id, priority=priority, due=due)
+            )
+            if result.startswith("No task matching"):
+                return jsonify({"error": "task not found"}), 404
+        return jsonify(_task_dashboard(store, state, fresh=True))
+    except Exception:
+        logger.exception("Could not update a task from the iOS dashboard")
+        return jsonify({"error": "task store unavailable"}), 503
 
 
 @app.get("/v1/ios/mode")

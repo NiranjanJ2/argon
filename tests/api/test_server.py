@@ -20,6 +20,9 @@ V1_ROUTES = [
     ("post", "/v1/chat"),
     ("post", "/v1/webhook/shortcut"),
     ("get", "/v1/status"),
+    ("get", "/v1/tasks"),
+    ("post", "/v1/tasks"),
+    ("patch", "/v1/tasks/task-1"),
     ("post", "/v1/screentime"),
     ("get", "/v1/screentime"),
     ("get", "/v1/ios/mode"),
@@ -35,6 +38,8 @@ def _client(tmp_path, monkeypatch, *, token: str = TOKEN):
     monkeypatch.setattr(srv._rt, "config", Config(api=ApiConfig(token=token)))
     monkeypatch.setattr(srv._rt, "agent", None)
     monkeypatch.setattr(srv._rt, "whatsapp", None)
+    # The task cache is module state; without this it leaks between tests.
+    monkeypatch.setattr(srv, "_tasks_cache", None)
     return srv.app.test_client()
 
 
@@ -223,6 +228,234 @@ def test_webhook_runs_on_its_own_session(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert seen == ["webhook:leaving-school"]
+
+
+# ---------------------------------------------------------------------------
+# /v1/tasks
+# ---------------------------------------------------------------------------
+
+
+class _FakeTaskStore:
+    def __init__(self):
+        self.tasks = [
+            {
+                "id": "task-1",
+                "title": "Ship dashboard",
+                "done": False,
+                "priority": "high",
+                "source": "manual",
+                "subject": None,
+                "notes": None,
+                "due": "2026-08-02T00:00:00.000Z",
+                "classroom_id": None,
+                "time_estimate_min": 25,
+                "time_actual_min": None,
+                "started_at": None,
+            }
+        ]
+
+    def get_all(self):
+        return self.tasks
+
+
+class _FakeTaskState:
+    def get(self):
+        return {"mode": "working", "current_task": "Ship dashboard"}
+
+    def get_work_session_duration_minutes(self):
+        return None
+
+    def get_lock_in_duration_minutes(self):
+        return 7
+
+
+def _task_client(tmp_path, monkeypatch):
+    store = _FakeTaskStore()
+    state = _FakeTaskState()
+    monkeypatch.setattr(srv, "_task_dependencies", lambda: (store, state, object(), object()))
+    return _client(tmp_path, monkeypatch), store, state
+
+
+class _CountingTaskStore(_FakeTaskStore):
+    """Counts Google reads, and can be told to start failing them."""
+
+    def __init__(self):
+        super().__init__()
+        self.reads = 0
+        self.broken = False
+
+    def get_all(self):
+        self.reads += 1
+        if self.broken:
+            raise RuntimeError("google work account needs re-authentication")
+        return self.tasks
+
+    def add_task(self, title, **kwargs):
+        task = {"id": "task-{}".format(len(self.tasks) + 1), "title": title}
+        self.tasks.append(task)
+        return task
+
+
+class _FakeLog:
+    def append(self, *args, **kwargs):
+        pass
+
+
+def _counting_client(tmp_path, monkeypatch):
+    store, state = _CountingTaskStore(), _FakeTaskState()
+    monkeypatch.setattr(
+        srv, "_task_dependencies", lambda: (store, state, _FakeLog(), object())
+    )
+    return _client(tmp_path, monkeypatch), store
+
+
+def test_polling_the_dashboard_does_not_re_read_google_every_time(tmp_path, monkeypatch):
+    """The widgets poll every few seconds; Google is rate-limited."""
+    client, store = _counting_client(tmp_path, monkeypatch)
+
+    first = client.get("/v1/tasks", headers=AUTH).get_json()
+    second = client.get("/v1/tasks", headers=AUTH).get_json()
+
+    assert store.reads == 1
+    assert first["cached"] is False and second["cached"] is True
+    assert second["tasks"] == first["tasks"]
+
+
+def test_live_work_state_is_not_frozen_by_the_task_cache(tmp_path, monkeypatch):
+    """A cache hit must still report the current minute counter."""
+    client, store = _counting_client(tmp_path, monkeypatch)
+    client.get("/v1/tasks", headers=AUTH)
+
+    body = client.get("/v1/tasks", headers=AUTH).get_json()
+
+    assert body["cached"] is True
+    assert body["state"]["lock_in_minutes"] == 7
+
+
+def test_fresh_forces_a_google_read(tmp_path, monkeypatch):
+    client, store = _counting_client(tmp_path, monkeypatch)
+    client.get("/v1/tasks", headers=AUTH)
+    client.get("/v1/tasks?fresh=1", headers=AUTH)
+    assert store.reads == 2
+
+
+def test_adding_a_task_bypasses_the_cache(tmp_path, monkeypatch):
+    """A dashboard still showing the task you just added looks broken."""
+    client, store = _counting_client(tmp_path, monkeypatch)
+    client.get("/v1/tasks", headers=AUTH)
+
+    response = client.post("/v1/tasks", headers=AUTH, json={"title": "new"})
+
+    assert response.status_code == 200
+    assert response.get_json()["cached"] is False
+    assert store.reads == 2
+
+
+def test_a_failed_refresh_serves_the_last_good_list(tmp_path, monkeypatch):
+    """Blanking out is indistinguishable from being offline."""
+    client, store = _counting_client(tmp_path, monkeypatch)
+    client.get("/v1/tasks", headers=AUTH)
+    store.broken = True
+
+    response = client.get("/v1/tasks?fresh=1", headers=AUTH)
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["tasks"][0]["id"] == "task-1"
+    assert "re-authentication" in body["error"]
+
+
+def test_a_failure_with_nothing_cached_is_a_renderable_503(tmp_path, monkeypatch):
+    client, store = _counting_client(tmp_path, monkeypatch)
+    store.broken = True
+
+    response = client.get("/v1/tasks", headers=AUTH)
+
+    assert response.status_code == 503
+    assert response.get_json()["tasks"] == []
+
+
+def test_tasks_get_returns_the_shared_dashboard_shape(tmp_path, monkeypatch):
+    client, _, _ = _task_client(tmp_path, monkeypatch)
+
+    response = client.get("/v1/tasks", headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.get_json()["tasks"][0]["id"] == "task-1"
+    assert response.get_json()["state"] == {
+        "mode": "working",
+        "current_task": "Ship dashboard",
+        "work_session_minutes": 0,
+        "lock_in_minutes": 7,
+    }
+
+
+def test_tasks_add_runs_the_agent_tool_and_returns_the_dashboard(tmp_path, monkeypatch):
+    seen = []
+
+    async def execute(self, **kwargs):
+        seen.append(kwargs)
+        return "Added: Read paper"
+
+    monkeypatch.setattr("argon.tools.tasks.AddTaskTool.execute", execute)
+    client, _, _ = _task_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/v1/tasks",
+        headers=AUTH,
+        json={
+            "title": "Read paper",
+            "priority": "medium",
+            "due": "2026-08-03",
+            "time_estimate_min": 30,
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen[0]["title"] == "Read paper"
+    assert seen[0]["time_estimate_min"] == 30
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"title": "x", "priority": "urgent"},
+        {"title": "x", "due": "tomorrow"},
+        {"title": "x", "time_estimate_min": True},
+    ],
+)
+def test_tasks_add_rejects_malformed_mutations(tmp_path, monkeypatch, body):
+    client, _, _ = _task_client(tmp_path, monkeypatch)
+    assert client.post("/v1/tasks", headers=AUTH, json=body).status_code == 400
+
+
+def test_tasks_patch_runs_the_same_start_tool_the_agent_uses(tmp_path, monkeypatch):
+    seen = []
+
+    async def execute(self, **kwargs):
+        seen.append(kwargs)
+        return "Started: Ship dashboard"
+
+    monkeypatch.setattr("argon.tools.tasks.StartTaskTool.execute", execute)
+    client, _, _ = _task_client(tmp_path, monkeypatch)
+
+    response = client.patch("/v1/tasks/task-1", headers=AUTH, json={"action": "start"})
+
+    assert response.status_code == 200
+    assert seen == [{"task_id": "task-1"}]
+
+
+def test_tasks_patch_maps_a_missing_task_to_404(tmp_path, monkeypatch):
+    async def execute(self, **kwargs):
+        return "No pending task matching 'missing'."
+
+    monkeypatch.setattr("argon.tools.tasks.CompleteTaskTool.execute", execute)
+    client, _, _ = _task_client(tmp_path, monkeypatch)
+
+    response = client.patch("/v1/tasks/missing", headers=AUTH, json={"action": "complete"})
+
+    assert response.status_code == 404
 
 
 # ---------------------------------------------------------------------------
