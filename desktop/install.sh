@@ -10,11 +10,13 @@ INTERVAL="${1:-10s}"   # SwiftBar refresh, encoded in the plugin filename
 
 mkdir -p "$CONFIG_DIR" "$SWIFTBAR_DIR" "$UBERSICHT_DIR"
 
-# Symlinks, not copies: editing the repo updates both readouts on next refresh.
-ln -sf "$SRC/argon-widget.py" "$CONFIG_DIR/argon-widget.py"
-ln -sf "$SRC/argon.jsx" "$UBERSICHT_DIR/argon.jsx"
+# ~/.config/argon is the install; this directory is the versioned source. Copy
+# rather than symlink, so the readouts keep working if the checkout moves or is
+# deleted — re-run this script to pick up edits.
+install -m 755 "$SRC/argon-widget.py" "$CONFIG_DIR/argon-widget.py"
+install -m 644 "$SRC/argon.jsx" "$UBERSICHT_DIR/argon.jsx"
 rm -f "$SWIFTBAR_DIR"/argon.*.py
-ln -sf "$SRC/argon-widget.py" "$SWIFTBAR_DIR/argon.$INTERVAL.py"
+ln -sf "$CONFIG_DIR/argon-widget.py" "$SWIFTBAR_DIR/argon.$INTERVAL.py"
 
 if [ ! -f "$CONFIG_DIR/desktop.json" ]; then
   cat > "$CONFIG_DIR/desktop.json" <<'JSON'
