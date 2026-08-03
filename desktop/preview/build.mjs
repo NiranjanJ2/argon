@@ -48,8 +48,12 @@ function h(tag, props, ...kids) {
   return raw(`${open}${inner}</${tag}>`);
 }
 
-// Übersicht module semantics: strip the exports, keep the bindings.
-const source = readFileSync(SRC, "utf8").replace(/^export const /gm, "const ");
+// Übersicht module semantics: strip the exports, keep the bindings. Its
+// "uebersicht" module (run, css) does not resolve outside the app, so stub it —
+// the preview renders markup, it does not execute actions.
+const source = readFileSync(SRC, "utf8")
+  .replace(/^import\s+\{[^}]*\}\s+from\s+["']uebersicht["'];?$/gm, "const run = () => {};")
+  .replace(/^export const /gm, "const ");
 const { code } = transformSync(source, {
   loader: "jsx",
   jsxFactory: "h",

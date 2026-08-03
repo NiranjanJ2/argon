@@ -34,14 +34,19 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 CONFIG_PATH = Path.home() / ".config" / "argon" / "desktop.json"
 TIMEOUT_S = 4.0
+#: Writes go through Google Tasks, which is slower than reading a cached list.
+ACTION_TIMEOUT_S = 12.0
+SELF = Path(__file__).resolve()
 
 # ---------------------------------------------------------------------------
 # Design tokens — mirrored from Foqos/Utils/ArgonDesign.swift
@@ -114,6 +119,18 @@ def get(url, token, path):
         url + path, headers={"Authorization": "Bearer " + token}
     )
     with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def send(url, token, path, body, method="POST"):
+    req = urllib.request.Request(
+        url + path,
+        data=json.dumps(body).encode("utf-8"),
+        method=method,
+        headers={"Authorization": "Bearer " + token,
+                 "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=ACTION_TIMEOUT_S) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -411,16 +428,31 @@ def render_swiftbar(view):
         out.append(bar("{}  {}".format(group["title"], len(group["tasks"])),
                        color=group["tint"], size=12, font="Georgia"))
         for task in group["tasks"]:
+            # The row is a submenu parent, so its actions need a deliberate
+            # second click. Completing on a stray click would be unrecoverable
+            # from here — there is no un-complete in the task store.
             out.append(bar(
                 "   " + task["title"],
                 color=PALETTE["ink"], size=13, font="Georgia",
                 sfimage="play.fill" if task["started"] else "circle",
                 sfcolor=task["tint"],
             ))
-            detail = "        " + task["priority"].upper()
+            detail = task["priority"].upper()
             if task["meta"]:
                 detail += " · " + task["meta"]
-            out.append(bar(detail, color=PALETTE["mutedInk"], size=10))
+            out.append(bar("--" + detail, color=PALETTE["mutedInk"], size=11))
+            out.append("-----")
+            if not task["started"]:
+                out.append(bar("--Start", sfimage="play.fill",
+                               **action_params("start", task["id"])))
+            out.append(bar("--Complete", sfimage="checkmark.circle",
+                           **action_params("complete", task["id"], task["title"])))
+            out.append(bar("--Due tomorrow", sfimage="calendar.badge.clock",
+                           **action_params("tomorrow", task["id"])))
+            out.append(bar("--Priority", sfimage="flag"))
+            for level in ("high", "medium", "low"):
+                out.append(bar("----" + level.capitalize(),
+                               **action_params("priority", task["id"], level)))
 
     # -- focus and phone, one level down -----------------------------------
     out.append("---")
@@ -446,10 +478,100 @@ def render_swiftbar(view):
                            color=PALETTE["danger"] if label == "Error" else None))
 
     out.append("---")
+    out.append(bar("Add a task…", sfimage="plus.circle", size=12,
+                   **action_params("add")))
+    # Always offered, never conditional on a lock being visible: an escape
+    # hatch you can only reach when the UI agrees you are locked is not one.
+    out.append(bar("Release blocks", sfimage="lock.open", size=12,
+                   **action_params("unlock")))
+    out.append(bar("Refresh", refresh="true", sfimage="arrow.clockwise", size=12))
     out.append(bar("Updated {}{}".format(view["updated"], " · cached" if view["cached"] else ""),
                    color=PALETTE["mutedInk"], size=10))
-    out.append(bar("Refresh", refresh="true", sfimage="arrow.clockwise", size=12))
     print("\n".join(out))
+
+
+# ---------------------------------------------------------------------------
+# Actions
+# ---------------------------------------------------------------------------
+
+def osa(script):
+    """Run one AppleScript, returning stdout. Empty on any failure."""
+    done = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def notify(text, title="Argon"):
+    """A macOS notification is the only way an action can report anything.
+
+    Both hosts run these detached — SwiftBar discards a plugin's stdout when it
+    is invoked as an action, and Übersicht throws away the result of run().
+    Without this a failed write is indistinguishable from a successful one.
+    """
+    osa("display notification {} with title {}".format(json.dumps(text), json.dumps(title)))
+
+
+def do_action(argv):
+    """Perform one mutation. ``argv`` is everything after ``--do``.
+
+    Deliberately the same HTTP surface the iOS app uses, which routes writes
+    through Argon's own tool classes — so a task completed from the menu bar
+    gets the same daily-log and habit side effects as one completed by asking.
+    """
+    if not argv:
+        notify("No action given")
+        return 2
+
+    verb = argv[0]
+    url, token = load_config()
+    if not url or not token:
+        notify("Not configured — see " + str(CONFIG_PATH))
+        return 1
+
+    def task_path(task_id):
+        return "/v1/tasks/" + urllib.parse.quote(task_id, safe="")
+
+    try:
+        if verb in ("start", "complete") and len(argv) > 1:
+            send(url, token, task_path(argv[1]), {"action": verb}, "PATCH")
+            if verb == "complete":
+                notify("Completed {}".format(argv[2] if len(argv) > 2 else "task"))
+        elif verb == "tomorrow" and len(argv) > 1:
+            due = (now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            send(url, token, task_path(argv[1]), {"due": due}, "PATCH")
+        elif verb == "priority" and len(argv) > 2:
+            send(url, token, task_path(argv[1]), {"priority": argv[2]}, "PATCH")
+        elif verb == "add":
+            title = osa(
+                'text returned of (display dialog "Add a task" default answer "" '
+                'with title "Argon" buttons {"Cancel", "Add"} default button "Add")'
+            )
+            if not title:
+                return 0  # cancelled, which is not a failure
+            send(url, token, "/v1/tasks", {"title": title, "priority": "medium"})
+        elif verb == "unlock":
+            minutes = int(argv[1]) if len(argv) > 1 else 120
+            send(url, token, "/v1/ios/override",
+                 {"minutes": minutes, "source": "desktop"})
+            notify("Blocks released and held off for {} minutes".format(minutes))
+        else:
+            notify("Unknown action: " + verb)
+            return 2
+    except urllib.error.HTTPError as e:
+        notify("{} failed — HTTP {}".format(verb, e.code))
+        return 1
+    except Exception as e:  # noqa: BLE001 — never leave a click unexplained
+        notify("{} failed — {}".format(verb, e))
+        return 1
+    return 0
+
+
+def action_params(*args):
+    """SwiftBar's bash=/paramN= encoding for one ``--do`` call."""
+    argv = [str(SELF), "--do"] + [str(a) for a in args]
+    params = {"bash": argv[0], "terminal": "false", "refresh": "true"}
+    for i, value in enumerate(argv[1:], start=1):
+        params["param{}".format(i)] = json.dumps(value)
+    return params
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +634,14 @@ def selftest():
     assert view["alert"] and "not applied" in view["alert"]
     assert view["focus"]["early_exit"] == "Blocked"
 
+    # Actions: SwiftBar splits paramN on spaces unless each is quoted, so a
+    # task titled "SAT prep" would otherwise arrive as two arguments.
+    params = action_params("complete", "id-1", "SAT prep")
+    assert params["bash"] == str(SELF)
+    assert params["param1"] == '"--do"' and params["param2"] == '"complete"'
+    assert params["param4"] == '"SAT prep"'
+    assert params["terminal"] == "false" and params["refresh"] == "true"
+
     # Empty and broken payloads must both still render.
     render_swiftbar(build_view({"ios": {}, "tasks": []}))
     render_swiftbar(build_view({"error": "offline"}))
@@ -520,6 +650,8 @@ def selftest():
 
 
 def main():
+    if "--do" in sys.argv:
+        sys.exit(do_action(sys.argv[sys.argv.index("--do") + 1:]))
     if "--selftest" in sys.argv:
         selftest()
     elif "--json" in sys.argv:

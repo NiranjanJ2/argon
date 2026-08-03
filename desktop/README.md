@@ -18,6 +18,40 @@ preview/build.mjs          render argon.jsx to static HTML, to look at it
 `build_view` decides what the readout says — mode wording, task grouping, sort
 order, every string needing a clock. The renderers only decide how it looks.
 
+## Actions
+
+Both readouts write, through the same `--do` dispatcher:
+
+```sh
+argon-widget.py --do start <task-id>
+argon-widget.py --do complete <task-id> [title]
+argon-widget.py --do tomorrow <task-id>
+argon-widget.py --do priority <task-id> high|medium|low
+argon-widget.py --do add                 # osascript prompt
+argon-widget.py --do unlock [minutes]    # release blocks, default 120
+```
+
+That is the same HTTP surface the iOS app uses, and it deliberately does **not**
+touch the task store directly: `POST`/`PATCH /v1/tasks` route through Argon's own
+tool classes, where the daily-log and habit side effects live. A task completed
+from the menu bar is indistinguishable from one completed by asking Argon.
+
+Three things worth knowing:
+
+- **Failures notify.** Both hosts run actions detached — SwiftBar discards the
+  output and Übersicht throws away `run()`'s result — so a failed write would
+  otherwise look exactly like a successful one. Every failure raises a macOS
+  notification; success is silent, because the refresh is the confirmation.
+- **Completing needs two clicks in SwiftBar** (open the row's submenu, then
+  Complete). There is no un-complete in the task store, so a stray click on a
+  one-click menu item would be unrecoverable from here.
+- **Release is always offered**, never hidden behind "a lock is showing". An
+  escape hatch you can only reach when the UI agrees you are locked is not one.
+
+Übersicht dims a row the moment you click it. The next poll replaces the DOM
+with real data, which is exactly when the dimming should stop — so nothing has
+to undo it.
+
 ## Styling
 
 Lifted from the iOS app, not invented. `PALETTE` in `argon-widget.py` mirrors

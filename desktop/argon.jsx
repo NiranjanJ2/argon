@@ -9,7 +9,24 @@
 // Font.argonDisplay, and the Overdue/Today/Later sections match
 // ArgonDashboardView. Changing a colour means changing PALETTE in the Python.
 
-export const command = "$HOME/.config/argon/argon-widget.py --json";
+import { run } from "uebersicht";
+
+const SCRIPT = "$HOME/.config/argon/argon-widget.py";
+
+export const command = SCRIPT + " --json";
+
+// Actions shell out to the same script SwiftBar's menu items call, which posts
+// to the same HTTP surface the iOS app uses — so a task completed here gets the
+// daily-log and habit side effects that live in Argon's own tool classes.
+const sh = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+
+// Dim the row immediately. The next poll (5s) replaces the DOM with real data,
+// which is precisely when the dimming should stop — so nothing has to undo it.
+const act = (event, ...args) => {
+  const row = event.currentTarget.closest(".task, .actions");
+  if (row) row.classList.add("pending");
+  run(SCRIPT + " --do " + args.map(sh).join(" "));
+};
 
 // Übersicht polls locally; the server caches the Google round-trip, so a short
 // interval costs one LAN request — see TASKS_TTL_S in argon/api/server.py.
@@ -99,6 +116,26 @@ export const className = `
                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pill { flex: 0 0 auto; font-size: 8px; font-weight: 700; letter-spacing: 0.9px;
           padding: 4px 7px; border-radius: 99px; }
+  .pending { opacity: 0.4; pointer-events: none; }
+
+  /* Interactive affordances. The ring starts a task, the tick completes it —
+     the same two gestures the app binds to tap and swipe. */
+  .ring, .tick, .btn { cursor: pointer; }
+  .ring:hover { background: rgba(169,221,255,0.12); }
+  .tick { flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%;
+          display: flex; align-items: center; justify-content: center;
+          opacity: 0; transition: opacity 120ms ease; }
+  .tick svg { width: 12px; height: 12px; stroke: #7BE3A0; }
+  .task:hover .tick { opacity: 1; }
+  .tick:hover { background: rgba(123,227,160,0.14); }
+
+  .actions { display: flex; gap: 7px; margin-top: 13px; }
+  .btn { flex: 1; display: flex; align-items: center; justify-content: center;
+         gap: 6px; padding: 8px 6px; border-radius: 13px; font-size: 10.5px;
+         font-weight: 600; color: #A9DDFF; background: rgba(255,255,255,0.045);
+         border: 1px solid rgba(255,255,255,0.07); }
+  .btn:hover { background: rgba(93,169,255,0.14); border-color: rgba(93,169,255,0.30); }
+  .btn svg { width: 11px; height: 11px; }
 
   .empty { text-align: center; padding: 22px 8px; }
   .empty svg { width: 28px; height: 28px; stroke: #A9DDFF; stroke-width: 1.7;
@@ -131,6 +168,9 @@ const GLYPH = {
   "moon.stars.fill": "M14.5 11.5A5.5 5.5 0 018 5a5.5 5.5 0 106.5 6.5z",
   "moon.zzz.fill": "M14.5 11.5A5.5 5.5 0 018 5a5.5 5.5 0 106.5 6.5z",
   "checkmark.seal.fill": "M6.5 10l2.5 2.5 4.5-5",
+  checkmark: "M5 10.5l3.2 3.2L15 6.5",
+  "plus.circle": "M10 6v8M6 10h8",
+  "lock.open": "M6 9.5h8V16H6zM8 9.5V7a2.5 2.5 0 015 0",
   "bolt.slash.fill": "M11 3l-5 7h3l-1 5 5-7h-3zM4 4l12 12",
   "graduationcap.fill": "M3 8l7-3 7 3-7 3zM6 10v3.5c0 1 1.8 1.8 4 1.8s4-.8 4-1.8V10",
   "book.fill": "M4 4.5h5.5v11H4zM10.5 4.5H16v11h-5.5z",
@@ -228,9 +268,11 @@ export const render = ({ output }) => {
           {g.tasks.map((t) => (
             <div className="task" key={t.id}>
               <span className={t.started ? "ring started" : "ring"}
-                    style={{ borderColor: t.tint }}>
+                    style={{ borderColor: t.tint }}
+                    title={t.started ? "Already running" : "Start this task"}
+                    onClick={(e) => !t.started && act(e, "start", t.id)}>
                 {t.started && (
-                  <svg viewBox="0 0 10 10"><path d="M3 2l5 3-5 3z" fill="#A9DDFF" /></svg>
+                  <svg viewBox="0 0 10 10"><path d="M3 2l5 3-5 3z" /></svg>
                 )}
               </span>
               <div className="body">
@@ -240,6 +282,10 @@ export const render = ({ output }) => {
               <span className="pill" style={{ color: t.tint,
                                               background: t.tint + "1A" }}>
                 {t.priority.toUpperCase()}
+              </span>
+              <span className="tick" title="Complete"
+                    onClick={(e) => act(e, "complete", t.id, t.title)}>
+                <Icon name="checkmark" />
               </span>
             </div>
           ))}
@@ -254,6 +300,17 @@ export const render = ({ output }) => {
       <KV k="Converged" v={phone.convergence} warn={phone.drift} />
       <KV k="Because" v={focus.reason} />
       <KV k="Error" v={phone.error} warn />
+
+      <div className="actions">
+        <span className="btn" onClick={(e) => act(e, "add")}>
+          <Icon name="plus.circle" />Add task
+        </span>
+        {/* Always offered, never conditional on a lock being visible: an escape
+            hatch you can only reach when the UI agrees you are locked is not one. */}
+        <span className="btn" onClick={(e) => act(e, "unlock")}>
+          <Icon name="lock.open" />Release
+        </span>
+      </div>
 
       <div className="foot">{v.updated}{v.cached ? " · CACHED" : ""}</div>
     </div>
