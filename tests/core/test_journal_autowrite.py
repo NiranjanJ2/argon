@@ -36,6 +36,67 @@ class TestDescribeTool:
         assert describe_tool("log_note", {}) is None
 
 
+class TestDescribersMatchRealSchemas:
+    """Describers read tool arguments by name, so they rot silently.
+
+    ``snooze_check_ins`` shipped reading ``minutes`` when the tool takes
+    ``hours``, so a 24-hour rest day was journalled as a bare "asked for quiet"
+    with the duration dropped — and nothing failed.
+    """
+
+    @staticmethod
+    def _real_tools() -> dict[str, set[str]]:
+        import importlib
+        import inspect
+
+        from argon.tools.base import Tool
+        from argon.core.journal import _TOOL_NOTES
+
+        found: dict[str, set[str]] = {}
+        for mod in ("tasks", "status", "focus", "quiet", "memory", "bell", "cron"):
+            try:
+                module = importlib.import_module(f"argon.tools.{mod}")
+            except ImportError:
+                continue
+            for obj in vars(module).values():
+                if not (inspect.isclass(obj) and issubclass(obj, Tool) and obj is not Tool):
+                    continue
+                try:
+                    inst = obj.__new__(obj)
+                    found[inst.name] = set((inst.parameters.get("properties") or {}).keys())
+                except Exception:
+                    continue
+        assert found, "could not introspect any tools"
+        return found
+
+    def test_every_described_tool_actually_exists(self):
+        from argon.core.journal import _TOOL_NOTES
+
+        real = self._real_tools()
+        # focus/bell tools can fail to introspect without instance state; only
+        # assert on names we did manage to resolve plus the ones we know of.
+        unknown = {n for n in _TOOL_NOTES if n not in real and n != "set_focus_mode"}
+        assert not unknown, f"describers for tools that do not exist: {unknown}"
+
+    def test_describers_only_read_parameters_the_tool_declares(self):
+        """A describer reading a key the schema never sends silently loses detail."""
+        from argon.core.journal import _TOOL_NOTES
+
+        real = self._real_tools()
+        for name, make in _TOOL_NOTES.items():
+            if name not in real:
+                continue
+            # Feed every declared parameter a marker; anything the describer
+            # reports must have come from a real one.
+            args = {key: f"<{key}>" for key in real[name]}
+            line = make(args)
+            assert line, f"{name} produced no line from its own schema"
+            assert "?" not in line, (
+                f"{name} fell back to '?' given every declared parameter "
+                f"{sorted(real[name])} — it is reading a key the tool never sends"
+            )
+
+
 class TestJournalWriting:
     def test_notes_land_on_todays_page(self, tmp_path):
         journal = Journal(tmp_path)

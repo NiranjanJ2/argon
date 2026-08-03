@@ -59,11 +59,13 @@ _TOOL_NOTES: dict[str, Any] = {
         a.get("mode", "?"),
         " for {}m".format(a["duration_min"]) if a.get("duration_min") else "",
     ),
-    "log_note": lambda a: a.get("note") or a.get("text") or "",
-    "snooze_check_ins": lambda a: "asked for quiet{}".format(
-        " ({}m)".format(a["minutes"]) if a.get("minutes") else ""
+    "log_note": lambda a: a.get("note") or "",
+    "snooze_check_ins": lambda a: (
+        "check-ins resumed" if a.get("resume") else "asked for quiet{}{}".format(
+            " for {}h".format(a["hours"]) if a.get("hours") else "",
+            " ({})".format(a["reason"]) if a.get("reason") else "",
+        )
     ),
-    "set_home_arrival": lambda a: "got home",
 }
 
 
