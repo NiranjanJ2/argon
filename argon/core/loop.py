@@ -30,6 +30,10 @@ from argon.tools.web import WebFetchTool, WebSearchTool
 from argon.utils.helpers import image_placeholder_text, truncate_text
 from argon.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
 
+#: Session the reminder runs its own check-in prompts on. Those messages are
+#: written by Argon, not by Niranjan, and must never be journalled as his words.
+CHECK_IN_SESSION = "heartbeat"
+
 if TYPE_CHECKING:
     from argon.services.cron import CronService
 
@@ -88,6 +92,7 @@ class _LoopHook(AgentHook):
         for tc in context.tool_calls:
             args_str = json.dumps(tc.arguments, ensure_ascii=False)
             logger.info("Tool call: {}({})", tc.name, args_str[:200])
+            self._loop._journal_tool(tc.name, tc.arguments)
         self._loop._set_tool_context(self._channel, self._chat_id, self._message_id)
 
     async def after_iteration(self, context: AgentHookContext) -> None:
@@ -581,6 +586,46 @@ class AgentLoop:
                 self.memory_consolidator.archive_messages(unconsolidated)
             )
 
+    # -- journalling -------------------------------------------------------
+    #
+    # The day page is what a check-in reads to know what already happened. It
+    # used to have one writer — the model choosing to call `remember` — which it
+    # almost never did, so the page was empty and every check-in re-derived the
+    # day from the task list alone. That is why Argon sent three near-identical
+    # "SAT prep is due" nudges in one morning. Recording is now automatic.
+
+    @property
+    def _journal(self) -> Any:
+        from argon.core.journal import Journal
+
+        if getattr(self, "_journal_cache", None) is None:
+            self._journal_cache = Journal(self.workspace)
+        return self._journal_cache
+
+    def _journal_note(self, text: str, *, kind: str) -> None:
+        """Append one line to today's page. Never allowed to break a turn."""
+        try:
+            self._journal.note(text, kind=kind)
+        except Exception:  # noqa: BLE001
+            logger.debug("Journal write failed", exc_info=True)
+
+    def _journal_tool(self, name: str, arguments: dict[str, Any]) -> None:
+        from argon.core.journal import describe_tool
+
+        if line := describe_tool(name, arguments):
+            self._journal_note(line, kind="did")
+
+    def _journal_said(self, text: str, key: str) -> None:
+        """Record what Niranjan actually said.
+
+        Skips the check-in session: those prompts are written by Argon itself
+        ("It's 9:51 PM and free time…"), and journalling them would feed its own
+        nudges back as though they were his words.
+        """
+        if key == CHECK_IN_SESSION or not text.strip() or text.startswith("/"):
+            return
+        self._journal_note(text, kind="said")
+
     async def _process_message(
         self,
         msg: InboundMessage,
@@ -634,6 +679,7 @@ class AgentLoop:
             return result
 
         await self._maybe_reset_idle_session(session)
+        self._journal_said(msg.content, key)
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))

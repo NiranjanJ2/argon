@@ -18,43 +18,9 @@ if TYPE_CHECKING:
     from argon.providers.base import LLMProvider
 
 
-_SAVE_MEMORY_TOOL = [
-    {
-        "type": "function",
-        "function": {
-            "name": "save_memory",
-            "description": "Report whether this conversation has anything worth saving to long-term memory.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["skip", "save"],
-                        "description": (
-                            "skip = nothing significant to save (expected for most conversations). "
-                            "save = conversation contains something that will meaningfully affect future interactions."
-                        ),
-                    },
-                    "history_entry": {
-                        "type": "string",
-                        "description": (
-                            "Required when action=save. A brief log entry starting with [YYYY-MM-DD HH:MM]. "
-                            "One or two sentences max. Only include what matters for future context."
-                        ),
-                    },
-                    "memory_update": {
-                        "type": "string",
-                        "description": (
-                            "Required when action=save. Full updated MEMORY.md content as markdown. "
-                            "Carry forward all existing facts and add only the new significant ones."
-                        ),
-                    },
-                },
-                "required": ["action"],
-            },
-        },
-    }
-]
+#: HISTORY.md is a grep target for debugging, not a source of truth. It reached
+#: 8MB of repeated API errors once; this is the ceiling that stops a repeat.
+HISTORY_MAX_BYTES = 2_000_000
 
 
 def _ensure_text(value: Any) -> str:
@@ -129,136 +95,45 @@ class MemoryStore:
         provider: LLMProvider,
         model: str,
     ) -> bool:
-        """Consolidate the provided message chunk into MEMORY.md + HISTORY.md.
+        """Archive a chunk of old turns. Long-term memory is deliberately untouched.
 
-        Uses a selective prompt: most conversations produce action=skip and nothing
-        is written. Only explicit save requests or significant personal context
-        from Niranjan result in a write.
+        This used to ask the model to return "the full updated MEMORY.md". A small
+        model handed that prompt returns a short file, so every trim silently
+        dropped what came before: MEMORY.md decayed to two lines while HISTORY.md
+        grew to 8MB of repeated API errors.
+
+        MEMORY.md now belongs to argon/core/journal.py, which *appends* facts and
+        prunes them once a day rather than rewriting on every trim. Two writers on
+        one file is how the decay happened, so this one stops writing. All that is
+        needed here is to get old turns out of the session without losing them,
+        which takes no model call at all.
         """
         if not messages:
             return True
-
-        current_memory = self.read_long_term()
-        prompt = f"""Review this conversation and call save_memory with your decision.
-
-SAVE only when the conversation contains:
-- Something Niranjan explicitly asked to save or remember ("remember that...", "save this for later", etc.)
-- Significant personal context that will change how you respond in future conversations
-  (e.g. "I'm on spring break this week", "I switched schools", "I have a new job", important preferences)
-- A major decision or life event that isn't already in memory
-
-DO NOT save:
-- Tasks added, completed, or scheduled — these belong in the task system, not memory
-- Calendar events, reminders, or one-off requests
-- Routine Q&A, homework help, questions answered in this conversation
-- Anything already captured in the current memory below
-
-Saving nothing (action=skip) is the correct and expected outcome for most conversations.
-Only override this if the bar above is clearly met.
-
-## Current Long-term Memory
-{current_memory or "(empty)"}
-
-## Conversation
-{self._format_messages(messages)}"""
-
-        chat_messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a selective memory agent for Niranjan's personal assistant. "
-                    "Your job is to decide what — if anything — is worth saving to long-term memory. "
-                    "Be conservative: most conversations contain nothing worth saving. "
-                    "Call save_memory with action=skip unless the bar is clearly met."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ]
-
-        try:
-            forced = {"type": "function", "function": {"name": "save_memory"}}
-            response = await provider.chat_with_retry(
-                messages=chat_messages,
-                tools=_SAVE_MEMORY_TOOL,
-                model=model,
-                tool_choice=forced,
-            )
-
-            if response.finish_reason == "error" and _is_tool_choice_unsupported(
-                response.content
-            ):
-                logger.warning("Forced tool_choice unsupported, retrying with auto")
-                response = await provider.chat_with_retry(
-                    messages=chat_messages,
-                    tools=_SAVE_MEMORY_TOOL,
-                    model=model,
-                    tool_choice="auto",
-                )
-
-            if not response.has_tool_calls:
-                logger.warning(
-                    "Memory consolidation: LLM did not call save_memory "
-                    "(finish_reason={}, content_len={}, content_preview={})",
-                    response.finish_reason,
-                    len(response.content or ""),
-                    (response.content or "")[:200],
-                )
-                return self._fail_or_raw_archive(messages)
-
-            args = _normalize_save_memory_args(response.tool_calls[0].arguments)
-            if args is None:
-                logger.warning("Memory consolidation: unexpected save_memory arguments")
-                return self._fail_or_raw_archive(messages)
-
-            action = args.get("action", "save")
-            if action == "skip":
-                self._consecutive_failures = 0
-                logger.info("Memory consolidation: nothing significant to save (skip)")
-                return True
-
-            entry = args.get("history_entry")
-            update = args.get("memory_update")
-
-            if not entry or not update:
-                logger.warning("Memory consolidation: action=save but missing history_entry or memory_update")
-                return self._fail_or_raw_archive(messages)
-
-            entry = _ensure_text(entry).strip()
-            if not entry:
-                logger.warning("Memory consolidation: history_entry is empty after normalization")
-                return self._fail_or_raw_archive(messages)
-
-            self.append_history(entry)
-            update = _ensure_text(update)
-            if update != current_memory:
-                self.write_long_term(update)
-
-            self._consecutive_failures = 0
-            logger.info("Memory consolidation: saved {} messages to memory", len(messages))
-            return True
-        except Exception:
-            logger.exception("Memory consolidation failed")
-            return self._fail_or_raw_archive(messages)
-
-    def _fail_or_raw_archive(self, messages: list[dict]) -> bool:
-        """Increment failure count; after threshold, raw-archive messages and return True."""
-        self._consecutive_failures += 1
-        if self._consecutive_failures < self._MAX_FAILURES_BEFORE_RAW_ARCHIVE:
-            return False
         self._raw_archive(messages)
-        self._consecutive_failures = 0
+        self._rotate_history()
         return True
 
+    def _rotate_history(self, limit: int = HISTORY_MAX_BYTES) -> None:
+        """Keep HISTORY.md bounded. It is a grep target, not a source of truth."""
+        try:
+            if self.history_file.stat().st_size <= limit:
+                return
+        except OSError:
+            return
+        keep = limit // 2
+        text = self.history_file.read_text(encoding="utf-8", errors="replace")
+        self.history_file.write_text(text[-keep:], encoding="utf-8")
+        logger.info("HISTORY.md exceeded {} bytes; kept the most recent {}", limit, keep)
+
     def _raw_archive(self, messages: list[dict]) -> None:
-        """Fallback: dump raw messages to HISTORY.md without LLM summarization."""
+        """Append raw messages to HISTORY.md. Now the only path, not a fallback."""
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         self.append_history(
             f"[{ts}] [RAW] {len(messages)} messages\n"
             f"{self._format_messages(messages)}"
         )
-        logger.warning(
-            "Memory consolidation degraded: raw-archived {} messages", len(messages)
-        )
+        logger.debug("Archived {} message(s) to HISTORY.md", len(messages))
 
 
 class MemoryConsolidator:

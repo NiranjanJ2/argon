@@ -164,7 +164,10 @@ class HeartbeatService:
 
         content = self._read_heartbeat_file()
         if not content:
-            logger.debug("Heartbeat: HEARTBEAT.md missing or empty")
+            # Headings and HTML comments are stripped, so the shipped template
+            # reads as empty. Saying "missing" sent me looking for a file that
+            # was sitting right there.
+            logger.debug("Heartbeat: no active tasks in HEARTBEAT.md, skipping")
             return
 
         logger.info("Heartbeat: checking for tasks...")

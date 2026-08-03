@@ -38,6 +38,45 @@ MAX_FACT_CHARS = 240
 #: Day pages older than this are deleted; MEMORY.md is what survives.
 KEEP_DAYS = 45
 
+#: Sentinel for a fact with no recorded learn date.
+UNDATED = "0000-00-00"
+
+#: Tool calls worth one journal line, and how to phrase it. Read-only tools are
+#: absent on purpose — a day page full of "checked the status" is noise, and the
+#: page goes into the check-in prompt verbatim.
+#:
+#: This exists because the journal used to have exactly one writer: the model
+#: choosing to call `remember`. It rarely did, so the day page was usually empty
+#: and every check-in re-derived the day from the task list alone — which is how
+#: Argon sent three near-identical "SAT prep is due" nudges in one morning.
+_TOOL_NOTES: dict[str, Any] = {
+    "set_mode": lambda a: "mode -> {}".format(a.get("mode", "?")),
+    "add_task": lambda a: "added task: {}".format(a.get("title", "?")),
+    "start_task": lambda a: "started: {}".format(a.get("task_id", "?")),
+    "complete_task": lambda a: "completed: {}".format(a.get("task_id", "?")),
+    "update_task": lambda a: "task changed: {}".format(a.get("task_id", "?")),
+    "set_focus_mode": lambda a: "phone -> {}{}".format(
+        a.get("mode", "?"),
+        " for {}m".format(a["duration_min"]) if a.get("duration_min") else "",
+    ),
+    "log_note": lambda a: a.get("note") or a.get("text") or "",
+    "snooze_check_ins": lambda a: "asked for quiet{}".format(
+        " ({}m)".format(a["minutes"]) if a.get("minutes") else ""
+    ),
+    "set_home_arrival": lambda a: "got home",
+}
+
+
+def describe_tool(name: str, args: dict[str, Any]) -> str | None:
+    """One journal line for a state-changing tool call, or None to ignore it."""
+    make = _TOOL_NOTES.get(name)
+    if make is None:
+        return None
+    try:
+        return make(args or {}) or None
+    except Exception:  # noqa: BLE001 — journalling must never break a tool call
+        return None
+
 _FACT_RE = re.compile(
     r"^-\s*(?P<date>\d{4}-\d{2}-\d{2})\s*·\s*(?P<text>.*?)"
     r"(?:\s*\(until\s+(?P<until>\d{4}-\d{2}-\d{2})\))?\s*$"
@@ -54,6 +93,11 @@ class Fact:
 
     def line(self) -> str:
         tail = f" (until {self.until})" if self.until else ""
+        # UNDATED facts came from an older build or from hand-editing. Printing
+        # the sentinel puts "0000-00-00" in every system prompt, which reads as
+        # corruption to anyone looking at it, model included.
+        if self.learned == UNDATED:
+            return f"- {self.text}{tail}"
         return f"- {self.learned} · {self.text}{tail}"
 
     def expired(self, today: str) -> bool:
@@ -76,7 +120,7 @@ def parse_facts(text: str) -> list[Fact]:
             ))
         else:
             # Written by an older build, or by hand. Keep it rather than lose it.
-            facts.append(Fact(learned="0000-00-00", text=line.lstrip("- ").strip()))
+            facts.append(Fact(learned=UNDATED, text=line.lstrip("- ").strip()))
     return facts
 
 

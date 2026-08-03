@@ -3,13 +3,46 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
+from argon.clock import now as _now
 from argon.google.tasks_store import GoogleTasksStore
 from argon.productivity.habits import HabitsTracker
 from argon.productivity.log import DailyLog
 from argon.productivity.state import DailyState
 from argon.tools.base import Tool
+
+#: A start older than this almost certainly means "forgot to complete it",
+#: not "still working". Argon's day rolls at 4am, so anything past a night's
+#: sleep is suspect.
+STALE_START_HOURS = 10
+
+
+def annotate_start(task: dict[str, Any]) -> dict[str, Any]:
+    """Add how long a task has claimed to be running, and whether that is absurd.
+
+    ``started_at`` lives in Google Tasks metadata and has no day boundary, so a
+    task started at 1:42am and never completed still reads as "in progress" the
+    next evening. Left unannotated, Argon treats that as work in flight and nags
+    about starting something it believes has been underway for twenty hours.
+    """
+    started = task.get("started_at")
+    if not started:
+        return task
+    try:
+        elapsed = (_now() - datetime.fromisoformat(started)).total_seconds() / 3600
+    except (TypeError, ValueError):
+        return task
+    task = dict(task)
+    task["running_hours"] = round(elapsed, 1)
+    if elapsed >= STALE_START_HOURS:
+        task["stale_start"] = (
+            f"Marked started {elapsed:.0f}h ago and never completed — assume it was "
+            "left open by accident. Ask whether it is done rather than treating it "
+            "as work in progress."
+        )
+    return task
 
 
 class ListTasksTool(Tool):
@@ -35,8 +68,7 @@ class ListTasksTool(Tool):
         return {"type": "object", "properties": {}, "required": []}
 
     async def execute(self, **kwargs: Any) -> str:
-        tasks = self._store.get_all()
-        return json.dumps(tasks, indent=2)
+        return json.dumps([annotate_start(t) for t in self._store.get_all()], indent=2)
 
 
 class AddTaskTool(Tool):
