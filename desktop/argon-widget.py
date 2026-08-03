@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
-"""Argon desktop readout — one fetch, two front-ends.
+"""Argon desktop readout — one fetch, one view model, two front-ends.
 
 Run bare it prints `SwiftBar <https://swiftbar.app>` plugin format; run with
-``--json`` it prints a flat JSON object for the Übersicht widget.  Both call
-this same file, so the menu bar and the desktop can never disagree about what
-Argon thinks is happening.
+``--json`` it prints the view model for the Übersicht widget.  Both render the
+same object, so the menu bar and the desktop cannot disagree.
+
+The split is deliberate.  ``build_view`` decides *what the readout says* — mode
+wording, task grouping, sort order, every string that needs a clock.  The two
+renderers only decide how it looks.  Übersicht runs in WebKit with no notion of
+the server's timezone, and two front-ends computing their own countdowns is
+exactly how two displays start disagreeing.
+
+Presentation vocabulary is mirrored from the iOS app rather than reinvented:
+``Foqos/Utils/ArgonDesign.swift`` for the palette, ``Views/ArgonDashboardView``
+for the mode wording, task grouping and sort, ``Components/Dashboard/
+ArgonStatusCard`` for the metric strip.  Changing a colour there means changing
+PALETTE here.
 
 SwiftBar reads its refresh interval out of the plugin's *filename*, so install.sh
 symlinks this file in as ``argon.10s.py``; renaming that symlink is how you slow
@@ -32,12 +43,52 @@ from pathlib import Path
 CONFIG_PATH = Path.home() / ".config" / "argon" / "desktop.json"
 TIMEOUT_S = 4.0
 
-# Menu bar glyph per desired focus mode. `off` is deliberately quiet.
-MODE_ICON = {
-    "off": "○", "school": "🎓", "homework": "📓", "lock_in": "🔒", "sleep": "🌙",
+# ---------------------------------------------------------------------------
+# Design tokens — mirrored from Foqos/Utils/ArgonDesign.swift
+# ---------------------------------------------------------------------------
+
+PALETTE = {
+    "canvas": "#040812",
+    "canvasLifted": "#081326",
+    "surface": "#0C1729",
+    "surfaceRaised": "#12213A",
+    "electricBlue": "#5DA9FF",
+    "iceBlue": "#A9DDFF",
+    "cobalt": "#275DFF",
+    "cyan": "#65D8FF",
+    "ink": "#F4F8FF",
+    "mutedInk": "#9BAAC0",
+    "warning": "#FF9F45",
+    "danger": "#FF6B6B",
 }
-PRIORITY_ICON = {"high": "🔴", "medium": "🟡", "low": "⚪️"}
-# Convergence states that mean "what Argon asked for is not what the phone did".
+
+#: Session mode -> (hero label, status-card label, SF Symbol).
+#: ArgonDashboardView.modeLabel and ArgonStatusCard.modeIcon, kept in step.
+SESSION_MODE = {
+    "lock_in": ("Locked in", "LOCKED IN", "lock.fill"),
+    "working": ("In motion", "WORKING", "sparkles"),
+    "napping": ("Recharging", "RECHARGING", "moon.zzz.fill"),
+    "done": ("Day complete", "DAY COMPLETE", "checkmark.seal.fill"),
+    "idle": ("At ease", "AT EASE", "moon.stars.fill"),
+}
+
+#: Desired Screen Time mode -> (label, SF Symbol).
+FOCUS_MODE = {
+    "off": ("Open", "bolt.slash.fill"),
+    "school": ("School", "graduationcap.fill"),
+    "homework": ("Homework", "book.fill"),
+    "lock_in": ("Locked in", "lock.fill"),
+    "sleep": ("Sleep", "moon.stars.fill"),
+}
+
+#: ArgonTaskRow.priorityColor.
+PRIORITY_TINT = {
+    "high": PALETTE["warning"],
+    "medium": PALETTE["iceBlue"],
+    "low": PALETTE["mutedInk"],
+}
+
+#: Convergence states meaning the phone is not doing what Argon asked.
 BAD_CONVERGENCE = {"diverged", "failed"}
 
 
@@ -67,59 +118,32 @@ def get(url, token, path):
 
 
 def collect():
-    """Everything both front-ends render, or ``{"error": ...}``."""
+    """Raw server state, or ``{"error": ...}``."""
     url, token = load_config()
     if not url or not token:
-        return {"error": "not configured — see " + str(CONFIG_PATH)}
+        return {"error": "Not configured — see " + str(CONFIG_PATH)}
     try:
         status = get(url, token, "/v1/status")
     except urllib.error.HTTPError as e:
-        return {"error": "HTTP {} from /v1/status".format(e.code)}
-    except Exception as e:  # noqa: BLE001 — offline is the common case, not a crash
+        reason = "Token rejected" if e.code == 401 else "HTTP {}".format(e.code)
+        return {"error": reason + " from /v1/status"}
+    except Exception as e:  # noqa: BLE001 — offline is a state, not a crash
         return {"error": str(e)}
 
-    # Tasks are allowed to fail on their own: a dead Google grant should not
-    # cost you the focus-mode readout, which comes from local state only.
+    # Tasks may fail on their own: a dead Google grant should not cost the
+    # focus readout, which is served from local state and cannot be affected.
     try:
-        tasks = get(url, token, "/v1/tasks")
+        payload = get(url, token, "/v1/tasks")
+        status["tasks"] = payload.get("tasks", [])
+        status["tasks_state"] = payload.get("state", {})
+        status["tasks_cached"] = payload.get("cached", False)
+        status["tasks_error"] = payload.get("error")
     except Exception as e:  # noqa: BLE001
-        tasks = {"tasks": [], "count": 0, "error": str(e)}
-
-    status["tasks"] = tasks.get("tasks", [])
-    status["tasks_error"] = tasks.get("error")
-    status["tasks_cached"] = tasks.get("cached", False)
-    status["fetched_at"] = now().isoformat(timespec="seconds")
-    return enrich(status)
-
-
-def enrich(d):
-    """Add the fields that need a clock, so the front-ends only lay out.
-
-    Übersicht renders in WebKit with no access to the server's timezone, and
-    SwiftBar would otherwise compute the same strings a second time. Doing it
-    once here is what keeps the two displays saying the same thing.
-    """
-    desired = d.get("ios", {}).get("desired", {}) or {}
-    end, remaining = parse(desired.get("expires_at")), left(desired.get("expires_at"))
-    desired["until"] = (
-        "{} · {}".format(end.strftime("%-I:%M %p"), remaining) if end else None
-    )
-    desired["since_ago"] = ago(desired.get("since"))
-    (d.get("ios", {}).get("actual", {}) or {})["last_seen_ago"] = ago(
-        (d.get("ios", {}).get("actual") or {}).get("last_seen")
-    )
-
-    for task in d.get("tasks", []):
-        due = due_label(task.get("due"))
-        bits = [b for b in (task.get("subject"), due) if b]
-        if task.get("time_estimate_min"):
-            bits.append("~{}m".format(task["time_estimate_min"]))
-        started = parse(task.get("started_at"))
-        if started:
-            bits.append("running " + span((now() - started).total_seconds()))
-        task["meta"] = " · ".join(bits)
-        task["overdue"] = bool(due and due.startswith("overdue"))
-    return d
+        status["tasks"] = []
+        status["tasks_state"] = {}
+        status["tasks_cached"] = False
+        status["tasks_error"] = str(e)
+    return status
 
 
 # ---------------------------------------------------------------------------
@@ -155,11 +179,11 @@ def span(seconds):
 
 def ago(stamp):
     dt = parse(stamp)
-    return "—" if dt is None else span((now() - dt).total_seconds()) + " ago"
+    return None if dt is None else span((now() - dt).total_seconds()) + " ago"
 
 
 def left(stamp):
-    """Time until *stamp*, or None if it is absent or already past."""
+    """Time until *stamp*, or None if absent. ``expired`` once past."""
     dt = parse(stamp)
     if dt is None:
         return None
@@ -167,146 +191,271 @@ def left(stamp):
     return span(delta) + " left" if delta > 0 else "expired"
 
 
-def due_label(stamp):
-    """Google Tasks due dates are date-only, stored as midnight UTC.
+def due_bucket(stamp):
+    """``(bucket, label)`` for a Google Tasks due date.
 
-    Localising them would shift the day backwards for anyone west of London —
-    a task due Aug 5 would read "Aug 4, 5pm". Compare calendar dates instead.
+    Due dates are date-only, stored as midnight UTC. Localising them slides the
+    day backwards anywhere west of London — a task due Aug 5 would read
+    "Aug 4, 5pm". Compare calendar dates, never instants.
     """
     dt = parse(stamp)
     if dt is None:
-        return None
+        return "later", None
     days = (dt.date() - now().date()).days
     if days < 0:
-        return "overdue {}d".format(-days)
+        return "overdue", "overdue {}d".format(-days)
     if days == 0:
-        return "today"
+        return "today", "today"
     if days == 1:
-        return "tomorrow"
+        return "later", "tomorrow"
     if days < 7:
-        return dt.strftime("%a")
-    return dt.strftime("%b %-d")
+        return "later", dt.strftime("%a")
+    return "later", dt.strftime("%b %-d")
 
 
 # ---------------------------------------------------------------------------
-# SwiftBar
+# View model — the single source of what the readout says
+# ---------------------------------------------------------------------------
+
+def build_view(d):
+    """Turn raw server state into everything both renderers display."""
+    if d.get("error"):
+        return {"ok": False, "error": d["error"], "updated": now().strftime("%-I:%M:%S %p")}
+
+    ios = d.get("ios") or {}
+    desired = ios.get("desired") or {}
+    actual = ios.get("actual") or {}
+    conv = ios.get("convergence") or {}
+
+    session_key = d.get("mode") or "idle"
+    hero_label, status_label, session_icon = SESSION_MODE.get(
+        session_key, SESSION_MODE["idle"]
+    )
+    focus_key = desired.get("mode", "off")
+    focus_label, focus_icon = FOCUS_MODE.get(focus_key, (focus_key, "questionmark"))
+
+    remaining = left(desired.get("expires_at"))
+    end = parse(desired.get("expires_at"))
+    drift = conv.get("state") in BAD_CONVERGENCE
+
+    view = {
+        "ok": True,
+        "hero": {
+            "eyebrow": status_label,
+            "title": d.get("current_task") or "Argon is standing by",
+            "icon": session_icon,
+            "mode": session_key,
+            "label": hero_label,
+        },
+        "metrics": [
+            {"value": "{}m".format(d.get("work_session_minutes") or 0),
+             "label": "FOCUS", "icon": "timer"},
+            {"value": "{}m".format(d.get("lock_in_minutes") or 0),
+             "label": "LOCKED", "icon": "lock.fill"},
+            {"value": str(len(d.get("tasks") or [])),
+             "label": "OPEN", "icon": "checklist"},
+        ],
+        "focus": {
+            "label": focus_label,
+            "icon": focus_icon,
+            "mode": focus_key,
+            "version": desired.get("version"),
+            "reason": desired.get("reason") or None,
+            "until": ("{} · {}".format(end.strftime("%-I:%M %p"), remaining)
+                      if end and remaining else None),
+            "early_exit": "Allowed" if desired.get("allow_early_end") else "Blocked",
+            "since": ago(desired.get("since")),
+            "shielded": bool(actual.get("shielded")),
+        },
+        "phone": {
+            "applied": "{} · v{}".format(actual.get("mode", "?"), actual.get("version", "?")),
+            "convergence": conv.get("state") or "unknown",
+            # On `stale` the server's detail is "last heard from the phone
+            # 1213m ago" — the same fact as `last_seen`, in raw minutes. Drop
+            # it there and keep it where it says something else, like
+            # "answered after the request, still on v40".
+            "detail": (conv.get("detail") or None) if conv.get("state") != "stale" else None,
+            "error": actual.get("error") or None,
+            "last_seen": ago(actual.get("last_seen")),
+            "drift": drift,
+        },
+        "groups": group_tasks(d.get("tasks") or []),
+        "notice": task_notice(d),
+        "alert": phone_alert(conv, actual) if drift else None,
+        "cached": bool(d.get("tasks_cached")),
+        "updated": now().strftime("%-I:%M:%S %p"),
+    }
+
+    period = d.get("school_period") or {}
+    if period.get("status") == "in_period":
+        view["period"] = "{} · ends {} ({}m)".format(
+            period.get("period"), period.get("ends_at"), period.get("minutes_remaining")
+        )
+    return view
+
+
+def phone_alert(conv, actual):
+    """One line stating a block did not land. Nothing subtle about it."""
+    if actual.get("error"):
+        return "Phone reported: {}".format(actual["error"])
+    return "Phone has not applied this — {}".format(conv.get("state"))
+
+
+def task_notice(d):
+    if d.get("tasks_error"):
+        return {"tone": "warning", "text": "Checklist unavailable — " + str(d["tasks_error"])}
+    if not d.get("tasks"):
+        return {"tone": "calm", "text": "Clear runway"}
+    return None
+
+
+def group_tasks(tasks):
+    """Overdue / Today / Later, matching ArgonDashboardView's sections."""
+    buckets = {"overdue": [], "today": [], "later": []}
+    for task in tasks:
+        bucket, label = due_bucket(task.get("due"))
+        started = parse(task.get("started_at"))
+        meta = [b for b in (task.get("subject"), label) if b]
+        if task.get("time_estimate_min"):
+            meta.append("~{}m".format(task["time_estimate_min"]))
+        if started:
+            meta.append("running " + span((now() - started).total_seconds()))
+        buckets[bucket].append({
+            "id": task.get("id"),
+            "title": task.get("title") or "Untitled",
+            "priority": (task.get("priority") or "medium"),
+            "tint": PRIORITY_TINT.get(task.get("priority"), PALETTE["iceBlue"]),
+            "meta": " · ".join(meta),
+            "started": bool(started),
+            "overdue": bucket == "overdue",
+            "notes": (task.get("notes") or "").splitlines()[0] if task.get("notes") else None,
+        })
+
+    order = {"high": 0, "medium": 1, "low": 2}
+    for items in buckets.values():
+        # ArgonDashboardView.sorted: started first, then priority, due, title.
+        items.sort(key=lambda t: (not t["started"], order.get(t["priority"], 3), t["title"]))
+
+    tints = {"overdue": PALETTE["warning"], "today": PALETTE["iceBlue"],
+             "later": PALETTE["mutedInk"]}
+    return [
+        {"title": name.capitalize(), "tint": tints[name], "tasks": buckets[name]}
+        for name in ("overdue", "today", "later") if buckets[name]
+    ]
+
+
+# ---------------------------------------------------------------------------
+# SwiftBar renderer
 # ---------------------------------------------------------------------------
 
 def bar(text, **params):
-    """One SwiftBar line. Pipes in the text would be read as a parameter split."""
+    """One SwiftBar line. A pipe in the text would be read as a param split."""
     line = str(text).replace("|", "¦")
-    # Filter before testing: every caller passes color=None on the common path,
-    # which is a non-empty dict and would otherwise emit a trailing " | ".
+    # Filter before testing: callers pass color=None on the common path, and a
+    # non-empty dict of Nones would still emit a trailing " | ".
     set_params = ["{}={}".format(k, v) for k, v in params.items() if v is not None]
     if set_params:
         line += " | " + " ".join(set_params)
     return line
 
 
-def render_swiftbar(d):
+def render_swiftbar(view):
     out = []
-    if d.get("error"):
-        out.append(bar("Argon ⚠︎", color="orange"))
+
+    if not view.get("ok"):
+        out.append(bar("Argon", sfimage="bolt.slash.fill", sfcolor=PALETTE["warning"]))
         out.append("---")
-        out.append(bar(d["error"], color="orange"))
-        out.append(bar("Refresh", refresh="true"))
+        out.append(bar(view["error"], color=PALETTE["warning"], sfimage="exclamationmark.triangle"))
+        out.append(bar("Refresh", refresh="true", sfimage="arrow.clockwise"))
         print("\n".join(out))
         return
 
-    desired = d.get("ios", {}).get("desired", {}) or {}
-    actual = d.get("ios", {}).get("actual", {}) or {}
-    conv = d.get("ios", {}).get("convergence", {}) or {}
-    mode = desired.get("mode", "off")
-    tasks = d.get("tasks", [])
+    hero, focus, phone = view["hero"], view["focus"], view["phone"]
 
-    # -- title -------------------------------------------------------------
-    title = MODE_ICON.get(mode, "?")
-    remaining = left(desired.get("expires_at"))
-    if mode != "off" and remaining:
-        title += " " + remaining.replace(" left", "")
-    if tasks:
-        title += "  ✓{}".format(len(tasks))
-    if conv.get("state") in BAD_CONVERGENCE:
-        title += " ⚠︎"
-    out.append(bar(title, color="orange" if conv.get("state") in BAD_CONVERGENCE else None))
+    # -- menu bar title ----------------------------------------------------
+    title_bits = []
+    if focus["mode"] != "off":
+        title_bits.append(focus["until"].split(" · ")[-1].replace(" left", "")
+                          if focus["until"] else focus["label"])
+    open_tasks = sum(len(g["tasks"]) for g in view["groups"])
+    if open_tasks:
+        title_bits.append("{}".format(open_tasks))
+    out.append(bar(
+        " ".join(title_bits),
+        sfimage=focus["icon"] if focus["mode"] != "off" else hero["icon"],
+        sfcolor=PALETTE["warning"] if view.get("alert") else PALETTE["iceBlue"],
+    ))
     out.append("---")
 
-    # -- focus -------------------------------------------------------------
-    out.append(bar("Focus", size=13, color="gray"))
-    out.append(bar("Mode: {}  (v{})".format(mode, desired.get("version", "?"))))
-    if desired.get("reason"):
-        out.append(bar("Reason: " + desired["reason"]))
-    if desired.get("until"):
-        out.append(bar("Until: " + desired["until"]))
-    out.append(bar("Early exit: {}".format(
-        "allowed" if desired.get("allow_early_end") else "blocked")))
-    out.append(bar("Since: " + desired.get("since_ago", "—")))
-
-    # -- phone -------------------------------------------------------------
-    out.append("---")
-    out.append(bar("Phone", size=13, color="gray"))
-    state = conv.get("state", "?")
-    out.append(bar("Applied: {}  (v{}){}".format(
-        actual.get("mode", "?"), actual.get("version", "?"),
-        "  shielded" if actual.get("shielded") else ""),
-        color="orange" if state in BAD_CONVERGENCE else None))
-    out.append(bar("Convergence: " + state,
-                   color="orange" if state in BAD_CONVERGENCE else None))
-    if conv.get("detail"):
-        out.append(bar(conv["detail"], size=11, color="gray"))
-    if actual.get("error"):
-        out.append(bar("Error: " + str(actual["error"]), color="red"))
-    battery = actual.get("battery")
-    if isinstance(battery, (int, float)) and battery >= 0:
-        out.append(bar("Battery: {}%".format(int(battery * 100))))
-    out.append(bar("Last seen: " + actual.get("last_seen_ago", "—")))
-
-    # -- session -----------------------------------------------------------
-    out.append("---")
-    out.append(bar("Session", size=13, color="gray"))
-    out.append(bar("State: " + str(d.get("mode", "idle"))))
-    if d.get("current_task"):
-        out.append(bar("Doing: " + d["current_task"]))
-    if d.get("work_session_minutes"):
-        out.append(bar("Working: {}m".format(d["work_session_minutes"])))
-    if d.get("lock_in_minutes"):
-        out.append(bar("Locked in: {}m".format(d["lock_in_minutes"])))
-    if d.get("home_arrival"):
-        out.append(bar("Home since: " + ago(d["home_arrival"])))
-    period = d.get("school_period") or {}
-    if period.get("status") == "in_period":
-        out.append(bar("{} · ends {} ({}m)".format(
-            period.get("period"), period.get("ends_at"),
-            period.get("minutes_remaining"))))
+    # -- hero --------------------------------------------------------------
+    out.append(bar(hero["eyebrow"], color=PALETTE["iceBlue"], size=10))
+    out.append(bar(hero["title"], color=PALETTE["ink"], size=15, font="Georgia"))
+    out.append(bar(
+        "  ".join("{} {}".format(m["value"], m["label"].lower()) for m in view["metrics"]),
+        color=PALETTE["mutedInk"], size=11,
+    ))
+    if view.get("period"):
+        out.append(bar(view["period"], color=PALETTE["mutedInk"], size=11))
+    if view.get("alert"):
+        out.append(bar(view["alert"], color=PALETTE["warning"], size=11,
+                       sfimage="exclamationmark.triangle.fill", sfcolor=PALETTE["warning"]))
 
     # -- checklist ---------------------------------------------------------
     out.append("---")
-    out.append(bar("Checklist ({}){}".format(
-        len(tasks), " · cached" if d.get("tasks_cached") else ""),
-        size=13, color="gray"))
-    if d.get("tasks_error"):
-        out.append(bar("Unavailable: " + str(d["tasks_error"]), color="orange"))
-    for task in tasks:
-        label = "{} {}".format(PRIORITY_ICON.get(task.get("priority"), "⚪️"),
-                               task.get("title", "?"))
-        if task.get("meta"):
-            label += "  · " + task["meta"]
-        out.append(bar(label, color="red" if task.get("overdue") else None))
-        if task.get("notes"):
-            out.append(bar("-- " + task["notes"].splitlines()[0], size=11, color="gray"))
-    if not tasks and not d.get("tasks_error"):
-        out.append(bar("Nothing pending", color="gray"))
+    notice = view.get("notice")
+    if notice:
+        out.append(bar(notice["text"], size=12,
+                       color=PALETTE["warning"] if notice["tone"] == "warning"
+                       else PALETTE["mutedInk"]))
+    for group in view["groups"]:
+        out.append(bar("{}  {}".format(group["title"], len(group["tasks"])),
+                       color=group["tint"], size=12, font="Georgia"))
+        for task in group["tasks"]:
+            out.append(bar(
+                "   " + task["title"],
+                color=PALETTE["ink"], size=13, font="Georgia",
+                sfimage="play.fill" if task["started"] else "circle",
+                sfcolor=task["tint"],
+            ))
+            detail = "        " + task["priority"].upper()
+            if task["meta"]:
+                detail += " · " + task["meta"]
+            out.append(bar(detail, color=PALETTE["mutedInk"], size=10))
+
+    # -- focus and phone, one level down -----------------------------------
+    out.append("---")
+    out.append(bar("{}  ·  {}".format(focus["label"], phone["convergence"]),
+                   color=PALETTE["iceBlue"], size=12,
+                   sfimage=focus["icon"], sfcolor=PALETTE["iceBlue"]))
+    if focus["reason"]:
+        out.append(bar("--" + focus["reason"], color=PALETTE["mutedInk"], size=11))
+    for label, value in (
+        ("Mode", "{} (v{})".format(focus["label"], focus["version"])
+                 if focus["version"] is not None else focus["label"]),
+        ("Until", focus["until"]),
+        ("Early exit", focus["early_exit"]),
+        ("Set", focus["since"]),
+        ("Phone", phone["applied"]),
+        ("Converged", phone["convergence"]),
+        ("Detail", phone["detail"]),
+        ("Error", phone["error"]),
+        ("Last seen", phone["last_seen"]),
+    ):
+        if value:
+            out.append(bar("--{}: {}".format(label, value),
+                           color=PALETTE["danger"] if label == "Error" else None))
 
     out.append("---")
-    out.append(bar("Updated " + now().strftime("%-I:%M:%S %p"), size=11, color="gray"))
-    out.append(bar("Refresh", refresh="true"))
+    out.append(bar("Updated {}{}".format(view["updated"], " · cached" if view["cached"] else ""),
+                   color=PALETTE["mutedInk"], size=10))
+    out.append(bar("Refresh", refresh="true", sfimage="arrow.clockwise", size=12))
     print("\n".join(out))
 
 
 # ---------------------------------------------------------------------------
 
 def selftest():
-    """Smallest thing that fails if the formatting logic breaks. No network."""
+    """Smallest thing that fails if the view logic breaks. No network."""
     from datetime import timedelta
 
     assert span(45) == "45s" and span(60 * 42) == "42m"
@@ -317,33 +466,56 @@ def selftest():
     assert parse("2026-08-02T01:39:32-07:00") is not None
     assert parse("") is None and parse("not a date") is None
 
-    # Google Tasks stores due dates as midnight UTC. Localising them west of
-    # London slides the day backwards — this is the assertion that catches it.
+    # Google's date-only due stamps are midnight UTC; localising them slides
+    # the day backwards. This is the assertion that catches it.
     today = now().date()
-    assert due_label(today.strftime("%Y-%m-%dT00:00:00.000Z")) == "today"
-    assert due_label((today + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00.000Z")) == "tomorrow"
-    assert due_label((today - timedelta(days=2)).strftime("%Y-%m-%dT00:00:00.000Z")) == "overdue 2d"
+    stamp = lambda d: (today + timedelta(days=d)).strftime("%Y-%m-%dT00:00:00.000Z")  # noqa: E731
+    assert due_bucket(stamp(0)) == ("today", "today")
+    assert due_bucket(stamp(1)) == ("later", "tomorrow")
+    assert due_bucket(stamp(-2)) == ("overdue", "overdue 2d")
+    assert due_bucket(None) == ("later", None)
 
-    # A pipe in a task title would otherwise be read as SwiftBar's param separator.
+    # A pipe in a task title would be read as SwiftBar's param separator.
     assert bar("a | b") == "a ¦ b"
     assert bar("x", color="red") == "x | color=red"
     assert bar("x", color=None) == "x"
 
-    soon = (now() + timedelta(hours=1, minutes=30)).isoformat()
-    d = enrich({
-        "ios": {"desired": {"expires_at": soon, "since": None}, "actual": {}},
-        "tasks": [{"title": "t", "due": (today - timedelta(days=1)).strftime(
-            "%Y-%m-%dT00:00:00.000Z"), "subject": "AP Chem", "time_estimate_min": 45}],
+    view = build_view({
+        "mode": "lock_in",
+        "current_task": "SAT prep",
+        "work_session_minutes": None,
+        "lock_in_minutes": 61,
+        "ios": {
+            "desired": {"mode": "lock_in", "version": 4, "allow_early_end": False,
+                        "expires_at": (now() + timedelta(hours=1)).isoformat(),
+                        "since": (now() - timedelta(minutes=5)).isoformat()},
+            "actual": {"mode": "off", "version": 3, "shielded": False},
+            "convergence": {"state": "diverged", "detail": "still on v3"},
+        },
+        "tasks": [
+            {"id": "a", "title": "Late thing", "priority": "high", "due": stamp(-1)},
+            {"id": "b", "title": "Due today", "priority": "low", "due": stamp(0),
+             "time_estimate_min": 45, "subject": "AP Chem"},
+            {"id": "c", "title": "Running", "priority": "medium", "due": stamp(0),
+             "started_at": (now() - timedelta(minutes=12)).isoformat()},
+        ],
     })
-    # "9:04 PM · 1h29m left" — asserting the exact remainder would race the
-    # clock, since `left` is measured microseconds after `soon` is built.
-    assert d["ios"]["desired"]["until"].endswith("left")
-    assert " · " in d["ios"]["desired"]["until"]
-    assert d["tasks"][0]["overdue"] is True
-    assert d["tasks"][0]["meta"] == "AP Chem · overdue 1d · ~45m"
 
-    # Both renderers must survive a payload with nothing in it.
-    render_swiftbar(enrich({"ios": {}, "tasks": []}))
+    assert view["hero"]["eyebrow"] == "LOCKED IN" and view["hero"]["icon"] == "lock.fill"
+    assert [m["value"] for m in view["metrics"]] == ["0m", "61m", "3"]
+    assert [g["title"] for g in view["groups"]] == ["Overdue", "Today"]
+    # A started task sorts above a higher-priority one that has not begun.
+    assert [t["title"] for t in view["groups"][1]["tasks"]] == ["Running", "Due today"]
+    assert view["groups"][1]["tasks"][1]["meta"] == "AP Chem · today · ~45m"
+    assert "running 12m" in view["groups"][1]["tasks"][0]["meta"]
+    # Divergence must be stated, not implied by a colour.
+    assert view["alert"] and "not applied" in view["alert"]
+    assert view["focus"]["early_exit"] == "Blocked"
+
+    # Empty and broken payloads must both still render.
+    render_swiftbar(build_view({"ios": {}, "tasks": []}))
+    render_swiftbar(build_view({"error": "offline"}))
+    assert build_view({"tasks": []})["notice"]["text"] == "Clear runway"
     print("ok")
 
 
@@ -351,9 +523,9 @@ def main():
     if "--selftest" in sys.argv:
         selftest()
     elif "--json" in sys.argv:
-        print(json.dumps(collect()))
+        print(json.dumps(build_view(collect())))
     else:
-        render_swiftbar(collect())
+        render_swiftbar(build_view(collect()))
 
 
 if __name__ == "__main__":

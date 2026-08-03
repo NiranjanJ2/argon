@@ -1,0 +1,4 @@
+preview/node_modules/
+preview/*.html
+preview/*.json
+preview/*.png

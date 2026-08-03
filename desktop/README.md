@@ -6,13 +6,25 @@ only thing that talks to the server — so they cannot disagree, and adding a
 field means editing one file.
 
 ```
-argon-widget.py            fetch + all clock-dependent formatting
+argon-widget.py            fetch + build_view: everything the readouts SAY
   --json                   → Übersicht (argon.jsx renders it)
   (no args)                → SwiftBar plugin format
   --selftest               → asserts, no network
 argon.jsx                  Übersicht layout
-install.sh                 symlinks both into place
+install.sh                 puts both into place
+preview/build.mjs          render argon.jsx to static HTML, to look at it
 ```
+
+`build_view` decides what the readout says — mode wording, task grouping, sort
+order, every string needing a clock. The renderers only decide how it looks.
+
+## Styling
+
+Lifted from the iOS app, not invented. `PALETTE` in `argon-widget.py` mirrors
+`Foqos/Utils/ArgonDesign.swift`; the card is that file's `argonGlassPanel`; the
+serif face is `Font.argonDisplay`; the Overdue/Today/Later sections, their
+tints, the priority pill and the row sort all come from
+`Views/ArgonDashboardView.swift`. Change a colour there, change `PALETTE` here.
 
 ## Install
 
@@ -37,6 +49,24 @@ disagreeing. `enrich()` is that boundary.
 `argon-widget.py` is stdlib-only and Python 3.9-compatible on purpose: SwiftBar
 launches plugins from launchd, whose `PATH` finds `/usr/bin/python3` (3.9)
 rather than Homebrew's.
+
+## Looking at it before shipping it
+
+The desktop widget is invisible to a terminal, so styling changes are otherwise
+unverifiable. `preview/build.mjs` renders `argon.jsx` to a static page against
+sample states — including ones the live server is rarely in, like an overdue
+task or a lock the phone refused:
+
+```sh
+cd preview && npm install esbuild
+node build.mjs ../argon.jsx preview.html fixtures.json
+python3 -m http.server 8731        # then open it
+```
+
+It is a stand-in, not Übersicht: a ~40-line `h` shim replaces React. That gap is
+real — the first version silently swallowed any error message beginning with
+`<`, because the shim was sniffing markup instead of tagging it. Trust it for
+layout and colour, not for behaviour.
 
 ## Refresh and cost
 

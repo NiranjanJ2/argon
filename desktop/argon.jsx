@@ -1,126 +1,261 @@
 // Argon desktop widget for Übersicht <https://tracesof.net/uebersicht/>.
 //
-// The shell command is the same script SwiftBar runs, in --json mode, so the
-// menu bar and the desktop cannot disagree. All formatting decisions that need
-// a clock (countdowns, "overdue 2d") already happened in Python; this file only
-// lays out what it is handed.
+// Renders the view model argon-widget.py builds — the same object SwiftBar
+// renders, so the two readouts cannot disagree. Everything needing a clock
+// (countdowns, "overdue 2d", "running 12m") arrives as a finished string.
+//
+// The look is lifted from the iOS app rather than invented: colours are
+// ArgonPalette, the card is argonGlassPanel, the serif display face is
+// Font.argonDisplay, and the Overdue/Today/Later sections match
+// ArgonDashboardView. Changing a colour means changing PALETTE in the Python.
 
 export const command = "$HOME/.config/argon/argon-widget.py --json";
 
-// Übersicht polls locally and the server caches the Google round-trip, so a
-// short interval here costs one LAN request — see TASKS_TTL_S in argon/api/server.py.
+// Übersicht polls locally; the server caches the Google round-trip, so a short
+// interval costs one LAN request — see TASKS_TTL_S in argon/api/server.py.
 export const refreshFrequency = 5000;
 
 export const className = `
-  top: 20px; right: 20px;
-  width: 320px;
-  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-  color: #e8e8ed;
-  background: rgba(22, 22, 26, 0.82);
-  -webkit-backdrop-filter: blur(24px);
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 14px;
-  padding: 14px 16px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  top: 24px; right: 24px;
+  width: 344px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
   font-size: 12px;
-  line-height: 1.45;
+  color: #F4F8FF;
+  -webkit-font-smoothing: antialiased;
 
-  h1 { font-size: 15px; font-weight: 600; margin: 0 0 2px; letter-spacing: -0.01em; }
-  h2 { font-size: 10px; font-weight: 600; text-transform: uppercase;
-       letter-spacing: 0.07em; color: #7e7e8a; margin: 14px 0 5px; }
-  .row { display: flex; justify-content: space-between; gap: 10px; }
-  .row span:last-child { color: #a8a8b4; text-align: right; }
-  .warn { color: #ff9f45; }
-  .bad { color: #ff6b6b; }
-  .dim { color: #7e7e8a; }
-  .task { display: flex; gap: 7px; padding: 3px 0;
-          border-top: 1px solid rgba(255,255,255,0.05); }
-  .task:first-of-type { border-top: none; }
+  /* ArgonBackdrop: canvas gradient, electric-blue bloom top-trailing,
+     cobalt wash bottom-leading. */
+  background:
+    radial-gradient(120% 90% at 100% 0%, rgba(93,169,255,0.20), rgba(93,169,255,0.04) 45%, transparent 70%),
+    radial-gradient(110% 80% at 0% 100%, rgba(39,93,255,0.12), transparent 65%),
+    linear-gradient(135deg, #040812 0%, #081326 50%, #040812 100%);
+  border-radius: 28px;
+  border: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 22px 44px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06);
+  padding: 20px;
+  overflow: hidden;
+
+  /* Base for every glyph, so an icon can never render as an unstyled black
+     blob just because its container forgot a rule. */
+  svg { fill: none; stroke: currentColor; stroke-width: 1.9;
+        stroke-linecap: round; stroke-linejoin: round; }
+
+  .eyebrow { font-size: 10px; font-weight: 700; letter-spacing: 1.8px;
+             color: #A9DDFF; text-transform: uppercase; }
+  .display { font-family: ui-serif, Georgia, "Times New Roman", serif;
+             font-weight: 600; color: #F4F8FF; }
+
+  .hero { display: flex; align-items: flex-start; gap: 14px; }
+  .hero .title { font-size: 23px; line-height: 1.18; margin-top: 5px;
+                 display: -webkit-box; -webkit-line-clamp: 2;
+                 -webkit-box-orient: vertical; overflow: hidden; }
+  .hero .caption { font-size: 11px; color: #9BAAC0; margin-top: 5px; }
+
+  /* ArgonStatusCard's mode badge: blurred halo behind a hairline circle. */
+  .orb { position: relative; flex: 0 0 auto; width: 42px; height: 42px;
+         border-radius: 50%; background: rgba(255,255,255,0.055);
+         border: 1px solid rgba(93,169,255,0.28);
+         display: flex; align-items: center; justify-content: center; }
+  .orb::before { content: ""; position: absolute; inset: -6px; border-radius: 50%;
+                 background: rgba(93,169,255,0.15); filter: blur(7px); z-index: -1; }
+  .orb svg { width: 17px; height: 17px; stroke: #A9DDFF; fill: none;
+             stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+
+  .metrics { display: flex; gap: 8px; margin-top: 16px; }
+  .metric { flex: 1; padding: 10px 11px; border-radius: 15px;
+            background: rgba(0,0,0,0.19); border: 1px solid rgba(255,255,255,0.055); }
+  .metric svg { width: 11px; height: 11px; stroke: #A9DDFF; fill: none;
+                stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .metric .value { font-size: 18px; margin-top: 5px; }
+  .metric .label { font-size: 8px; font-weight: 700; letter-spacing: 1px;
+                   color: #9BAAC0; margin-top: 2px; }
+
+  .alert { display: flex; gap: 8px; align-items: flex-start; margin-top: 14px;
+           padding: 10px 12px; border-radius: 14px; font-size: 11px;
+           color: #FF9F45; background: rgba(255,159,69,0.09);
+           border: 1px solid rgba(255,159,69,0.22); }
+
+  .section { display: flex; align-items: center; gap: 8px; margin: 18px 0 8px; }
+  .section .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .section .name { font-size: 16px; }
+  .section .count { font-size: 11px; font-weight: 600; color: #9BAAC0; }
+
+  /* ArgonTaskRow */
+  .task { display: flex; align-items: center; gap: 12px; padding: 11px 13px;
+          margin-bottom: 7px; border-radius: 18px;
+          background: rgba(12,23,41,0.82);
+          border: 1px solid rgba(255,255,255,0.07); }
+  .ring { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%;
+          border: 1.5px solid; display: flex; align-items: center;
+          justify-content: center; }
+  .ring.started { box-shadow: 0 0 7px rgba(93,169,255,0.55); }
+  /* A solid glyph, so it must beat the stroked base rule above — CSS wins over
+     SVG presentation attributes, so setting fill inline would not work. */
+  .ring svg { width: 8px; height: 8px; fill: #A9DDFF; stroke: none; }
   .task .body { flex: 1; min-width: 0; }
-  .task .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .task .meta { font-size: 10px; color: #7e7e8a; }
-  .foot { margin-top: 12px; font-size: 10px; color: #5e5e68; text-align: right; }
+  .task .name { font-size: 14px; overflow: hidden; text-overflow: ellipsis;
+                white-space: nowrap; }
+  .task .meta { font-size: 10px; font-weight: 500; color: #9BAAC0; margin-top: 3px;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pill { flex: 0 0 auto; font-size: 8px; font-weight: 700; letter-spacing: 0.9px;
+          padding: 4px 7px; border-radius: 99px; }
+
+  .empty { text-align: center; padding: 22px 8px; }
+  .empty svg { width: 28px; height: 28px; stroke: #A9DDFF; stroke-width: 1.7;
+               filter: drop-shadow(0 0 9px rgba(93,169,255,0.46)); }
+  .empty .headline { font-size: 19px; margin-top: 10px; }
+  .empty .sub { font-size: 11px; color: #9BAAC0; margin-top: 5px; line-height: 1.5; }
+
+  .rule { height: 1px; margin: 16px 0 12px;
+          background: linear-gradient(90deg, rgba(255,255,255,0.10), transparent); }
+  .kv { display: flex; justify-content: space-between; gap: 12px;
+        font-size: 11px; padding: 2px 0; }
+  .kv .k { color: #9BAAC0; }
+  .kv .v { color: #F4F8FF; text-align: right; }
+  .kv .v.warn { color: #FF9F45; }
+
+  .foot { margin-top: 12px; font-size: 9.5px; letter-spacing: 0.5px;
+          color: #55606F; text-align: right; }
+  .offline { text-align: center; padding: 10px 4px; }
+  .offline .orb { margin: 0 auto; }
+  .offline .headline { font-size: 19px; margin-top: 11px; }
+  .offline .msg { font-size: 11px; color: #9BAAC0; margin-top: 6px;
+                  line-height: 1.5; word-break: break-word; }
 `;
 
-const MODE_ICON = { off: "○", school: "🎓", homework: "📓", lock_in: "🔒", sleep: "🌙" };
-const PRIORITY = { high: "🔴", medium: "🟡", low: "⚪️" };
-const BAD = ["diverged", "failed"];
+// Minimal stroked glyphs standing in for the app's SF Symbols. Inline because
+// a widget cannot reach the network for an icon font.
+const GLYPH = {
+  "lock.fill": "M7 9V6.5a3 3 0 016 0V9M5.5 9h9v7.5h-9z",
+  sparkles: "M10 3l1.6 4.4L16 9l-4.4 1.6L10 15l-1.6-4.4L4 9l4.4-1.6z",
+  "moon.stars.fill": "M14.5 11.5A5.5 5.5 0 018 5a5.5 5.5 0 106.5 6.5z",
+  "moon.zzz.fill": "M14.5 11.5A5.5 5.5 0 018 5a5.5 5.5 0 106.5 6.5z",
+  "checkmark.seal.fill": "M6.5 10l2.5 2.5 4.5-5",
+  "bolt.slash.fill": "M11 3l-5 7h3l-1 5 5-7h-3zM4 4l12 12",
+  "graduationcap.fill": "M3 8l7-3 7 3-7 3zM6 10v3.5c0 1 1.8 1.8 4 1.8s4-.8 4-1.8V10",
+  "book.fill": "M4 4.5h5.5v11H4zM10.5 4.5H16v11h-5.5z",
+  timer: "M10 5.5v4.5l3 2M10 3.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13z",
+  checklist: "M4 6l1.5 1.5L8 5M4 12l1.5 1.5L8 11M11 6.5h5M11 12.5h5",
+  questionmark: "M8 7.5a2 2 0 113 1.7c-.6.4-1 .8-1 1.8M10 14.2v.1",
+};
 
-const Row = ({ label, value, cls }) => (
-  <div className="row"><span>{label}</span><span className={cls}>{value}</span></div>
+const Icon = ({ name, className }) => (
+  <svg className={className} viewBox="0 0 20 20">
+    <path d={GLYPH[name] || GLYPH.questionmark} />
+  </svg>
 );
 
+const KV = ({ k, v, warn }) =>
+  v ? (
+    <div className="kv">
+      <span className="k">{k}</span>
+      <span className={warn ? "v warn" : "v"}>{v}</span>
+    </div>
+  ) : null;
+
 export const render = ({ output }) => {
-  let d;
+  let v;
   try {
-    d = JSON.parse(output);
+    v = JSON.parse(output);
   } catch (e) {
-    // Covers the first tick before any output exists, and a script that died.
-    return <div className="dim">Argon: starting…</div>;
+    // The first tick before any output exists, or a script that died.
+    return <div className="offline"><div className="eyebrow">Argon</div>
+      <div className="msg">Starting…</div></div>;
   }
 
-  if (d.error) {
+  if (!v.ok) {
     return (
-      <div>
-        <h1 className="warn">Argon unreachable</h1>
-        <div className="dim">{d.error}</div>
+      <div className="offline">
+        <div className="orb"><Icon name="bolt.slash.fill" /></div>
+        <div className="display headline">Can’t reach Argon</div>
+        <div className="msg">{v.error}</div>
       </div>
     );
   }
 
-  // No optional chaining anywhere in this file: Übersicht transpiles it in its
-  // own bundler, and a syntax it rejects takes the whole widget out.
-  const ios = d.ios || {};
-  const desired = ios.desired || {};
-  const actual = ios.actual || {};
-  const conv = ios.convergence || {};
-  const period = d.school_period || {};
-  const tasks = d.tasks || [];
-  const off = desired.mode === "off";
-  const drift = BAD.includes(conv.state);
+  const groups = v.groups || [];
+  const focus = v.focus || {};
+  const phone = v.phone || {};
 
   return (
     <div>
-      <h1>
-        {MODE_ICON[desired.mode] || "?"} {desired.mode}
-        {drift && <span className="warn"> ⚠︎</span>}
-      </h1>
-      {desired.reason && <div className="dim">{desired.reason}</div>}
+      <div className="hero">
+        <div className="orb"><Icon name={v.hero.icon} /></div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="eyebrow">{v.hero.eyebrow}</div>
+          <div className="display title">{v.hero.title}</div>
+          {v.period && <div className="caption">{v.period}</div>}
+        </div>
+      </div>
 
-      <h2>Focus</h2>
-      <Row label="Version" value={"v" + desired.version} />
-      {desired.until && <Row label="Until" value={desired.until} />}
-      {!off && <Row label="Early exit" value={desired.allow_early_end ? "allowed" : "blocked"} />}
-      <Row label="Phone" value={`${actual.mode} v${actual.version}${actual.shielded ? " · shielded" : ""}`} />
-      <Row label="Converged" value={conv.state} cls={drift ? "warn" : null} />
-      {actual.error && <Row label="Error" value={actual.error} cls="bad" />}
+      <div className="metrics">
+        {v.metrics.map((m) => (
+          <div className="metric" key={m.label}>
+            <Icon name={m.icon} />
+            <div className="display value">{m.value}</div>
+            <div className="label">{m.label}</div>
+          </div>
+        ))}
+      </div>
 
-      <h2>Session</h2>
-      <Row label="State" value={d.mode || "idle"} />
-      {d.current_task && <Row label="Doing" value={d.current_task} />}
-      {d.work_session_minutes ? <Row label="Working" value={d.work_session_minutes + "m"} /> : null}
-      {d.lock_in_minutes ? <Row label="Locked in" value={d.lock_in_minutes + "m"} /> : null}
-      {period.status === "in_period" && (
-        <Row label={period.period}
-             value={`ends ${period.ends_at} · ${period.minutes_remaining}m`} />
+      {v.alert && (
+        <div className="alert">
+          <span>▲</span>
+          <span>{v.alert}</span>
+        </div>
       )}
 
-      <h2>Checklist · {tasks.length}</h2>
-      {d.tasks_error && <div className="warn">{d.tasks_error}</div>}
-      {tasks.length === 0 && !d.tasks_error && <div className="dim">Nothing pending</div>}
-      {tasks.map((t) => (
-        <div className="task" key={t.id}>
-          <span>{PRIORITY[t.priority] || "⚪️"}</span>
-          <div className="body">
-            <div className={"title" + (t.overdue ? " bad" : "")}>{t.title}</div>
-            {t.meta && <div className="meta">{t.meta}</div>}
+      {groups.length === 0 && v.notice && (
+        <div className="empty">
+          <Icon name="checkmark.seal.fill" />
+          <div className="display headline">{v.notice.text}</div>
+          {v.notice.tone === "calm" && (
+            <div className="sub">
+              Anything you or Argon adds shows up here on the same shared list.
+            </div>
+          )}
+        </div>
+      )}
+
+      {groups.map((g) => (
+        <div key={g.title}>
+          <div className="section">
+            <span className="dot" style={{ background: g.tint,
+                                           boxShadow: "0 0 5px " + g.tint }} />
+            <span className="display name">{g.title}</span>
+            <span className="count">{g.tasks.length}</span>
           </div>
+          {g.tasks.map((t) => (
+            <div className="task" key={t.id}>
+              <span className={t.started ? "ring started" : "ring"}
+                    style={{ borderColor: t.tint }}>
+                {t.started && (
+                  <svg viewBox="0 0 10 10"><path d="M3 2l5 3-5 3z" fill="#A9DDFF" /></svg>
+                )}
+              </span>
+              <div className="body">
+                <div className="display name">{t.title}</div>
+                {t.meta && <div className="meta">{t.meta}</div>}
+              </div>
+              <span className="pill" style={{ color: t.tint,
+                                              background: t.tint + "1A" }}>
+                {t.priority.toUpperCase()}
+              </span>
+            </div>
+          ))}
         </div>
       ))}
 
-      <div className="foot">
-        {(d.fetched_at || "").slice(11, 19)}{d.tasks_cached ? " · cached" : ""}
-      </div>
+      <div className="rule" />
+      <KV k="Focus" v={focus.label} />
+      <KV k="Until" v={focus.until} />
+      {focus.mode !== "off" && <KV k="Early exit" v={focus.early_exit} />}
+      <KV k="Phone" v={phone.applied} />
+      <KV k="Converged" v={phone.convergence} warn={phone.drift} />
+      <KV k="Because" v={focus.reason} />
+      <KV k="Error" v={phone.error} warn />
+
+      <div className="foot">{v.updated}{v.cached ? " · CACHED" : ""}</div>
     </div>
   );
 };
