@@ -71,6 +71,7 @@ class Occasion:
 OCCASIONS: dict[str, Occasion] = {
     o.kind: o
     for o in (
+        Occasion("upcoming", "something on his calendar starts shortly", 0),
         Occasion("morning", "the day is just starting", 0),
         Occasion("after_school", "school just let out", 0),
         Occasion("session", "a work session has been running a while", 45),
@@ -98,9 +99,10 @@ class CheckInLedger:
         except (OSError, json.JSONDecodeError):
             data = {}
         if not isinstance(data, dict) or data.get("date") != today:
-            return {"date": today, "fired": {}, "said": []}
+            return {"date": today, "fired": {}, "said": [], "announced": []}
         data.setdefault("fired", {})
         data.setdefault("said", [])
+        data.setdefault("announced", [])
         return data
 
     def _save(self, data: dict[str, Any]) -> None:
@@ -131,6 +133,23 @@ class CheckInLedger:
 
     def said_today(self) -> list[str]:
         return [item["text"] for item in self._load(clock.today_key())["said"]]
+
+    def announced(self, event_id: str) -> bool:
+        """Has this calendar event already been mentioned today?
+
+        A cooldown on the occasion would be wrong in both directions: it would
+        re-announce a 7 PM event at 7:30, and it would swallow a second event
+        that happens to start soon after the first. The event id is the thing
+        that must not repeat.
+        """
+        return event_id in self._load(clock.today_key()).get("announced", [])
+
+    def record_announced(self, event_id: str) -> None:
+        data = self._load(clock.today_key())
+        announced = data.setdefault("announced", [])
+        if event_id not in announced:
+            announced.append(event_id)
+        self._save(data)
 
     def spoken_count(self) -> int:
         return len(self._load(clock.today_key())["said"])
@@ -228,6 +247,8 @@ class ReminderService:
         self.quiet_end_hour = quiet_end_hour
         self._state = DailyState(workspace)
         self.ledger = CheckInLedger(workspace)
+        #: The event that caused an `upcoming` occasion, handed to build_prompt.
+        self._pending: dict[str, Any] | None = None
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -270,6 +291,25 @@ class ReminderService:
         except Exception:  # noqa: BLE001 — offline must not become a guess
             return -1
 
+    def _agenda_lines(self) -> str:
+        """Today's remaining events as prompt lines. Never raises."""
+        from argon.services import agenda
+
+        try:
+            events = agenda.upcoming(self.workspace)
+        except Exception:  # noqa: BLE001 — a calendar outage must not mute Argon
+            return "- (calendar unavailable)"
+        if not events:
+            return "- nothing else scheduled"
+        return "\n".join("- " + agenda.describe(e) for e in events[:6])
+
+    def _pending_event(self) -> dict[str, Any] | None:
+        """An event starting soon that has not been mentioned yet."""
+        from argon.services import agenda
+
+        event = agenda.starting_soon(self.workspace, ignore=self.ledger.announced)
+        return event if event and event.get("id") else None
+
     def has_material(self) -> bool:
         """Is there anything real to talk about?
 
@@ -305,6 +345,13 @@ class ReminderService:
         # occasions coming due together read as a double-text.
         if self.ledger.minutes_since_said(now) < self.min_gap_minutes:
             return None
+
+        # An event about to start outranks everything, the mid-flow guard
+        # included: being deep in a task is exactly when you miss the thing you
+        # have to leave for. Announced once per event, never re-announced.
+        if (event := self._pending_event()) is not None:
+            self._pending = event
+            return OCCASIONS["upcoming"]
 
         if mode in ("working", "lock_in"):
             # Mid-flow, only the session occasion earns an interruption.
@@ -358,8 +405,23 @@ class ReminderService:
             today_notes = Journal(self.workspace).read_day() or "(nothing recorded)"
         except Exception:  # noqa: BLE001 — never let memory break the check-in
             today_notes = "(nothing recorded)"
+        # The calendar is stated outright rather than left to a tool call. It is
+        # the one thing the model reliably failed to look up, and "you have X in
+        # fifteen minutes" is the most useful thing Argon can say.
+        agenda_lines = self._agenda_lines()
+        headline = ""
+        if occasion.kind == "upcoming" and self._pending:
+            from argon.services import agenda as _agenda
+
+            headline = (
+                "STARTING SOON: {}\nThis is why you woke up — say this, briefly.\n\n"
+                .format(_agenda.describe(self._pending))
+            )
+
         return (
             f"It's {self._now():%-I:%M %p} and {occasion.blurb}.\n\n"
+            f"{headline}"
+            f"Still on his calendar today:\n{agenda_lines}\n\n"
             f"What Niranjan said or did today:\n{today_notes}\n\n"
             "First call get_status, and list_tasks if it would tell you anything.\n\n"
             f"Already sent today:\n{history}\n\n"
@@ -368,7 +430,9 @@ class ReminderService:
             "Reply with the message itself and nothing else — no preamble, no "
             "explanation, no quotes around it.\n\n"
             "HARD RULE: only mention a task, deadline, project or piece of work "
-            "that appeared in the tool output you just read. Your background "
+            "that appeared in the tool output you just read, or in the calendar "
+            "and journal blocks above — those are real, verified, and you should "
+            "use them. Your background "
             "notes describe who Niranjan is, not what he owes — 'research at a "
             "UCLA lab' is a fact about his life, never an assignment. Do not "
             "invent work, and do not ask how something is going unless a tool "
@@ -431,6 +495,10 @@ class ReminderService:
         # Record the attempt before running: a silent turn should still start
         # this occasion's cooldown, or it retries every tick and burns calls.
         self.ledger.record_fired(occasion.kind, now)
+        # Same reasoning per event: if the model declines to mention the 7 PM
+        # meeting, it must not be re-offered every ten minutes until 7.
+        if occasion.kind == "upcoming" and self._pending:
+            self.ledger.record_announced(self._pending["id"])
         logger.info("Check-in: {}", occasion.kind)
 
         said = await self.on_check_in(self.build_prompt(occasion))

@@ -269,6 +269,21 @@ def status() -> Any:
     # The app decodes `ios.desired` and `ios.actual` into non-optional structs,
     # so both must always be complete objects — see argon/ios/mode.py.
     data["ios"] = ios_mode.snapshot()
+    # Today's remaining events, so the readouts can show what he has to leave
+    # for. Cached in the agenda module; a calendar outage yields [].
+    from argon.services import agenda
+
+    data["agenda"] = [
+        {
+            "id": e["id"],
+            "summary": e["summary"],
+            "start": e["start"].isoformat(),
+            "location": e.get("location"),
+            "kind": e.get("kind", "event"),
+            "when": agenda.describe(e).split(" — ", 1)[-1],
+        }
+        for e in agenda.upcoming(ws)[:6]
+    ]
     return jsonify(data)
 
 
@@ -341,7 +356,7 @@ def tasks_update(task_id: str) -> Any:
     action = body.get("action")
     priority = body.get("priority")
     due = body.get("due")
-    if action not in {None, "start", "complete"}:
+    if action not in {None, "start", "complete", "stop"}:
         return jsonify({"error": "bad action"}), 400
     if priority is not None and priority not in {"high", "medium", "low"}:
         return jsonify({"error": "bad priority"}), 400
@@ -355,6 +370,11 @@ def tasks_update(task_id: str) -> Any:
         result = ""
         if action == "start":
             result = asyncio.run(StartTaskTool(store, state, log).execute(task_id=task_id))
+        elif action == "stop":
+            # Putting a task down is not finishing it. Without this the only
+            # way out of a session from a readout was to mark work done that
+            # was not, which corrupts the completion record to fix the mode.
+            state.end_session()
         elif action == "complete":
             result = asyncio.run(
                 CompleteTaskTool(store, state, log, habits).execute(task_id=task_id)

@@ -297,6 +297,12 @@ def build_view(d):
             "drift": drift,
         },
         "groups": group_tasks(d.get("tasks") or []),
+        "now": now_panel(d),
+        "agenda": [
+            {"id": e.get("id"), "summary": e.get("summary") or "(untitled)",
+             "when": e.get("when") or "", "location": e.get("location")}
+            for e in (d.get("agenda") or [])
+        ],
         "notice": task_notice(d),
         "alert": phone_alert(conv, actual) if drift else None,
         "cached": bool(d.get("tasks_cached")),
@@ -318,6 +324,59 @@ def phone_alert(conv, actual):
     return "Phone has not applied this — {}".format(conv.get("state"))
 
 
+#: How many tasks the picker offers when nothing is running. Enough to choose
+#: from, few enough that the panel stays a glance rather than a second list.
+PICKER_LIMIT = 5
+
+
+def now_panel(d):
+    """What is running, or what could be — the model behind the Now widget.
+
+    Built here rather than in JSX for the same reason everything else is: the
+    two readouts render the same object, so they cannot drift apart. The
+    running task comes from the server's session, which is the only thing
+    entitled to answer "is this in progress".
+    """
+    tasks = d.get("tasks") or []
+    running = next((t for t in tasks if t.get("running")), None)
+
+    if running:
+        minutes = running.get("running_minutes") or 0
+        return {
+            "state": "running",
+            "title": running.get("title") or "Untitled",
+            "id": running.get("id"),
+            "elapsed": span(minutes * 60) if minutes else "just started",
+            "subject": running.get("subject"),
+            "estimate": ("~{}m".format(running["time_estimate_min"])
+                         if running.get("time_estimate_min") else None),
+            # A goal only exists if he set one; inventing a target is the kind
+            # of made-up pressure that makes a readout worth ignoring.
+            "over": bool(running.get("time_estimate_min")
+                         and minutes > running["time_estimate_min"]),
+        }
+
+    order = {"high": 0, "medium": 1, "low": 2}
+    pick = sorted(
+        tasks,
+        key=lambda t: (order.get(t.get("priority"), 3), t.get("due") or "9999"),
+    )[:PICKER_LIMIT]
+    return {
+        "state": "idle" if pick else "empty",
+        "title": "Nothing running",
+        "picker": [
+            {
+                "id": t.get("id"),
+                "title": t.get("title") or "Untitled",
+                "priority": t.get("priority") or "medium",
+                "tint": PRIORITY_TINT.get(t.get("priority"), PALETTE["iceBlue"]),
+                "meta": due_bucket(t.get("due"))[1] or "",
+            }
+            for t in pick
+        ],
+    }
+
+
 def task_notice(d):
     if d.get("tasks_error"):
         return {"tone": "warning", "text": "Checklist unavailable — " + str(d["tasks_error"])}
@@ -337,7 +396,8 @@ def group_tasks(tasks):
         # "running" comes from the server's session now. It used to be derived
         # from a per-task start stamp that had no day boundary, so a task left
         # open overnight still showed as running the next evening.
-        if task.get("running"):
+        running = bool(task.get("running"))
+        if running:
             minutes = task.get("running_minutes")
             meta.append("running " + span(minutes * 60) if minutes else "running")
         buckets[bucket].append({
@@ -346,7 +406,7 @@ def group_tasks(tasks):
             "priority": (task.get("priority") or "medium"),
             "tint": PRIORITY_TINT.get(task.get("priority"), PALETTE["iceBlue"]),
             "meta": " · ".join(meta),
-            "started": bool(started),
+            "started": running,
             "overdue": bucket == "overdue",
             "notes": (task.get("notes") or "").splitlines()[0] if task.get("notes") else None,
         })
@@ -419,6 +479,33 @@ def render_swiftbar(view):
     if view.get("alert"):
         out.append(bar(view["alert"], color=PALETTE["warning"], size=11,
                        sfimage="exclamationmark.triangle.fill", sfcolor=PALETTE["warning"]))
+
+    # -- now: start or stop without opening the checklist -------------------
+    panel = view.get("now") or {}
+    if panel.get("state") == "running":
+        out.append("---")
+        out.append(bar("Working on {} · {}".format(panel["title"], panel["elapsed"]),
+                       color=PALETTE["cyan"], size=12, sfimage="play.fill",
+                       sfcolor=PALETTE["cyan"]))
+        out.append(bar("Mark done", size=12, sfimage="checkmark.circle",
+                       **action_params("complete", panel["id"], panel["title"])))
+        out.append(bar("Put it down", size=12, sfimage="pause.circle",
+                       **action_params("stop", panel["id"])))
+    elif panel.get("picker"):
+        out.append("---")
+        out.append(bar("Start working on", color=PALETTE["mutedInk"], size=11))
+        for item in panel["picker"]:
+            label = item["title"] + (" · " + item["meta"] if item["meta"] else "")
+            out.append(bar(label, size=12, color=item["tint"], sfimage="play.circle",
+                           **action_params("start", item["id"])))
+
+    # -- agenda ------------------------------------------------------------
+    if view.get("agenda"):
+        out.append("---")
+        out.append(bar("Today", color=PALETTE["mutedInk"], size=11))
+        for event in view["agenda"]:
+            out.append(bar("{} · {}".format(event["summary"], event["when"]),
+                           color=PALETTE["ink"], size=12, sfimage="calendar"))
 
     # -- checklist ---------------------------------------------------------
     out.append("---")
@@ -534,7 +621,7 @@ def do_action(argv):
         return "/v1/tasks/" + urllib.parse.quote(task_id, safe="")
 
     try:
-        if verb in ("start", "complete") and len(argv) > 1:
+        if verb in ("start", "complete", "stop") and len(argv) > 1:
             send(url, token, task_path(argv[1]), {"action": verb}, "PATCH")
             if verb == "complete":
                 notify("Completed {}".format(argv[2] if len(argv) > 2 else "task"))
@@ -622,8 +709,9 @@ def selftest():
             {"id": "b", "title": "Due today", "priority": "low", "due": stamp(0),
              "time_estimate_min": 45, "subject": "AP Chem"},
             {"id": "c", "title": "Running", "priority": "medium", "due": stamp(0),
-             "started_at": (now() - timedelta(minutes=12)).isoformat()},
+             "running": True, "running_minutes": 12},
         ],
+        "agenda": [{"id": "e1", "summary": "All Project Sync", "when": "in 12 min"}],
     })
 
     assert view["hero"]["eyebrow"] == "LOCKED IN" and view["hero"]["icon"] == "lock.fill"
@@ -645,9 +733,38 @@ def selftest():
     assert params["param4"] == '"SAT prep"'
     assert params["terminal"] == "false" and params["refresh"] == "true"
 
+    # -- the Now panel -----------------------------------------------------
+    # Whichever task the server says is running is the one that is running.
+    # Deriving it here from a timestamp is what let the two readouts disagree.
+    assert view["now"]["state"] == "running"
+    assert view["now"]["title"] == "Running" and view["now"]["id"] == "c"
+    assert view["now"]["elapsed"] == "12m" and view["now"]["over"] is False
+    assert view["agenda"][0]["when"] == "in 12 min"
+
+    # Nothing running: the picker offers work in the order it should be done,
+    # and only ever real tasks — an empty list must not invent one.
+    idle = build_view({"tasks": [
+        {"id": "b", "title": "Low but due today", "priority": "low", "due": stamp(0)},
+        {"id": "a", "title": "High", "priority": "high", "due": stamp(3)},
+    ]})
+    assert idle["now"]["state"] == "idle"
+    assert [t["title"] for t in idle["now"]["picker"]] == ["High", "Low but due today"]
+    assert build_view({"tasks": []})["now"]["state"] == "empty"
+    assert build_view({"tasks": []})["now"]["picker"] == []
+
+    # Over-estimate is only claimed when he set an estimate to exceed.
+    over = build_view({"tasks": [{"id": "x", "title": "Long", "running": True,
+                                  "running_minutes": 90, "time_estimate_min": 45}]})
+    assert over["now"]["over"] is True
+    plain = build_view({"tasks": [{"id": "x", "title": "Long", "running": True,
+                                   "running_minutes": 900}]})
+    assert plain["now"]["over"] is False
+
     # Empty and broken payloads must both still render.
     render_swiftbar(build_view({"ios": {}, "tasks": []}))
     render_swiftbar(build_view({"error": "offline"}))
+    render_swiftbar(idle)
+    render_swiftbar(over)
     assert build_view({"tasks": []})["notice"]["text"] == "Clear runway"
     print("ok")
 

@@ -15,6 +15,9 @@ mkdir -p "$CONFIG_DIR" "$SWIFTBAR_DIR" "$UBERSICHT_DIR"
 # deleted — re-run this script to pick up edits.
 install -m 755 "$SRC/argon-widget.py" "$CONFIG_DIR/argon-widget.py"
 install -m 644 "$SRC/argon.jsx" "$UBERSICHT_DIR/argon.jsx"
+# The Now panel is a second widget, not a replacement: both read the same
+# `argon-widget.py --json`, so they cannot disagree about what is running.
+install -m 644 "$SRC/argon-now.jsx" "$UBERSICHT_DIR/argon-now.jsx"
 rm -f "$SWIFTBAR_DIR"/argon.*.py
 ln -sf "$CONFIG_DIR/argon-widget.py" "$SWIFTBAR_DIR/argon.$INTERVAL.py"
 
