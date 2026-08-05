@@ -170,3 +170,46 @@ class TestTheSummaryHeReadsBack:
 
     def test_no_plan_says_so_plainly(self, plan):
         assert plan.summary(_at(12)) == "- no plan yet today"
+
+
+class TestAdoptingWhatHeAlreadySaid:
+    """A day with commitments is not shapeless.
+
+    He had a 3 PM reminder and a 7 PM reminder and had said so in chat twice —
+    "we scheduled those already", "I told you I'll start the math homework at
+    3". Asking him to describe that day would have been exactly the message
+    this whole design exists to stop.
+    """
+
+    def test_commitments_become_the_plan(self, plan):
+        plan.seed_from([
+            {"summary": "Start Math homework", "start": _at(15)},
+            {"summary": "Start UCLA work", "start": _at(19)},
+        ])
+        assert [b.what for b in plan.blocks()] == ["Start Math homework", "Start UCLA work"]
+        assert plan.exists() is True
+        assert plan.seeded() is True
+
+    def test_an_end_time_is_kept_when_there_is_one(self, plan):
+        plan.seed_from([{"summary": "Standup", "start": _at(9), "end": _at(9, 30)}])
+        assert plan.blocks()[0].end == "09:30"
+
+    def test_it_never_overwrites_a_plan_he_stated(self, plan):
+        plan.set_blocks([{"start": "2pm", "what": "SAT prep"}])
+        plan.seed_from([{"summary": "Something else", "start": _at(19)}])
+        assert [b.what for b in plan.blocks()] == ["SAT prep"]
+
+    def test_it_respects_a_refusal_to_plan(self, plan):
+        plan.decline()
+        plan.seed_from([{"summary": "Start Math homework", "start": _at(15)}])
+        assert plan.exists() is False
+
+    def test_stating_a_plan_replaces_a_seeded_one(self, plan):
+        plan.seed_from([{"summary": "Start Math homework", "start": _at(15)}])
+        plan.set_blocks([{"start": "2pm", "what": "SAT prep"}])
+        assert [b.what for b in plan.blocks()] == ["SAT prep"]
+        assert plan.seeded() is False
+
+    def test_nothing_to_adopt_leaves_the_day_open(self, plan):
+        assert plan.seed_from([]) == []
+        assert plan.exists() is False

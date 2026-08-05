@@ -168,8 +168,47 @@ class DayPlan:
         data = self._load()
         data["blocks"] = stored
         data["declined"] = False
+        data["seeded"] = False
         self._save(data)
         return [Block(**b) for b in stored]
+
+    def seed_from(self, entries: list[dict[str, Any]]) -> list[Block]:
+        """Adopt commitments Argon already knows about as the day's shape.
+
+        A day with a 3 PM reminder and a 7 PM reminder is not shapeless, and
+        asking "so what does today look like?" about it is exactly the kind of
+        message that makes Argon worth ignoring — he had already said it, twice,
+        in chat. Anything already on his calendar or scheduled as a reminder is
+        a block he chose; the plan starts from those and he only has to fill in
+        what is missing.
+
+        Only ever seeds an empty plan. Once he has stated one, or said he is not
+        planning today, this must not overwrite him.
+        """
+        if self.exists() or self.declined():
+            return self.blocks()
+        blocks = []
+        for entry in entries or []:
+            start = entry.get("start")
+            if start is None:
+                continue
+            end = entry.get("end")
+            blocks.append({
+                "start": "{:%H:%M}".format(start),
+                "end": "{:%H:%M}".format(end) if end else None,
+                "what": entry.get("summary") or "Something",
+            })
+        if not blocks:
+            return []
+        stored = self.set_blocks(blocks)
+        data = self._load()
+        data["seeded"] = True
+        self._save(data)
+        return stored
+
+    def seeded(self) -> bool:
+        """Was this plan adopted from commitments rather than stated by him?"""
+        return bool(self._load().get("seeded"))
 
     def mark(self, block_id: str, status: str) -> bool:
         data = self._load()

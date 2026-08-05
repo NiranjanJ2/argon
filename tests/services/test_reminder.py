@@ -458,3 +458,21 @@ def test_back_to_back_blocks_both_get_a_word(tmp_path, monkeypatch):
 
     assert ("block_end", "SAT prep") in seen
     assert ("block_start", "Math homework") in seen
+
+
+def test_the_gate_does_not_ask_about_a_day_he_already_planned(tmp_path, monkeypatch):
+    """He had a 3 PM and a 7 PM reminder and had said so twice in chat."""
+    from argon.services import agenda
+
+    service, clock = _service(tmp_path, monkeypatch, _at(12, 30))
+    monkeypatch.setattr(agenda, "upcoming", lambda ws: [
+        {"summary": "Start Math homework", "start": _at(15), "end": None},
+        {"summary": "Start UCLA work", "start": _at(19), "end": None},
+    ])
+
+    occasion = service.pick_occasion()
+
+    assert occasion is None or occasion.kind != "plan_request"
+    assert [b.what for b in service._plan.blocks()] == [
+        "Start Math homework", "Start UCLA work",
+    ]
