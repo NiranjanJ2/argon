@@ -30,6 +30,10 @@ from loguru import logger
 from argon.google.classroom import classroom_due
 from argon.google.service import LOCAL_TZ
 
+#: A start older than this means the task was left open, not worked on. Argon's
+#: day rolls at 4am, so anything past a night's sleep is suspect.
+STALE_START_HOURS = 10
+
 _TZ = LOCAL_TZ
 _MARKER = "~argon~"
 _TASKLIST_NAME = "Argon"
@@ -272,8 +276,19 @@ class GoogleTasksStore:
         if meta.get("sat"):
             try:
                 started = datetime.fromisoformat(meta["sat"])
-                actual_min = int((_now() - started).total_seconds() / 60)
-                meta["act"] = actual_min
+                elapsed = int((_now() - started).total_seconds() / 60)
+                # A start older than a night's sleep means "forgot to complete
+                # it", not "worked on it for two days". "SAT prep - English"
+                # went in as 2921 minutes. No duration is honest; a fabricated
+                # one is averaged into the subject's habit stats forever.
+                if elapsed >= STALE_START_HOURS * 60:
+                    logger.warning(
+                        "complete_task: {} was started {}h ago — recording no duration",
+                        target.get("title", task_id), elapsed // 60,
+                    )
+                else:
+                    actual_min = elapsed
+                    meta["act"] = actual_min
             except ValueError:
                 logger.warning(f"complete_task: bad start timestamp {meta['sat']!r}")
         meta.pop("sat", None)  # clear start time on completion

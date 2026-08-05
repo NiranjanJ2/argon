@@ -7,16 +7,13 @@ from datetime import datetime
 from typing import Any
 
 from argon.clock import now as _now
-from argon.google.tasks_store import GoogleTasksStore
+from argon.google.tasks_store import STALE_START_HOURS, GoogleTasksStore
 from argon.productivity.habits import HabitsTracker
 from argon.productivity.log import DailyLog
 from argon.productivity.state import DailyState
 from argon.tools.base import Tool
 
-#: A start older than this almost certainly means "forgot to complete it",
-#: not "still working". Argon's day rolls at 4am, so anything past a night's
-#: sleep is suspect.
-STALE_START_HOURS = 10
+__all__ = ["STALE_START_HOURS", "annotate_start"]
 
 
 def annotate_start(task: dict[str, Any]) -> dict[str, Any]:

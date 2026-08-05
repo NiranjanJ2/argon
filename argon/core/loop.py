@@ -21,6 +21,7 @@ from argon.core.memory import MemoryConsolidator
 from argon.core.runner import AgentRunner, AgentRunSpec
 from argon.core.session import Session, SessionManager
 from argon.core.skills import BUILTIN_SKILLS_DIR
+from argon.core import target
 from argon.providers.base import LLMProvider
 from argon.tools.cron import CronTool
 from argon.tools.fs import ReadFileTool
@@ -666,6 +667,10 @@ class AgentLoop:
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
+
+        # Where to send anything Niranjan did not ask for. Recorded here rather
+        # than inferred from session files, which get archived and rotated.
+        target.remember(self.workspace, msg.channel, msg.chat_id)
 
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)

@@ -18,6 +18,7 @@ from argon.config import Config
 from argon.core.bus import MessageBus, OutboundMessage
 from argon.core.loop import AgentLoop
 from argon.core.session import SessionManager
+from argon.core import target
 from argon.paths import get_cron_store
 from argon.providers.base import GenerationSettings, LLMProvider
 from argon.providers.openai_compat import OpenAICompatProvider
@@ -119,14 +120,21 @@ def build_runtime(config: Config) -> Runtime:
     channels = ChannelManager(config, bus)
 
     def pick_target() -> tuple[str, str]:
-        """Most recently used real channel, for unprompted messages."""
+        """Where to deliver a message Niranjan did not ask for."""
         enabled = set(channels.enabled_channels)
-        for item in sessions.list_sessions():
+        if remembered := target.recall(config.workspace_path, enabled):
+            return remembered
+        # Nothing recorded yet — fall back to the newest live session so a
+        # freshly-updated install still delivers before the first message.
+        newest = sorted(
+            sessions.list_sessions(), key=lambda s: s.get("updated_at") or "", reverse=True
+        )
+        for item in newest:
             key = item.get("key") or ""
             if ":" not in key:
                 continue
             channel, chat_id = key.split(":", 1)
-            if channel in {"cli", "system", "heartbeat"} or not chat_id:
+            if channel in target.UNREACHABLE or not chat_id:
                 continue
             if channel in enabled:
                 return channel, chat_id
@@ -193,7 +201,13 @@ def build_runtime(config: Config) -> Runtime:
     async def notify(response: str) -> None:
         channel, chat_id = pick_target()
         if channel == "cli":
-            return  # nowhere to deliver
+            # Two days of check-ins died here in silence while the log above
+            # still said "Check-in spoke". A message Argon meant to send and
+            # could not is worth a warning, every time.
+            logger.warning(
+                "No reachable channel — dropping an unprompted message: {}", response[:80]
+            )
+            return
         await bus.publish_outbound(
             OutboundMessage(channel=channel, chat_id=chat_id, content=response)
         )
