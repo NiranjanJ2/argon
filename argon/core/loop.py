@@ -278,7 +278,7 @@ class AgentLoop:
         self.tools.register(ScheduleTool(self.workspace))
 
         # Task tools
-        self.tools.register(ListTasksTool(store))
+        self.tools.register(ListTasksTool(store, state))
         self.tools.register(AddTaskTool(store, log))
         self.tools.register(StartTaskTool(store, state, log))
         self.tools.register(CompleteTaskTool(store, state, log, habits))
@@ -305,7 +305,7 @@ class AgentLoop:
         # reports when the phone has never checked in, which is more useful to
         # the model than the tool silently not existing.
         from argon.tools.focus import SetFocusModeTool
-        self.tools.register(SetFocusModeTool(self.config.ios.default_lock_minutes))
+        self.tools.register(SetFocusModeTool(self.config.ios.default_lock_minutes, state))
 
         # "Rest day" has to land somewhere the check-in gate reads.
         from argon.tools.quiet import CheckInStatusTool, SnoozeCheckInsTool

@@ -262,6 +262,9 @@ class _FakeTaskState:
     def get(self):
         return {"mode": "working", "current_task": "Ship dashboard"}
 
+    def get_session(self):
+        return {"task_id": "task-1", "title": "Ship dashboard", "elapsed_min": 7}
+
     def get_work_session_duration_minutes(self):
         return None
 

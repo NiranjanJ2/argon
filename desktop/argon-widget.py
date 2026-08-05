@@ -331,12 +331,15 @@ def group_tasks(tasks):
     buckets = {"overdue": [], "today": [], "later": []}
     for task in tasks:
         bucket, label = due_bucket(task.get("due"))
-        started = parse(task.get("started_at"))
         meta = [b for b in (task.get("subject"), label) if b]
         if task.get("time_estimate_min"):
             meta.append("~{}m".format(task["time_estimate_min"]))
-        if started:
-            meta.append("running " + span((now() - started).total_seconds()))
+        # "running" comes from the server's session now. It used to be derived
+        # from a per-task start stamp that had no day boundary, so a task left
+        # open overnight still showed as running the next evening.
+        if task.get("running"):
+            minutes = task.get("running_minutes")
+            meta.append("running " + span(minutes * 60) if minutes else "running")
         buckets[bucket].append({
             "id": task.get("id"),
             "title": task.get("title") or "Untitled",

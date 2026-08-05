@@ -15,7 +15,8 @@ Metadata keys (short to minimize notes token cost):
     e   — estimated minutes
     act — actual minutes (written on completion)
     cid — Google Classroom assignment ID (dedup key)
-    sat — started_at ISO timestamp (set on start_task, cleared on complete_task)
+    sat — legacy start stamp; session state now lives in DailyState, and any
+          surviving `sat` is stripped on completion
 """
 
 from __future__ import annotations
@@ -29,10 +30,6 @@ from loguru import logger
 
 from argon.google.classroom import classroom_due
 from argon.google.service import LOCAL_TZ
-
-#: A start older than this means the task was left open, not worked on. Argon's
-#: day rolls at 4am, so anything past a night's sleep is suspect.
-STALE_START_HOURS = 10
 
 _TZ = LOCAL_TZ
 _MARKER = "~argon~"
@@ -249,49 +246,33 @@ class GoogleTasksStore:
         return True
 
     def start_task(self, task_id: str) -> dict[str, Any] | None:
-        """Record the start timestamp in task metadata. Returns task dict or None."""
+        """Resolve the task being started. Returns the task dict or None.
+
+        This used to stamp ``sat`` into the task's own metadata, which made the
+        durable store the owner of session state — and the durable store has no
+        day boundary. ``DailyState`` owns the running session now; this only
+        confirms the task exists.
+        """
+        target = self._resolve(self._svc(), task_id)
+        return _to_task(target) if target else None
+
+    def complete_task(
+        self, task_id: str, *, actual_min: int | None = None
+    ) -> dict[str, Any] | None:
+        """Complete a task. Returns the completed task dict, or None.
+
+        ``actual_min`` comes from the caller's session — this store cannot know
+        how long he worked, only what he worked on.
+        """
         svc = self._svc()
         target = self._resolve(svc, task_id)
         if not target:
             return None
-        meta, notes = _decode_meta(target.get("notes"))
-        meta["sat"] = _now().isoformat()
-        updated = svc.tasks().patch(
-            tasklist=self._tl(), task=target["id"],
-            body={"notes": _encode_meta(meta, notes)},
-        ).execute()
-        return _to_task(updated)
-
-    def complete_task(self, task_id: str) -> dict[str, Any] | None:
-        """Complete a task. Returns the completed task dict (with time_actual_min) or None."""
-        svc = self._svc()
-        target = self._resolve(svc, task_id)
-        if not target:
-            return None
 
         meta, notes = _decode_meta(target.get("notes"))
-
-        # Calculate time actually spent if a start time was recorded
-        actual_min: int | None = None
-        if meta.get("sat"):
-            try:
-                started = datetime.fromisoformat(meta["sat"])
-                elapsed = int((_now() - started).total_seconds() / 60)
-                # A start older than a night's sleep means "forgot to complete
-                # it", not "worked on it for two days". "SAT prep - English"
-                # went in as 2921 minutes. No duration is honest; a fabricated
-                # one is averaged into the subject's habit stats forever.
-                if elapsed >= STALE_START_HOURS * 60:
-                    logger.warning(
-                        "complete_task: {} was started {}h ago — recording no duration",
-                        target.get("title", task_id), elapsed // 60,
-                    )
-                else:
-                    actual_min = elapsed
-                    meta["act"] = actual_min
-            except ValueError:
-                logger.warning(f"complete_task: bad start timestamp {meta['sat']!r}")
-        meta.pop("sat", None)  # clear start time on completion
+        if actual_min is not None:
+            meta["act"] = actual_min
+        meta.pop("sat", None)  # heal tasks still carrying a legacy start stamp
 
         body: dict[str, Any] = {"status": "completed"}
         encoded = _encode_meta(meta, notes)

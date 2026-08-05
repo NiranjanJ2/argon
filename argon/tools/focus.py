@@ -10,6 +10,7 @@ from typing import Any
 from argon import clock
 from argon.ios import mode as ios_mode
 from argon.paths import get_runtime_subdir
+from argon.productivity.state import DailyState
 from argon.tools.base import Tool
 
 
@@ -21,8 +22,11 @@ NIGHT_END_HOUR = 7
 class SetFocusModeTool(Tool):
     """Ask the phone to block (or unblock) apps."""
 
-    def __init__(self, default_lock_minutes: int = 60) -> None:
+    def __init__(
+        self, default_lock_minutes: int = 60, state: DailyState | None = None
+    ) -> None:
         self._default_minutes = default_lock_minutes
+        self._state = state
         self._refused_this_turn = False
 
     def start_turn(self) -> None:
@@ -149,6 +153,17 @@ class SetFocusModeTool(Tool):
             # Niranjan pulled the emergency release. Do not argue with it, and
             # do not pretend the block was applied.
             return f"Not applied: {exc}. Leave it alone until then."
+
+        # Blocking his phone and tracking what he is doing are the same event
+        # seen from two sides. Left independent they contradicted each other:
+        # a lock_in block with the day still recorded as idle, so the check-in
+        # gate treated a locked phone as free time and texted him anyway.
+        if self._state is not None:
+            if mode == "off":
+                if self._state.get_mode() == "lock_in":
+                    self._state.set_mode("idle")
+            elif mode == "lock_in":
+                self._state.set_mode("lock_in")
 
         if mode == "off":
             return "Screen Time block released."

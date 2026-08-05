@@ -3,50 +3,45 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import Any
 
-from argon.clock import now as _now
-from argon.google.tasks_store import STALE_START_HOURS, GoogleTasksStore
+from argon.google.tasks_store import GoogleTasksStore
 from argon.productivity.habits import HabitsTracker
 from argon.productivity.log import DailyLog
 from argon.productivity.state import DailyState
 from argon.tools.base import Tool
 
-__all__ = ["STALE_START_HOURS", "annotate_start"]
+__all__ = ["mark_running"]
 
 
-def annotate_start(task: dict[str, Any]) -> dict[str, Any]:
-    """Add how long a task has claimed to be running, and whether that is absurd.
+def mark_running(
+    tasks: list[dict[str, Any]], session: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """Flag whichever task today's session is on.
 
-    ``started_at`` lives in Google Tasks metadata and has no day boundary, so a
-    task started at 1:42am and never completed still reads as "in progress" the
-    next evening. Left unannotated, Argon treats that as work in flight and nags
-    about starting something it believes has been underway for twenty hours.
+    "Is this running?" is answered by the session, never by the task record.
+    While the answer lived in Google Tasks metadata it had no day boundary, so
+    a task started at 1:42 AM was still "in progress" two days later and
+    ``list_tasks`` contradicted ``get_status`` in the same prompt.
     """
-    started = task.get("started_at")
-    if not started:
-        return task
-    try:
-        elapsed = (_now() - datetime.fromisoformat(started)).total_seconds() / 3600
-    except (TypeError, ValueError):
-        return task
-    task = dict(task)
-    task["running_hours"] = round(elapsed, 1)
-    if elapsed >= STALE_START_HOURS:
-        task["stale_start"] = (
-            f"Marked started {elapsed:.0f}h ago and never completed — assume it was "
-            "left open by accident. Ask whether it is done rather than treating it "
-            "as work in progress."
-        )
-    return task
+    if not session:
+        return tasks
+    task_id, title = session.get("task_id"), session.get("title")
+    out = []
+    for task in tasks:
+        if task_id and task.get("id") == task_id or (not task_id and title
+                                                     and task.get("title") == title):
+            task = {**task, "running": True, "running_minutes": session.get("elapsed_min")}
+        out.append(task)
+    return out
 
 
 class ListTasksTool(Tool):
     """List all pending tasks from Google Tasks."""
 
-    def __init__(self, store: GoogleTasksStore) -> None:
+    def __init__(self, store: GoogleTasksStore, state: DailyState) -> None:
         self._store = store
+        self._state = state
 
     @property
     def name(self) -> str:
@@ -65,7 +60,8 @@ class ListTasksTool(Tool):
         return {"type": "object", "properties": {}, "required": []}
 
     async def execute(self, **kwargs: Any) -> str:
-        return json.dumps([annotate_start(t) for t in self._store.get_all()], indent=2)
+        tasks = mark_running(self._store.get_all(), self._state.get_session())
+        return json.dumps(tasks, indent=2)
 
 
 class AddTaskTool(Tool):
@@ -167,7 +163,12 @@ class StartTaskTool(Tool):
         task = self._store.start_task(kwargs["task_id"])
         if not task:
             return f"No task matching '{kwargs['task_id']}'."
-        self._state.set_current_task(task["title"])
+        # Starting work is what puts him in "working" mode. Setting only the
+        # task left mode on "idle", so the check-in gate kept classifying a
+        # working afternoon as free time and interrupting it.
+        self._state.start_session(
+            kind="working", task_id=task["id"], title=task["title"]
+        )
         self._log.log_task_started(task["title"])
         return f"Started: {task['title']}"
 
@@ -226,18 +227,32 @@ class CompleteTaskTool(Tool):
             1,
         )
 
-        completed = self._store.complete_task(task_id)
+        # Only a session that was actually on this task can time it. Reading a
+        # start stamp off the task record recorded 2921 minutes of English
+        # study for a task left open across two nights, and averaged it into
+        # the subject's habit stats.
+        session = self._state.get_session()
+        on_this_task = bool(session) and (
+            (target and session.get("task_id") == target["id"])
+            or session.get("title") == (target or {}).get("title")
+        )
+        actual_min = session.get("elapsed_min") if on_this_task else None
+
+        completed = self._store.complete_task(task_id, actual_min=actual_min)
         if not completed:
             return f"No pending task matching '{task_id}'."
 
         title = completed["title"]
-        actual_min = completed.get("time_actual_min")
         subject = completed.get("subject")
 
         if subject and actual_min:
             self._habits.record_task_completion(subject, actual_min, priority_rank)
         self._log.log_task_done(title, actual_min)
-        self._state.set_current_task(None)
+        # Finishing the work ends the session. Leaving mode on "working" with
+        # nothing running made the check-in gate take its mid-flow branch,
+        # measure zero minutes, and stay silent for the rest of the day.
+        if on_this_task:
+            self._state.end_session()
 
         return f"Done: {title}" + (f" ({actual_min}min)" if actual_min else "")
 

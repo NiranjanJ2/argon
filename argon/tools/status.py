@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from argon.productivity.habits import HabitsTracker
 from argon.productivity.log import DailyLog
 from argon.productivity.state import DailyState
@@ -40,15 +42,26 @@ class GetStatusTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         data = self._state.get()
-        work_min = self._state.get_work_session_duration_minutes()
-        lock_min = self._state.get_lock_in_duration_minutes()
+        session = self._state.get_session()
 
         result: dict[str, Any] = {
             "mode": data.get("mode", "idle"),
             "current_task": data.get("current_task"),
             "home_arrival": data.get("home_arrival"),
-            "work_session_minutes": work_min,
-            "lock_in_minutes": lock_min,
+            "work_session_minutes": self._state.get_work_session_duration_minutes(),
+            "lock_in_minutes": self._state.get_lock_in_duration_minutes(),
+            # Stated outright so the model never has to infer it from a start
+            # timestamp. It used to read one off a task record that had no day
+            # boundary and announce sessions that ended two days earlier.
+            "session": (
+                {
+                    "task": session.get("title"),
+                    "kind": session.get("kind"),
+                    "minutes": session.get("elapsed_min"),
+                }
+                if session
+                else None
+            ),
         }
 
         # Include current school period if available
@@ -116,11 +129,27 @@ class SetModeTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         mode = kwargs["mode"]
+        was = self._state.get_mode()
         self._state.set_mode(mode)
         self._log.log_mode_change(mode)
         if mode == "working":
             self._habits.record_work_start()
-        return f"Mode: {mode}"
+
+        # Leaving lock_in releases the phone. Without this, "I'm done" ended
+        # the session on the server and left the Screen Time shield up, with
+        # nothing left in Argon's state to explain why the phone was blocked.
+        released = ""
+        if was == "lock_in" and mode != "lock_in":
+            try:
+                from argon.ios import mode as ios_mode
+
+                if ios_mode.get_mode()["mode"] == "lock_in":
+                    ios_mode.set_mode("off", reason="lock-in session ended")
+                    released = " Screen Time block released."
+            except Exception:  # noqa: BLE001 — the mode change itself still stands
+                logger.warning("Could not release the phone block on leaving lock_in")
+
+        return f"Mode: {mode}.{released}"
 
 
 class LogNoteTool(Tool):

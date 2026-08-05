@@ -193,10 +193,14 @@ def _task_dashboard(store: Any, state: Any, *, fresh: bool = False) -> dict[str,
     ``state`` is read live even on a cache hit: it is local, and the work-session
     minute counter is one of the things the readouts are for.
     """
+    from argon.tools.tasks import mark_running
+
     tasks, meta = _cached_tasks(store, fresh=fresh)
     current = state.get()
     return {
-        "tasks": tasks,
+        # The readouts show which task is in flight; that fact belongs to the
+        # session, so it is stamped on here rather than read off the task.
+        "tasks": mark_running(tasks, state.get_session()),
         **meta,
         "state": {
             "mode": current.get("mode", "idle"),

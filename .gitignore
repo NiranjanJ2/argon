@@ -15,3 +15,21 @@ whatsapp_bridge/node_modules/
 whatsapp_bridge/wwebjs_auth/
 whatsapp_bridge/.wwebjs_cache/
 .venv-local/
+
+# A pre-migration workspace still sits in this checkout — daily state, memory,
+# sessions and live Google OAuth tokens.  swept 
+# into a commit once. Never again.
+google/
+sessions/
+memory/
+daily/
+cron/
+habits/
+screentime/
+media/
+tool-results/
+.nanobot/
+HEARTBEAT.md
+USER.md
+TOOLS.md
+._*
