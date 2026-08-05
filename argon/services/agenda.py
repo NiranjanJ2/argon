@@ -76,6 +76,10 @@ def _fetch(workspace: Path) -> list[dict[str, Any]]:
             "start": start,
             "end": _parse(item.get("end")),
             "location": item.get("location"),
+            # An event Argon wrote from a cron reminder. The job delivers its
+            # own message at its own time, so this must never earn an early
+            # warning — true even after the job has fired and deleted itself.
+            "kind": "reminder" if MIRROR_TAG in (item.get("description") or "") else "event",
         })
     return events
 
@@ -114,6 +118,8 @@ def starting_soon(
     for event in today(workspace):
         if event["start"] > horizon:
             break  # sorted by start, so nothing later can qualify
+        if event.get("kind") == "reminder":
+            continue  # a cron job will deliver this one on its own
         if ignore is not None and ignore(event.get("id") or ""):
             continue
         return event
@@ -162,10 +168,59 @@ def reminders() -> list[dict[str, Any]]:
     return out
 
 
+#: Marks a calendar event Argon created from a cron reminder, so the two can be
+#: recognised as one thing. Kept out of the summary — he reads these.
+MIRROR_TAG = "argon:reminder"
+
+
+def put_on_calendar(summary: str, at_ms: int, *, minutes: int = 15) -> str:
+    """Write a one-off reminder to the work calendar. Returns the event id."""
+    from argon.google.service import build_google_service
+    from argon.paths import argon_home
+
+    start = datetime.fromtimestamp(at_ms / 1000, tz=clock.tz())
+    svc = build_google_service(argon_home(), "calendar", "v3", "work")
+    event = svc.events().insert(calendarId="primary", body={
+        "summary": summary,
+        "description": MIRROR_TAG,
+        "start": {"dateTime": _stamp(start), "timeZone": str(clock.tz())},
+        "end": {"dateTime": _stamp(start + timedelta(minutes=minutes)),
+                "timeZone": str(clock.tz())},
+    }).execute()
+    _invalidate()
+    logger.info("Put '{}' on the calendar at {:%-I:%M %p}", summary, start)
+    return event.get("id", "")
+
+
+def _stamp(moment: datetime) -> str:
+    """Second precision — Swift's ISO8601 parser rejects six fractional digits."""
+    return moment.replace(microsecond=0).isoformat()
+
+
+def _invalidate() -> None:
+    """Drop the cache so a just-created event shows up immediately."""
+    global _cache
+    with _lock:
+        _cache = None
+
+
 def upcoming(workspace: Path) -> list[dict[str, Any]]:
-    """Everything still ahead today — calendar events and scheduled reminders."""
-    merged = [{**e, "kind": e.get("kind", "event")} for e in today(workspace)]
-    merged.extend(reminders())
+    """Everything still ahead today — calendar events and scheduled reminders.
+
+    A reminder Argon put on the calendar exists twice: as a cron job that will
+    fire, and as the event it wrote. They are one commitment, so the cron entry
+    wins — it is the one that carries "do not warn early", since the job
+    delivers its own message at its own time.
+    """
+    scheduled = reminders()
+    taken = {(e["start"].replace(second=0, microsecond=0), e["summary"]) for e in scheduled}
+
+    merged = [
+        {**e, "kind": e.get("kind", "event")}
+        for e in today(workspace)
+        if (e["start"].replace(second=0, microsecond=0), e["summary"]) not in taken
+    ]
+    merged.extend(scheduled)
     merged.sort(key=lambda e: e["start"])
     return merged
 

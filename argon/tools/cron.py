@@ -182,7 +182,37 @@ class CronTool(Tool):
             to=self._chat_id,
             delete_after_run=delete_after,
         )
-        return f"Created job '{job.name}' (id: {job.id})"
+        on_calendar = self._mirror_to_calendar(message, schedule, deliver)
+        return f"Created job '{job.name}' (id: {job.id}){on_calendar}"
+
+    def _mirror_to_calendar(
+        self, message: str, schedule: CronSchedule, deliver: bool
+    ) -> str:
+        """Put a one-off reminder on the real calendar as well.
+
+        "Remind me to start math homework at 3" produced a cron job and nothing
+        else — invisible in Google Calendar, invisible on his phone, and known
+        to Argon only as a timer. Writing it to the calendar makes it a thing
+        that exists at a time, on every device, and lets the ordinary 15-minute
+        warning cover it instead of Argon volunteering it at noon.
+
+        Only for one-shot ``at`` jobs that deliver to him: a recurring internal
+        job is not an appointment, and littering the calendar with those would
+        make it useless. A calendar failure is reported, never fatal — the
+        reminder itself is already scheduled and will still fire.
+        """
+        if schedule.kind != "at" or not schedule.at_ms or not deliver:
+            return ""
+        try:
+            from argon.services import agenda
+
+            agenda.put_on_calendar(message, schedule.at_ms)
+        except Exception as exc:  # noqa: BLE001 — the job is scheduled regardless
+            from loguru import logger
+
+            logger.warning("Could not mirror a reminder onto the calendar: {}", exc)
+            return " — not added to the calendar, but the reminder will still fire"
+        return " and added it to your calendar"
 
     def _format_timing(self, schedule: CronSchedule) -> str:
         """Format schedule as a human-readable timing string."""

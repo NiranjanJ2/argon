@@ -3,15 +3,54 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from argon.google.tasks_store import GoogleTasksStore
+from argon.paths import argon_home
 from argon.productivity.habits import HabitsTracker
 from argon.productivity.log import DailyLog
 from argon.productivity.state import DailyState
 from argon.tools.base import Tool
 
-__all__ = ["mark_running"]
+__all__ = ["mark_running", "mark_scheduled", "unscheduled"]
+
+
+def _matches(task: dict[str, Any], summary: str) -> bool:
+    """Does this agenda entry refer to this task?
+
+    The reminder Argon writes is "Start Math homework" for a task titled "Math
+    homework", so containment is the relation — in that direction only, or a
+    task called "Prep" would match every reminder with the word in it.
+    """
+    title = (task.get("title") or "").strip().lower()
+    return bool(title) and title in (summary or "").lower()
+
+
+def mark_scheduled(
+    tasks: list[dict[str, Any]], agenda: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Stamp tasks he has already committed to a time for.
+
+    Deciding when to do something is doing something about it. Argon knew about
+    the 3 PM reminder and about the task, but nothing connected them, so at noon
+    it read "Math homework, outstanding" and told him to start it — arguing with
+    a plan he had made two hours earlier and it had scheduled for him.
+    """
+    out = []
+    for task in tasks:
+        when = next(
+            (e["start"] for e in agenda if _matches(task, e.get("summary", ""))), None
+        )
+        if when is not None:
+            task = {**task, "scheduled_for": when.strftime("%-I:%M %p")}
+        out.append(task)
+    return out
+
+
+def unscheduled(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Only the tasks with no time set aside for them yet."""
+    return [t for t in tasks if not t.get("scheduled_for") and not t.get("running")]
 
 
 def mark_running(
@@ -39,9 +78,12 @@ def mark_running(
 class ListTasksTool(Tool):
     """List all pending tasks from Google Tasks."""
 
-    def __init__(self, store: GoogleTasksStore, state: DailyState) -> None:
+    def __init__(
+        self, store: GoogleTasksStore, state: DailyState, workspace: Path | None = None
+    ) -> None:
         self._store = store
         self._state = state
+        self._state_workspace = workspace or argon_home()
 
     @property
     def name(self) -> str:
@@ -60,7 +102,13 @@ class ListTasksTool(Tool):
         return {"type": "object", "properties": {}, "required": []}
 
     async def execute(self, **kwargs: Any) -> str:
+        from argon.services import agenda
+
         tasks = mark_running(self._store.get_all(), self._state.get_session())
+        try:
+            tasks = mark_scheduled(tasks, agenda.upcoming(self._state_workspace))
+        except Exception:  # noqa: BLE001 — the task list matters more than the stamp
+            pass
         return json.dumps(tasks, indent=2)
 
 

@@ -278,7 +278,7 @@ class AgentLoop:
         self.tools.register(ScheduleTool(self.workspace))
 
         # Task tools
-        self.tools.register(ListTasksTool(store, state))
+        self.tools.register(ListTasksTool(store, state, self.workspace))
         self.tools.register(AddTaskTool(store, log))
         self.tools.register(StartTaskTool(store, state, log))
         self.tools.register(CompleteTaskTool(store, state, log, habits))

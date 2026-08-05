@@ -283,16 +283,31 @@ class ReminderService:
             return False
 
     def pending_task_count(self) -> int:
-        """How many real, open tasks exist. -1 when it cannot be determined."""
+        """Open tasks with no time set aside yet. -1 when it cannot be determined.
+
+        A task he has already scheduled is not outstanding — deciding when to do
+        something is doing something about it. Counting the 3 PM math homework
+        as "free time, with things outstanding" is what had Argon telling him at
+        noon to start work it had itself put in his calendar for three hours
+        later. Excluding them here means no occasion and no model call at all,
+        rather than a prompt asking the model not to say the obvious thing.
+        """
         try:
             from argon.google.tasks_store import GoogleTasksStore
+            from argon.services import agenda
+            from argon.tools.tasks import mark_scheduled, unscheduled
 
-            return len(GoogleTasksStore(self.workspace).get_all())
+            tasks = GoogleTasksStore(self.workspace).get_all()
         except Exception:  # noqa: BLE001 — offline must not become a guess
             return -1
+        try:
+            tasks = mark_scheduled(tasks, agenda.upcoming(self.workspace))
+        except Exception:  # noqa: BLE001 — a calendar outage must not invent work
+            pass
+        return len(unscheduled(tasks))
 
     def _agenda_lines(self) -> str:
-        """Today's remaining events as prompt lines. Never raises."""
+        """Today's remaining events and reminders as prompt lines. Never raises."""
         from argon.services import agenda
 
         try:
@@ -429,6 +444,9 @@ class ReminderService:
             "sentences, unprompted, in your own voice, the way a friend texts.\n\n"
             "Reply with the message itself and nothing else — no preamble, no "
             "explanation, no quotes around it.\n\n"
+            "If a task shows scheduled_for, he has already decided when to do "
+            "it. Mentioning it is fine — telling him to start it now is not. "
+            "Never argue with a plan he has already made.\n\n"
             "HARD RULE: only mention a task, deadline, project or piece of work "
             "that appeared in the tool output you just read, or in the calendar "
             "and journal blocks above — those are real, verified, and you should "
