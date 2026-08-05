@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 from argon import clock
+from argon.productivity.plan import DayPlan
 from argon.productivity.state import DailyState
 
 # How often the gate is evaluated. Cheap — it is local state only, no LLM.
@@ -35,8 +36,20 @@ TICK_MINUTES = 10
 # Minimum minutes an active work session must run before it is worth remarking on.
 SESSION_FLOOR_MINUTES = 25
 
-# For `ambient`: how long since the last word before a no-agenda text is welcome.
-AMBIENT_QUIET_MINUTES = 180
+#: How long between asking for a plan and asking again. He asked to be pestered
+#: until he names something; this is what "pestered" is allowed to mean.
+PLAN_ASK_COOLDOWN_MIN = 100
+
+#: Don't ask for a plan before this hour. Waking someone to ask about their day
+#: is not structure, it is an alarm clock.
+PLAN_ASK_FROM_HOUR = 8
+
+#: Occasions the daily cap does not apply to, because he chose the time himself.
+#: A day of eight discretionary "want to use this hour?" offers used to exhaust
+#: the budget by five and silently swallow the 7 PM block he had actually asked
+#: to be reminded about — the cap suppressing exactly the messages it exists to
+#: make room for. He can still bound these: plan fewer blocks.
+HIS_OWN_SCHEDULE = frozenset({"block_start", "block_end", "upcoming"})
 
 #: How the model declines to say anything.
 SKIP_TOKEN = "SKIP"
@@ -72,12 +85,14 @@ OCCASIONS: dict[str, Occasion] = {
     o.kind: o
     for o in (
         Occasion("upcoming", "something on his calendar starts shortly", 0),
-        Occasion("morning", "the day is just starting", 0),
-        Occasion("after_school", "school just let out", 0),
+        # The plan drives the day. `plan_request` runs until there is one;
+        # after that the blocks he named are the schedule.
+        Occasion("plan_request", "the day has no shape yet", PLAN_ASK_COOLDOWN_MIN),
+        Occasion("block_start", "a block of his plan starts about now", 0),
+        Occasion("block_end", "a block of his plan just finished", 0),
+        Occasion("open_stretch", "he left this stretch of the day unclaimed", 0),
         Occasion("session", "a work session has been running a while", 45),
-        Occasion("idle", "free time, with things outstanding", 120),
         Occasion("evening", "the day is winding down", 0),
-        Occasion("ambient", "no particular reason — it has just been a while", 0),
     )
 }
 
@@ -153,6 +168,15 @@ class CheckInLedger:
 
     def spoken_count(self) -> int:
         return len(self._load(clock.today_key())["said"])
+
+
+def _gap_key(gap: Any) -> str:
+    """Identify a free stretch by where it ends — the next thing he committed to.
+
+    Keying on when it was noticed made one stretch of free time produce a
+    message at 12:30 and another at 13:00.
+    """
+    return "gap:{}".format("{:%H:%M}".format(gap.end) if gap.end else "open")
 
 
 def _snooze_file(workspace: Path) -> Path:
@@ -246,9 +270,13 @@ class ReminderService:
         self.quiet_start_hour = quiet_start_hour
         self.quiet_end_hour = quiet_end_hour
         self._state = DailyState(workspace)
+        self._plan = DayPlan(workspace)
         self.ledger = CheckInLedger(workspace)
         #: The event that caused an `upcoming` occasion, handed to build_prompt.
         self._pending: dict[str, Any] | None = None
+        #: Same, for the plan-driven occasions.
+        self._pending_block: Any = None
+        self._pending_gap: Any = None
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -274,14 +302,6 @@ class ReminderService:
         cooldown = OCCASIONS[kind].cooldown_min
         return False if cooldown == 0 else elapsed >= cooldown
 
-    def _is_school_day(self) -> bool:
-        try:
-            from argon.productivity.bell import ScheduleManager
-
-            return ScheduleManager(self.workspace).is_school_day()
-        except Exception:  # noqa: BLE001 — a bad schedule file must not mute Argon
-            return False
-
     def pending_task_count(self) -> int:
         """Open tasks with no time set aside yet. -1 when it cannot be determined.
 
@@ -301,10 +321,74 @@ class ReminderService:
         except Exception:  # noqa: BLE001 — offline must not become a guess
             return -1
         try:
-            tasks = mark_scheduled(tasks, agenda.upcoming(self.workspace))
+            # A block of the plan is a commitment just like a calendar entry.
+            entries = agenda.upcoming(self.workspace) + self._plan.as_entries()
+            tasks = mark_scheduled(tasks, entries)
         except Exception:  # noqa: BLE001 — a calendar outage must not invent work
             pass
         return len(unscheduled(tasks))
+
+    def _headline(self, occasion: Occasion) -> str:
+        """The one line saying why this moment, not some other moment.
+
+        Every occasion here is a time *he* chose, so the message can name it.
+        That is the whole difference from the old timer: "you said SAT prep at
+        2" lands where "you have tasks outstanding" reads as nagging.
+        """
+        if occasion.kind == "upcoming" and self._pending:
+            from argon.services import agenda as _agenda
+
+            return (
+                "STARTING SOON: {}\nThis is why you woke up — say this, briefly.\n\n"
+                .format(_agenda.describe(self._pending))
+            )
+
+        if occasion.kind == "plan_request":
+            again = (
+                "He has not answered yet today, so keep it short and do not "
+                "repeat yourself.\n"
+                if self._plan.times_asked() else ""
+            )
+            return (
+                "ASK WHAT HIS DAY LOOKS LIKE. One question, plain — what is he "
+                "doing today and roughly when. Whatever he says, record it with "
+                "set_day_plan; those blocks become when you check in, so this "
+                "is the message that makes the rest of the day work.\n"
+                f"{again}"
+                "If he says he doesn't want to plan, call set_day_plan with "
+                "planning: false and leave him alone about it.\n\n"
+            )
+
+        if occasion.kind == "block_start" and self._pending_block:
+            return (
+                "HIS PLAN SAYS: {} starts about now ({}). Say one line marking "
+                "it — he chose this time, so you are reminding him of his own "
+                "decision, not proposing one. If he confirms, start_task if it "
+                "matches a task.\n\n"
+                .format(self._pending_block.what, self._pending_block.start)
+            )
+
+        if occasion.kind == "block_end" and self._pending_block:
+            return (
+                "HIS PLAN SAYS: {} was meant to end about now ({}). Ask how it "
+                "went in one line. When he answers, record it with "
+                "update_plan_block so you stop asking.\n\n"
+                .format(self._pending_block.what, self._pending_block.end)
+            )
+
+        if occasion.kind == "open_stretch" and self._pending_gap:
+            until = (
+                "until {:%-I:%M %p}".format(self._pending_gap.end)
+                if self._pending_gap.end else "for a while"
+            )
+            return (
+                "HE HAS NOTHING PLANNED {} ({} minutes). Offer it back to him: "
+                "does he want to use it on something, or is it downtime? Both "
+                "answers are fine and you must not push — the point is that he "
+                "chooses, not that he works.\n\n"
+                .format(until.upper(), self._pending_gap.minutes)
+            )
+        return ""
 
     def _agenda_lines(self) -> str:
         """Today's remaining events and reminders as prompt lines. Never raises."""
@@ -354,11 +438,15 @@ class ReminderService:
         if (until := snooze_until(self.workspace)) is not None:
             logger.debug("Check-ins snoozed until {}", until)
             return None
-        if self.ledger.spoken_count() >= self.max_per_day:
-            return None
-        # A floor between messages, whatever the reason. Without it two
-        # occasions coming due together read as a double-text.
-        if self.ledger.minutes_since_said(now) < self.min_gap_minutes:
+        at_cap = self.ledger.spoken_count() >= self.max_per_day
+        quiet_for = self.ledger.minutes_since_said(now)
+        # A floor between messages, so two occasions coming due together do not
+        # read as a double-text. His own scheduled moments get a much shorter
+        # one: a 7 PM block he asked to be reminded about was being dropped
+        # entirely because a discretionary offer had landed at 6:55, and the
+        # 20-minute grace window closed before the floor lifted. Silence is the
+        # wrong way to space out messages he specifically asked for.
+        if quiet_for < TICK_MINUTES:
             return None
 
         # An event about to start outranks everything, the mid-flow guard
@@ -368,8 +456,16 @@ class ReminderService:
             self._pending = event
             return OCCASIONS["upcoming"]
 
+        # A block boundary is a moment he chose, so it outranks the mid-flow
+        # guard: "that's your two hours" is the point of having named an end.
+        if (block := self._plan.just_ended(now)) is not None and not self.ledger.announced(
+            "end:" + block.id
+        ):
+            self._pending_block = block
+            return OCCASIONS["block_end"]
+
         if mode in ("working", "lock_in"):
-            # Mid-flow, only the session occasion earns an interruption.
+            # Otherwise mid-flow, only the session occasion earns an interruption.
             minutes = self._state.get_work_session_duration_minutes() or 0
             if minutes >= SESSION_FLOOR_MINUTES and self._ready("session", now):
                 return OCCASIONS["session"]
@@ -378,24 +474,42 @@ class ReminderService:
         if mode == "done":
             return None
 
+        if (block := self._plan.starting_now(now)) is not None and not self.ledger.announced(
+            "start:" + block.id
+        ):
+            self._pending_block = block
+            return OCCASIONS["block_start"]
+
+        # Everything below is discretionary: the full floor and the cap apply.
+        if at_cap or quiet_for < self.min_gap_minutes:
+            return None
+
+        # No plan means one job: get one. This is the only nag by design — he
+        # asked to be pestered until he says what he wants out of the day —
+        # and it stops the moment there are blocks or he says he isn't planning.
+        if not self._plan.exists() and not self._plan.declined():
+            if PLAN_ASK_FROM_HOUR <= now.hour and self._ready("plan_request", now):
+                return OCCASIONS["plan_request"]
+            return None
+
+        # He has a plan and is between blocks. Offer the free time back to him
+        # rather than assuming it is work time; that assumption is what made
+        # the old `idle` nudge feel like nagging.
+        #
+        # A gap only means something relative to a plan. With no blocks at all
+        # the whole day reads as one long gap, which is the old ambient nudge
+        # wearing a different hat — and it fired even after he had said he was
+        # not planning today, which is the one thing that answer must prevent.
+        if not self._plan.exists():
+            return None
+        gap = self._plan.open_stretch(now)
+        if gap is not None and not self.ledger.announced(_gap_key(gap)):
+            self._pending_gap = gap
+            return OCCASIONS["open_stretch"]
+
         hour = now.hour + now.minute / 60
-        if hour < 10 and self._ready("morning", now):
-            return OCCASIONS["morning"]
-        if 15 <= hour < 17.5 and self._is_school_day() and self._ready("after_school", now):
-            return OCCASIONS["after_school"]
         if 20 <= hour < 22.5 and self._ready("evening", now):
             return OCCASIONS["evening"]
-
-        # Everything below is a nudge about work, so it needs work to exist.
-        if not self.has_material():
-            return None
-        if self._ready("idle", now):
-            return OCCASIONS["idle"]
-        if (
-            self._ready("ambient", now)
-            and self.ledger.minutes_since_said(now) >= AMBIENT_QUIET_MINUTES
-        ):
-            return OCCASIONS["ambient"]
         return None
 
     def build_prompt(self, occasion: Occasion) -> str:
@@ -424,18 +538,12 @@ class ReminderService:
         # the one thing the model reliably failed to look up, and "you have X in
         # fifteen minutes" is the most useful thing Argon can say.
         agenda_lines = self._agenda_lines()
-        headline = ""
-        if occasion.kind == "upcoming" and self._pending:
-            from argon.services import agenda as _agenda
-
-            headline = (
-                "STARTING SOON: {}\nThis is why you woke up — say this, briefly.\n\n"
-                .format(_agenda.describe(self._pending))
-            )
+        headline = self._headline(occasion)
 
         return (
             f"It's {self._now():%-I:%M %p} and {occasion.blurb}.\n\n"
             f"{headline}"
+            f"His plan for today:\n{self._plan.summary(self._now())}\n\n"
             f"Still on his calendar today:\n{agenda_lines}\n\n"
             f"What Niranjan said or did today:\n{today_notes}\n\n"
             "First call get_status, and list_tasks if it would tell you anything.\n\n"
@@ -517,6 +625,16 @@ class ReminderService:
         # meeting, it must not be re-offered every ten minutes until 7.
         if occasion.kind == "upcoming" and self._pending:
             self.ledger.record_announced(self._pending["id"])
+        # And per block, per gap — each moment of the plan is worth one word,
+        # not one every tick until the grace window closes.
+        if occasion.kind == "block_start" and self._pending_block:
+            self.ledger.record_announced("start:" + self._pending_block.id)
+        if occasion.kind == "block_end" and self._pending_block:
+            self.ledger.record_announced("end:" + self._pending_block.id)
+        if occasion.kind == "open_stretch" and self._pending_gap:
+            self.ledger.record_announced(_gap_key(self._pending_gap))
+        if occasion.kind == "plan_request":
+            self._plan.record_asked()
         logger.info("Check-in: {}", occasion.kind)
 
         said = await self.on_check_in(self.build_prompt(occasion))

@@ -290,6 +290,16 @@ class AgentLoop:
         self.tools.register(LogNoteTool(state, log))
         self.tools.register(ReadLogTool(log))
 
+        # The day's plan drives when Argon reaches out at all — see
+        # argon/productivity/plan.py.
+        from argon.productivity.plan import DayPlan
+        from argon.tools.plan import GetDayPlanTool, SetDayPlanTool, UpdatePlanBlockTool
+
+        day_plan = DayPlan(self.workspace)
+        self.tools.register(SetDayPlanTool(day_plan))
+        self.tools.register(UpdatePlanBlockTool(day_plan))
+        self.tools.register(GetDayPlanTool(day_plan))
+
         # Always available — handles missing Google auth gracefully
         self.tools.register(GetDailyOverviewTool(self.workspace))
 

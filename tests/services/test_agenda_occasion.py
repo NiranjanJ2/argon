@@ -107,13 +107,13 @@ class TestThePromptCarriesTheCalendar:
     def test_every_check_in_sees_the_day(self, service, calendar):
         """Not just the upcoming one — any check-in can mention what's coming."""
         calendar.append(_event(200, summary="Dentist"))
-        assert "Dentist" in service.build_prompt(OCCASIONS["morning"])
+        assert "Dentist" in service.build_prompt(OCCASIONS["evening"])
 
     def test_an_empty_calendar_says_so_rather_than_nothing(self, service, calendar):
-        assert "nothing else scheduled" in service.build_prompt(OCCASIONS["morning"])
+        assert "nothing else scheduled" in service.build_prompt(OCCASIONS["evening"])
 
     def test_the_anti_invention_rule_still_stands(self, service, calendar):
-        prompt = service.build_prompt(OCCASIONS["morning"])
+        prompt = service.build_prompt(OCCASIONS["evening"])
         assert "HARD RULE" in prompt and "never an assignment" in prompt
 
 
@@ -128,7 +128,7 @@ class TestFailureIsSilentNotFatal:
         with pytest.raises(RuntimeError):
             agenda.starting_soon(service.workspace)
         # The gate itself must survive it.
-        assert "calendar unavailable" in service.build_prompt(OCCASIONS["morning"])
+        assert "calendar unavailable" in service.build_prompt(OCCASIONS["evening"])
 
     def test_an_all_day_event_has_no_start_to_warn_about(self):
         assert agenda._parse({"date": "2026-08-05"}) is None

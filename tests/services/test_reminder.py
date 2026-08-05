@@ -81,13 +81,15 @@ def test_an_untouched_afternoon_still_earns_a_check_in(tmp_path, monkeypatch):
     assert service.pick_occasion() is not None
 
 
-def test_morning_is_no_longer_dead_time(tmp_path, monkeypatch):
+def test_the_morning_asks_what_the_day_looks_like(tmp_path, monkeypatch):
+    """The day starts by asking, not by announcing. There is no plan yet."""
     service, _ = _service(tmp_path, monkeypatch, _at(8, 30))
-    assert service.pick_occasion().kind == "morning"
+    assert service.pick_occasion().kind == "plan_request"
 
 
 def test_evening_gets_a_wrap_up(tmp_path, monkeypatch):
     service, _ = _service(tmp_path, monkeypatch, _at(20, 30))
+    service._plan.set_blocks([{"start": "09:00", "end": "10:00", "what": "Gym"}])
     assert service.pick_occasion().kind == "evening"
 
 
@@ -283,21 +285,32 @@ def test_the_prompt_asks_for_a_message_not_a_decision(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_no_tasks_means_no_idle_nudge(tmp_path, monkeypatch):
-    """A nudge about work needs work to exist, or the model invents some."""
+def test_declining_to_plan_ends_the_asking(tmp_path, monkeypatch):
+    """"I'm not planning today" has to land somewhere the gate reads."""
     service, _ = _service(tmp_path, monkeypatch, _at(13, 30), tasks=0)
+    service._plan.decline()
     assert service.pick_occasion() is None
 
 
-def test_pending_tasks_restore_the_idle_nudge(tmp_path, monkeypatch):
+def test_a_free_stretch_is_offered_back_not_filled(tmp_path, monkeypatch):
+    """With a plan and nothing scheduled now, the question is his to answer."""
     service, _ = _service(tmp_path, monkeypatch, _at(13, 30), tasks=3)
-    assert service.pick_occasion().kind == "idle"
+    service._plan.set_blocks([{"start": "17:00", "end": "18:00", "what": "Gym"}])
+    assert service.pick_occasion().kind == "open_stretch"
 
 
-def test_an_unreadable_task_list_stays_quiet(tmp_path, monkeypatch):
-    """Offline must not be mistaken for 'nothing to lose by guessing'."""
+def test_a_short_gap_is_not_worth_a_message(tmp_path, monkeypatch):
+    """Twenty minutes before the next block is not usable time."""
+    service, _ = _service(tmp_path, monkeypatch, _at(13, 30), tasks=3)
+    service._plan.set_blocks([{"start": "14:00", "end": "16:00", "what": "SAT prep"}])
+    occasion = service.pick_occasion()
+    assert occasion is None or occasion.kind != "open_stretch"
+
+
+def test_asking_for_a_plan_does_not_need_the_task_list(tmp_path, monkeypatch):
+    """"What's your day look like" is answerable with Google down."""
     service, _ = _service(tmp_path, monkeypatch, _at(13, 30), tasks=-1)
-    assert service.pick_occasion() is None
+    assert service.pick_occasion().kind == "plan_request"
 
 
 def test_an_active_session_counts_as_material(tmp_path, monkeypatch):
@@ -372,3 +385,76 @@ async def test_a_reworded_check_in_is_never_delivered(tmp_path, monkeypatch):
 
     assert await service.tick() == ""
     assert service.ledger.spoken_count() == 1  # still only the original
+
+
+# ---------------------------------------------------------------------------
+# The plan is the schedule — both of these were found by walking a whole
+# simulated day through the gate at ten-minute ticks.
+# ---------------------------------------------------------------------------
+
+
+def test_one_free_stretch_earns_one_message(tmp_path, monkeypatch):
+    """Keyed on when it was noticed, one gap spoke at 12:30, 13:00 and 13:30.
+
+    Three messages about the same free afternoon is precisely the "random
+    messages throughout the day" this whole design exists to stop.
+    """
+    service, clock = _service(tmp_path, monkeypatch, _at(12, 30))
+    service._plan.set_blocks([{"start": "15:00", "end": "16:00", "what": "Math"}])
+
+    spoke = []
+    for _ in range(9):  # 12:30 -> 14:00, the whole gap
+        occasion = service.pick_occasion()
+        if occasion and occasion.kind == "open_stretch":
+            spoke.append(clock.now)
+            service.ledger.record_announced(reminder_mod._gap_key(service._pending_gap))
+            service.ledger.record_said(occasion.kind, "offer", clock.now)
+        clock.advance(10)
+
+    assert len(spoke) == 1
+
+
+def test_the_daily_cap_cannot_swallow_his_own_schedule(tmp_path, monkeypatch):
+    """A day of discretionary offers used to exhaust the budget by five and
+    silently drop the 7 PM block he had actually asked to be reminded about."""
+    service, clock = _service(tmp_path, monkeypatch, _at(18, 55), max_per_day=2)
+    service._plan.set_blocks([{"start": "19:00", "what": "UCLA lab reading"}])
+    for i in range(4):
+        service.ledger.record_said("open_stretch", "offer {}".format(i), clock.now)
+
+    clock.advance(10)
+    assert service.pick_occasion().kind == "block_start"
+
+
+def test_the_cap_still_binds_discretionary_messages(tmp_path, monkeypatch):
+    service, clock = _service(tmp_path, monkeypatch, _at(13, 0), max_per_day=2)
+    service._plan.set_blocks([{"start": "17:00", "end": "18:00", "what": "Gym"}])
+    for i in range(3):
+        service.ledger.record_said("open_stretch", "offer {}".format(i), clock.now)
+
+    clock.advance(30)
+    assert service.pick_occasion() is None
+
+
+def test_back_to_back_blocks_both_get_a_word(tmp_path, monkeypatch):
+    """A 2-4 block followed by a 4-6 block: the end of one and the start of the
+    next are due at the same instant. The full 25-minute floor let the second
+    one's 20-minute grace window close first, so it was never mentioned."""
+    service, clock = _service(tmp_path, monkeypatch, _at(16, 0))
+    service._plan.set_blocks([
+        {"start": "14:00", "end": "16:00", "what": "SAT prep"},
+        {"start": "16:00", "end": "18:00", "what": "Math homework"},
+    ])
+
+    seen = []
+    for _ in range(3):  # 16:00, 16:10, 16:20
+        occasion = service.pick_occasion()
+        if occasion:
+            seen.append((occasion.kind, service._pending_block.what))
+            key = ("end:" if occasion.kind == "block_end" else "start:") + service._pending_block.id
+            service.ledger.record_announced(key)
+            service.ledger.record_said(occasion.kind, "x", clock.now)
+        clock.advance(10)
+
+    assert ("block_end", "SAT prep") in seen
+    assert ("block_start", "Math homework") in seen
