@@ -19,8 +19,14 @@ from pathlib import Path
 
 from loguru import logger
 
-#: Channels that exist but cannot receive an unprompted message.
-UNREACHABLE = {"cli", "system", "heartbeat"}
+#: Channels a message can actually be pushed to. An allowlist, not a denylist:
+#: ``cli``, ``ios``, ``webhook``, ``cron`` and ``heartbeat`` all arrive as
+#: inbound turns, and any of them recorded as the target would silently
+#: displace the one address Argon can reach Niranjan at.
+DELIVERABLE = {"discord", "whatsapp"}
+
+#: Kept for callers that reason about the other direction.
+UNREACHABLE = {"cli", "system", "heartbeat", "ios", "webhook", "cron"}
 
 
 def _path(workspace: Path) -> Path:
@@ -29,7 +35,7 @@ def _path(workspace: Path) -> Path:
 
 def remember(workspace: Path, channel: str, chat_id: str) -> None:
     """Record where Niranjan last spoke from. Never raises."""
-    if channel in UNREACHABLE or not chat_id:
+    if channel not in DELIVERABLE or not chat_id:
         return
     path = _path(workspace)
     try:

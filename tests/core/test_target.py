@@ -17,9 +17,13 @@ def test_a_real_channel_is_remembered(tmp_path):
 
 
 def test_unreachable_channels_are_never_recorded(tmp_path):
-    """Recording "cli" would overwrite the only address Argon can deliver to."""
+    """An iOS or webhook turn must not displace the Discord DM.
+
+    Those arrive as ordinary inbound messages, so a denylist would have to name
+    every one of them — and miss the next one added.
+    """
     target.remember(tmp_path, "discord", "123")
-    for channel in target.UNREACHABLE:
+    for channel in target.UNREACHABLE | {"some_future_channel"}:
         target.remember(tmp_path, channel, "direct")
     assert target.recall(tmp_path, {"discord"}) == ("discord", "123")
 
