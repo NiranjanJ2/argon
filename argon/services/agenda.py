@@ -274,3 +274,119 @@ def describe(event: dict[str, Any]) -> str:
     )
     where = " ({})".format(event["location"]) if event.get("location") else ""
     return "{} — {}{}".format(event["summary"], when, where)
+
+
+#: Classroom is slower and changes less often than the calendar; one fetch per
+#: half hour is plenty for a readout that only really matters once a day.
+SCHOOLWORK_TTL_S = 1800.0
+
+_schoolwork: tuple[float, list[dict[str, Any]]] | None = None
+_schoolwork_lock = threading.Lock()
+
+
+def _fetch_schoolwork(workspace: Path, days_ahead: int) -> list[dict[str, Any]]:
+    from argon.google.classroom import upcoming_assignments
+    from argon.google.service import build_google_service
+    from argon.utils.helpers import when_label
+
+    svc = build_google_service(workspace, "classroom", "v1", "school")
+    assignments, unreadable = upcoming_assignments(svc, days_ahead=days_ahead)
+    if unreadable:
+        logger.warning("Classroom courses unreadable: {}", unreadable)
+
+    out = []
+    for item in assignments:
+        due = item.get("due")
+        try:
+            when = datetime.fromisoformat(str(due)) if due else None
+        except (TypeError, ValueError):
+            when = None
+        out.append({
+            "title": item.get("title") or "(untitled)",
+            "course": item.get("course_name") or "",
+            "due": due,
+            "due_when": when_label(due),
+            "days_left": (when.date() - clock.now().date()).days if when else None,
+        })
+    out.sort(key=lambda a: a["due"] or "9999")
+    return _one_per_thing(out)
+
+
+def _one_per_thing(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse the same assignment posted twice in one course.
+
+    His Math Analysis work appears as both "Math Analysis Summer Assignment"
+    and "Math An Summer Assignment", same course, same 8 PM deadline — one
+    thing his teacher posted twice. Reading both back makes the brief look
+    careless, and the brief is meant to be the message he trusts.
+
+    Titles are compared loosely — "Math An" against "Math Analysis" — which is
+    only safe because the course and the deadline have already had to match
+    exactly. Two genuinely different assignments in one course, due the same
+    minute, sharing most of their title words, is not a real case.
+    """
+    kept: list[dict[str, Any]] = []
+    for item in items:
+        twin = next(
+            (k for k in kept
+             if k["course"] == item["course"] and k["due"] == item["due"]
+             and _similar_title(k["title"], item["title"])),
+            None,
+        )
+        if twin is None:
+            kept.append(item)
+        elif len(item["title"]) > len(twin["title"]):
+            kept[kept.index(twin)] = item  # the fuller title reads better
+    return kept
+
+
+def _similar_title(a: str, b: str) -> bool:
+    import re as _re
+
+    first = {w for w in _re.findall(r"[a-z0-9]+", a.lower())}
+    second = {w for w in _re.findall(r"[a-z0-9]+", b.lower())}
+    if not first or not second:
+        return False
+    return len(first & second) / len(first | second) >= 0.6
+
+
+def schoolwork(
+    workspace: Path, *, days_ahead: int = 10, fresh: bool = False
+) -> list[dict[str, Any]]:
+    """Classroom assignments due soon. Empty on any failure.
+
+    Argon has always been able to read Classroom, and never did so unprompted:
+    the check-in prompt suggested calling a tool and the model mostly did not
+    bother. He gets home at four and that is the moment the homework matters,
+    so the brief fetches it rather than hoping.
+    """
+    global _schoolwork
+    with _schoolwork_lock:
+        cached = _schoolwork
+        if cached and not fresh and (time.monotonic() - cached[0]) < SCHOOLWORK_TTL_S:
+            return cached[1]
+        try:
+            found = _fetch_schoolwork(workspace, days_ahead)
+        except Exception as exc:  # noqa: BLE001 — school auth must not mute the brief
+            logger.warning("Classroom unavailable: {}", exc)
+            return cached[1] if cached else []
+        _schoolwork = (time.monotonic(), found)
+    return found
+
+
+def describe_assignment(item: dict[str, Any]) -> str:
+    """One line for an assignment, with how much runway is left."""
+    days = item.get("days_left")
+    if days is None:
+        runway = ""
+    elif days <= 0:
+        runway = " — due today"
+    elif days == 1:
+        runway = " — due tomorrow"
+    else:
+        runway = " — {} days".format(days)
+    course = " ({})".format(item["course"]) if item.get("course") else ""
+    return "{}{}{}{}".format(
+        item.get("title", "?"), course,
+        " {}".format(item["due_when"]) if item.get("due_when") else "", runway,
+    )

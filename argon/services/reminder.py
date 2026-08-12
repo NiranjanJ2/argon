@@ -101,7 +101,8 @@ OCCASIONS: dict[str, Occasion] = {
         Occasion("upcoming", "something on his calendar starts shortly", 0),
         # The plan drives the day. `plan_request` runs until there is one;
         # after that the blocks he named are the schedule.
-        Occasion("plan_request", "the day has no shape yet", PLAN_ASK_COOLDOWN_MIN),
+        Occasion("plan_request", "he is home from school and the evening is his",
+                 PLAN_ASK_COOLDOWN_MIN),
         Occasion("block_start", "a block of his plan starts about now", 0),
         Occasion("block_end", "a block of his plan just finished", 0),
         Occasion("open_stretch", "he left this stretch of the day unclaimed", 0),
@@ -378,14 +379,28 @@ class ReminderService:
                 "them rather than starting from a blank day.\n"
                 if self._plan.exists() else ""
             )
+            # This is the brief: he is home from school and the evening is the
+            # part of the day the whole tool exists for. Classroom and the
+            # overdue list are fetched and stated here rather than left to a
+            # tool call the model kept skipping.
+            overdue = self._overdue_lines()
             return (
-                "ASK WHAT HIS DAY LOOKS LIKE. One question, plain — what is he "
-                "doing today and roughly when. Whatever he says, record it with "
-                "set_day_plan; those blocks become when you check in, so this "
-                "is the message that makes the rest of the day work.\n"
-                f"{known}{again}"
+                "THIS IS THE AFTER-SCHOOL BRIEF — he is home and the evening is "
+                "his. It is the one message of the day that has to be good.\n\n"
+                "Due from Google Classroom:\n{}\n\n{}"
+                "Lead with what is live: at most two or three things, hardest or "
+                "nearest first. Then ask one plain question — what is he doing "
+                "with the evening. No lists of everything you know, no menu of "
+                "options. Whatever he answers, record it with set_day_plan; "
+                "those blocks become when you check in, so this is the message "
+                "that makes the rest of the day work.\n"
+                "{}{}"
                 "If he says he doesn't want to plan, call set_day_plan with "
                 "planning: false and leave him alone about it.\n\n"
+            ).format(
+                self._schoolwork_lines(),
+                "Past due and still open:\n{}\n\n".format(overdue) if overdue else "",
+                known, again,
             )
 
         if occasion.kind == "block_start" and self._pending_block:
@@ -429,6 +444,35 @@ class ReminderService:
             self._plan.seed_from(agenda.upcoming(self.workspace))
         except Exception:  # noqa: BLE001 — a calendar outage must not mute the gate
             logger.warning("Could not seed the day plan from commitments")
+
+    def _schoolwork_lines(self) -> str:
+        """Classroom assignments due soon, as prompt lines. Never raises."""
+        from argon.services import agenda
+
+        try:
+            work = agenda.schoolwork(self.workspace)
+        except Exception:  # noqa: BLE001 — school auth must not mute the brief
+            return "- (Google Classroom unavailable)"
+        if not work:
+            return "- nothing due from Classroom"
+        return "\n".join("- " + agenda.describe_assignment(a) for a in work[:6])
+
+    def _overdue_lines(self) -> str:
+        """Open tasks that are past due, with how far past. Never raises."""
+        try:
+            from argon.google.tasks_store import GoogleTasksStore
+
+            tasks = GoogleTasksStore(self.workspace).get_all()
+        except Exception:  # noqa: BLE001 — offline must not blank the brief
+            return ""
+        late = [t for t in tasks if (t.get("days_overdue") or 0) > 0]
+        late.sort(key=lambda t: -(t.get("days_overdue") or 0))
+        if not late:
+            return ""
+        return "\n".join(
+            "- {} — {} days past due, still open".format(t["title"], t["days_overdue"])
+            for t in late[:4]
+        )
 
     def _agenda_lines(self) -> str:
         """Today's remaining events and reminders as prompt lines. Never raises."""
