@@ -29,7 +29,8 @@ class SetDayPlanTool(Tool):
             "schedule for when you check in with him, so getting them right is "
             "how you stop bothering him at the wrong times. If he says he does "
             "not want to plan today, call set_day_plan with planning: false "
-            "instead and stop asking."
+            "instead and stop asking. If he says today is the same as "
+            "yesterday, pass same_as instead of retyping the blocks."
         )
 
     @property
@@ -67,6 +68,14 @@ class SetDayPlanTool(Tool):
                     "type": "boolean",
                     "description": "false if he does not want to plan today.",
                 },
+                "same_as": {
+                    "type": "string",
+                    "description": (
+                        "Copy a previous day's plan instead of listing blocks. "
+                        "'yesterday' for the last day he planned, or YYYY-MM-DD. "
+                        "Use this when he says today is the same as yesterday."
+                    ),
+                },
             },
             "required": [],
         }
@@ -75,6 +84,20 @@ class SetDayPlanTool(Tool):
         if kwargs.get("planning") is False:
             self._plan.decline()
             return "No plan today — I won't ask again."
+
+        if same_as := str(kwargs.get("same_as") or "").strip():
+            day = "" if same_as.lower() in ("yesterday", "last", "") else same_as
+            copied = self._plan.copy_from(day)
+            if not copied:
+                return (
+                    "Nothing recorded for that day, so there is no plan to copy. "
+                    "Ask him what today looks like."
+                )
+            lines = "; ".join(
+                "{}{} {}".format(b.start, "-" + b.end if b.end else "", b.what)
+                for b in copied
+            )
+            return f"Plan set from {same_as}: {lines}"
 
         blocks = kwargs.get("blocks")
         if not blocks:

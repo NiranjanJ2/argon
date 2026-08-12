@@ -396,10 +396,11 @@ class ReminderService:
             overdue = self._overdue_lines()
             pressure = self._pressure_lines()
             habits = self._habits_line()
+            patterns = self._pattern_lines()
             return (
                 "THIS IS THE AFTER-SCHOOL BRIEF — he is home and the evening is "
                 "his. It is the one message of the day that has to be good.\n\n"
-                "Due from Google Classroom:\n{}\n\n{}{}{}"
+                "Due from Google Classroom:\n{}\n\n{}{}{}{}"
                 "Lead with what is live: at most two or three things, hardest or "
                 "nearest first. Then ask one plain question — what is he doing "
                 "with the evening. No lists of everything you know, no menu of "
@@ -413,6 +414,7 @@ class ReminderService:
                 self._schoolwork_lines(),
                 "Past due and still open:\n{}\n\n".format(overdue) if overdue else "",
                 "Tight on time:\n{}\n\n".format(pressure) if pressure else "",
+                patterns,
                 habits,
                 known, again,
             )
@@ -458,6 +460,29 @@ class ReminderService:
             self._plan.seed_from(agenda.upcoming(self.workspace))
         except Exception:  # noqa: BLE001 — a calendar outage must not mute the gate
             logger.warning("Could not seed the day plan from commitments")
+
+    def _pattern_lines(self) -> str:
+        """Shapes his weeks keep taking, learned from plans he actually made.
+
+        This is what lets "I have robotics" be a complete sentence: he names
+        the thing, and his own history supplies the time. Stated as observation
+        rather than instruction — a wrong guess about his schedule is worse
+        than no guess, because he has to notice it and correct it.
+        """
+        try:
+            from argon.productivity.history import PlanHistory
+
+            found = PlanHistory(self.workspace).summary()
+        except Exception:  # noqa: BLE001 — never let this cost the brief
+            return ""
+        if not found:
+            return ""
+        return (
+            "What his weeks usually look like, from plans he has made before:\n"
+            "{}\n"
+            "If he names one of these without a time, use the time it usually "
+            "happens rather than asking — but say which you assumed.\n\n"
+        ).format(found)
 
     def _habits_line(self) -> str:
         """What his own record says, when there is enough of it to mean anything.

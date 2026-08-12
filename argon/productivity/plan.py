@@ -122,6 +122,18 @@ class DayPlan:
 
     def _save(self, data: dict[str, Any]) -> None:
         self._path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        # A dated copy, because this file is overwritten the moment the day
+        # rolls over. Without it "same as yesterday" has nothing to copy and no
+        # pattern can ever be learned — every day started from zero because
+        # every previous day had been thrown away.
+        try:
+            from argon.productivity.history import PlanHistory
+
+            PlanHistory(self._path.parent.parent).record(
+                data.get("date") or clock.today_key(), data.get("blocks") or []
+            )
+        except Exception:  # noqa: BLE001 — archiving must never break planning
+            pass
 
     # -- reading -----------------------------------------------------------
 
@@ -232,6 +244,20 @@ class DayPlan:
         if not data.get("blocks"):
             return False
         return not data.get("seeded") or bool(data.get("stated"))
+
+    def copy_from(self, day: str = "") -> list[Block]:
+        """Adopt another day's plan as today's. "Same as yesterday."
+
+        Statuses are not carried over — he is doing it again, not remembering
+        having done it.
+        """
+        from argon.productivity.history import PlanHistory, normalise_blocks
+
+        history = PlanHistory(self._path.parent.parent)
+        blocks = history.on(day) if day else history.most_recent()[1]
+        if not blocks:
+            return []
+        return self.set_blocks(normalise_blocks(blocks))
 
     def mark(self, block_id: str, status: str) -> bool:
         data = self._load()

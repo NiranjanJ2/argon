@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +40,13 @@ KEEP_DAYS = 45
 
 #: Sentinel for a fact with no recorded learn date.
 UNDATED = "0000-00-00"
+
+#: How many days of "how it went" ride along in every prompt.
+DIGEST_DAYS = 3
+
+#: How many self-critiques survive. A model invited to find fault every night
+#: will find some every night; an unbounded pile of them is its own problem.
+MAX_LESSONS = 6
 
 #: Tool calls worth one journal line, and how to phrase it. Read-only tools are
 #: absent on purpose — a day page full of "checked the status" is noise, and the
@@ -111,6 +118,20 @@ class Fact:
 
     def expired(self, today: str) -> bool:
         return bool(not self.standing and self.until and self.until < today)
+
+
+def _relative_day(day: str) -> str:
+    """"yesterday", "Tuesday", "3 days ago" — however a person would say it."""
+    from argon.core.threads import ago
+
+    try:
+        when = datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        return day
+    label = ago(when.isoformat())
+    if label in ("today", "yesterday"):
+        return label
+    return f"{when.strftime('%A')} ({label})"
 
 
 def parse_facts(text: str) -> list[Fact]:
@@ -295,10 +316,51 @@ class Journal:
                     f"{detail}"
                 )
 
+        recent_days = self.recent_digests()
+        if recent_days:
+            parts.append(
+                "## The last few days\n\n"
+                "So you are not starting from nothing.\n\n"
+                f"{recent_days}"
+            )
+
+        lessons = self.lessons()
+        if lessons:
+            parts.append(
+                "## What you got wrong before\n\n"
+                "Your own notes, from reviewing those days. Do not repeat "
+                "them.\n\n"
+                f"{lessons}"
+            )
+
         today = self.read_day()
         if today:
             parts.append(f"## Today ({clock.today_key()})\n\n{today}")
         return "\n\n".join(parts)
+
+    def recent_digests(self, *, days: int = DIGEST_DAYS) -> str:
+        """How the last few days went, most recent first.
+
+        Consolidation collapses a day into facts, which keeps what is durable
+        and loses what it felt like. A couple of sentences per day is cheap and
+        is the difference between picking up a conversation and starting one.
+        """
+        path = self.root / "digests"
+        if not path.is_dir():
+            return ""
+        out = []
+        for file in sorted(path.glob("*.md"), reverse=True)[:days]:
+            text = file.read_text(encoding="utf-8").strip()
+            if text:
+                out.append(f"**{_relative_day(file.stem)}** — {text}")
+        return "\n\n".join(out)
+
+    def lessons(self) -> str:
+        path = self.root / "lessons.md"
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
 
     # -- housekeeping ------------------------------------------------------
 
@@ -384,6 +446,49 @@ _CONSOLIDATE_TOOL = [
                         "items": {"type": "string"},
                         "description": "Existing facts that are now wrong or finished. Quote them exactly.",
                     },
+                    "threads": {
+                        "type": "array",
+                        "description": (
+                            "Ongoing things today touched — a project, a class, "
+                            "a person, a commitment that will come up again. "
+                            "One entry each, saying what happened today."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "What he calls it."},
+                                "entry": {"type": "string", "description": "What happened today, one line."},
+                                "summary": {"type": "string", "description": "One sentence on what it is. First time only."},
+                                "aliases": {
+                                    "type": "array", "items": {"type": "string"},
+                                    "description": "Other names he uses for it.",
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["active", "paused", "done", "dropped"],
+                                },
+                            },
+                            "required": ["name"],
+                        },
+                    },
+                    "digest": {
+                        "type": "string",
+                        "description": (
+                            "Two or three sentences on how the day actually "
+                            "went, in plain past tense. This is what Argon "
+                            "reads back for the next few days."
+                        ),
+                    },
+                    "lesson": {
+                        "type": "string",
+                        "description": (
+                            "One thing Argon itself should do differently, ONLY "
+                            "if today shows a clear mistake on its part — a "
+                            "message at a bad moment, something it asked twice, "
+                            "something it should have noticed. Omit on a normal "
+                            "day; most days there is nothing."
+                        ),
+                    },
                 },
                 "required": ["keep"],
             },
@@ -418,7 +523,26 @@ stops mattering. "He is starting math homework at 3pm today" is one-off and
 should expire tonight, not in a week.
 
 Drop an existing fact only when today's entries show it is finished or wrong.
-Keeping nothing and dropping nothing is a perfectly good answer."""
+Keeping nothing and dropping nothing is a perfectly good answer.
+
+**threads** — anything ongoing that today touched: a project, a class, a
+person, a commitment that will come up again. One entry each saying what
+happened today, in past tense. Include the ones that already exist; adding to
+them is the point. Give a summary and aliases the first time you meet
+something, because the aliases are how you will recognise it when he mentions
+it in three weeks. A one-off errand is not a thread; something he will still be
+doing next month is.
+
+**digest** — two or three sentences on how the day actually went. Written for
+Argon to read back over the next few days, so it can pick up a conversation
+rather than start one. Plain past tense, no advice.
+
+**lesson** — one thing *Argon itself* should do differently, and only when the
+day shows a clear mistake on its part: a message at a bad moment, a question it
+had already asked, something it should have noticed and did not. Judge Argon's
+conduct, not his. Most days there is nothing and you should leave it out — an
+assistant that finds fault with itself every single night is not learning, it
+is performing."""
 
 
 async def consolidate_day(
@@ -448,6 +572,9 @@ async def consolidate_day(
         return 0, 0
 
     args = response.tool_calls[0].arguments or {}
+    _absorb_threads(journal, args.get("threads") or [], day)
+    _write_digest(journal, day, args.get("digest") or "")
+    _write_lesson(journal, day, args.get("lesson") or "")
     keep = args.get("keep") or []
     drop = {str(d).strip().lower() for d in (args.get("drop") or [])}
 
@@ -468,6 +595,66 @@ async def consolidate_day(
     dropped = len(existing) - len(surviving)
     logger.info("Consolidated {}: +{} facts, -{} stale", day, len(added), dropped)
     return len(added), dropped
+
+
+def _absorb_threads(journal: "Journal", entries: list[Any], day: str) -> None:
+    """Turn the day's ongoing things into threads, without being asked.
+
+    Threads only filled up if the model chose to call `track`, which is a
+    prompt-level instruction it can ignore — the same weakness that left
+    `remember` unused for months. The nightly pass already reads the whole day;
+    it may as well do this, so continuity does not depend on good behaviour in
+    the moment.
+    """
+    from argon.core.threads import Threads
+
+    store = Threads(journal.root.parent)
+    for raw in entries:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            store.note(
+                name,
+                entry=str(raw.get("entry") or ""),
+                summary=raw.get("summary"),
+                status=raw.get("status"),
+                aliases=[str(a) for a in (raw.get("aliases") or [])],
+            )
+        except Exception:  # noqa: BLE001 — one bad entry must not lose the rest
+            logger.warning("Could not record thread {!r} from {}", name, day)
+
+
+def _write_digest(journal: "Journal", day: str, text: str) -> None:
+    """A few sentences on how the day went, for the next few days to read."""
+    if not text.strip():
+        return
+    path = journal.root / "digests"
+    path.mkdir(parents=True, exist_ok=True)
+    (path / f"{day}.md").write_text(text.strip() + "\n", encoding="utf-8")
+
+
+def _write_lesson(journal: "Journal", day: str, text: str) -> None:
+    """One thing Argon should do differently, when today showed a real mistake.
+
+    Bounded on purpose. A model invited to critique itself every night will
+    produce something every night, and a growing pile of self-criticism in the
+    prompt is its own failure mode — so only the most recent few survive, each
+    dated, and the prompt asks for nothing on an ordinary day.
+    """
+    text = text.strip()
+    if not text:
+        return
+    path = journal.root / "lessons.md"
+    existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    line = f"- {day} — {text}"
+    if line in existing:
+        return
+    kept = [ln for ln in existing if ln.strip().startswith("-")][-(MAX_LESSONS - 1):]
+    path.write_text("\n".join([*kept, line]) + "\n", encoding="utf-8")
+    logger.info("Lesson from {}: {}", day, text[:80])
 
 
 def _valid_day(value: Any) -> bool:
