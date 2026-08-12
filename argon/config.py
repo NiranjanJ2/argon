@@ -94,11 +94,19 @@ class ApiConfig(Base):
 
 
 class HeartbeatConfig(Base):
+    """Background turns: the heartbeat and every check-in.
+
+    ``model`` was declared twice here, so the intended "run background chatter
+    on the cheap 20b" default was silently dead — the second declaration won and
+    background turns have always used the interactive model. Leaving it that
+    way on purpose: the 4 PM brief is the most important message Argon sends,
+    and it is a background turn. Set this only to deliberately go cheaper.
+    """
+
     enabled: bool = True
-    #: Background chatter runs small and cheap; interactive chat gets the 120b.
-    model: str | None = "openai/gpt-oss-20b"
     interval_s: int = 30 * 60
     keep_recent_messages: int = 8
+    #: None means "whatever agents.defaults says".
     model: str | None = None
     provider: str | None = None
 

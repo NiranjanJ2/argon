@@ -1,7 +1,39 @@
 # Argon
 
 Niranjan's personal assistant. Runs as a single service on the home server and
-talks over Discord, WhatsApp, and an HTTP API for the iOS app.
+talks over Discord, WhatsApp, and an HTTP API for the iOS app and the desktop
+readouts.
+
+## Quickstart
+
+```sh
+git clone https://github.com/NiranjanJ2/argon && cd argon
+bash setup.sh
+```
+
+That installs into a venv, asks for an LLM key and a Discord bot token,
+generates the API token the widgets and the phone authenticate with, seeds the
+workspace, and offers to install the systemd unit. Re-runnable — it only fills
+in what is missing.
+
+Google is the one part it cannot do for you. Create a **Desktop** OAuth client
+at [console.cloud.google.com](https://console.cloud.google.com) with Calendar,
+Tasks, Classroom, Drive and Gmail enabled, save it to
+`~/.argon/google/client_secrets.json`, then:
+
+```sh
+argon google-auth work      # Tasks + Calendar — the one Argon needs most
+argon google-auth school    # Classroom
+argon google-auth personal  # optional
+argon doctor                # what is actually working
+```
+
+`argon doctor` is the answer to "is it set up?" — it checks every integration
+and says what to run for each thing that is not.
+
+To configure without the shell script, `argon init` does the config half on its
+own, and takes its answers from `ARGON_PROVIDER_KEY`, `ARGON_DISCORD_TOKEN`,
+`ARGON_DISCORD_USER` and `ARGON_TIMEZONE` when given `--non-interactive`.
 
 ## Layout
 

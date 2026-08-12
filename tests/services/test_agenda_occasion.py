@@ -27,12 +27,30 @@ def _event(minutes_out: float, *, id: str = "evt-1", summary: str = "All Project
     }
 
 
+#: Pinned so the suite means the same thing at 5 PM and at 11 PM. Run for real,
+#: these failed after 23:00 because quiet hours silence every occasion — a
+#: result that depends on when you run it is not a result.
+PINNED_HOUR = 17
+
+
 @pytest.fixture
-def service(tmp_path):
+def service(tmp_path, monkeypatch):
     async def _never_called(_prompt):  # pragma: no cover - the gate is what is under test
         raise AssertionError("the model must not be woken by these tests")
 
-    return ReminderService(tmp_path, "America/Los_Angeles", on_check_in=_never_called)
+    from argon.productivity import state as state_mod
+    from argon.services import reminder as reminder_mod
+
+    now = clock.now().replace(hour=PINNED_HOUR, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(clock, "now", lambda: now)
+    monkeypatch.setattr(agenda.clock, "now", lambda: now)
+    monkeypatch.setattr(reminder_mod.clock, "now", lambda: now)
+    monkeypatch.setattr(state_mod, "_now", lambda: now)
+
+    svc = ReminderService(tmp_path, "America/Los_Angeles", on_check_in=_never_called,
+                          unprompted_from_hour=16)
+    monkeypatch.setattr(svc, "_now", lambda: now)
+    return svc
 
 
 @pytest.fixture

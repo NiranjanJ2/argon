@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 from pathlib import Path
 
@@ -106,10 +107,18 @@ def gateway(
             return asyncio.run_coroutine_threadsafe(turn(), loop).result(timeout=timeout_s)
 
         register_agent_handler(agent_turn)
-        start_api_server(cfg)
-        console.print(f"[green]OK[/green] API on {cfg.api.host}:{cfg.api.port}")
-        if not cfg.api.token:
-            console.print("[yellow]     api.token unset — /v1 endpoints refuse all requests[/yellow]")
+        try:
+            start_api_server(cfg)
+        except OSError as exc:
+            # Everything else still works without it — Discord, cron, check-ins
+            # — so this is a warning, not a reason to refuse to start. But it
+            # must not be reported as OK, which is what it did before.
+            console.print(f"[red]FAIL[/red] API on {cfg.api.host}:{cfg.api.port} — {exc}")
+            console.print("[yellow]     the iOS app and desktop widgets cannot reach Argon[/yellow]")
+        else:
+            console.print(f"[green]OK[/green] API on {cfg.api.host}:{cfg.api.port}")
+            if not cfg.api.token:
+                console.print("[yellow]     api.token unset — /v1 endpoints refuse all requests[/yellow]")
 
     if rt.channels.enabled_channels:
         console.print(f"[green]OK[/green] Channels: {', '.join(rt.channels.enabled_channels)}")
@@ -222,6 +231,129 @@ def google_auth(
 # ---------------------------------------------------------------------------
 # doctor
 # ---------------------------------------------------------------------------
+
+
+@app.command()
+def init(
+    non_interactive: bool = typer.Option(
+        False, "--non-interactive", "-y",
+        help="Take every answer from the environment; never prompt.",
+    ),
+) -> None:
+    """Create a working config. Safe to re-run — it only fills gaps.
+
+    Setting Argon up used to mean hand-writing config.json against a schema
+    documented nowhere, and the one field nothing tells you about — the API
+    token — is the one whose absence makes every /v1 endpoint refuse requests
+    while the service still looks healthy.
+    """
+    import json
+    import secrets
+
+    from argon.paths import argon_home
+    from argon.utils.helpers import sync_workspace_templates
+
+    ws = argon_home()
+    ws.mkdir(parents=True, exist_ok=True)
+    path = ws / "config.json"
+
+    try:
+        cfg = json.loads(path.read_text()) if path.exists() else {}
+    except json.JSONDecodeError:
+        console.print(f"[red]{path} is not valid JSON — move it aside and re-run.[/red]")
+        raise typer.Exit(1)
+
+    fresh = not cfg
+    console.print(f"[bold]{'Setting up' if fresh else 'Updating'} Argon[/bold]  {ws}\n")
+
+    def ask(prompt: str, env: str, *, secret: bool = False, default: str = "") -> str:
+        """Environment first, then the existing config, then the human."""
+        if value := os.environ.get(env, "").strip():
+            return value
+        if non_interactive:
+            return default
+        shown = f" [dim]({default})[/dim]" if default else ""
+        got = typer.prompt(
+            f"{prompt}{shown}", default=default, hide_input=secret,
+            show_default=False,
+        )
+        return (got or default).strip()
+
+    # -- the model ---------------------------------------------------------
+    agents = cfg.setdefault("agents", {}).setdefault("defaults", {})
+    provider = agents.get("provider") or ask(
+        "LLM provider", "ARGON_PROVIDER", default="groq")
+    agents["provider"] = provider
+
+    providers = cfg.setdefault("providers", {}).setdefault(provider, {})
+    if not providers.get("apiKey"):
+        key = ask(f"{provider} API key", "ARGON_PROVIDER_KEY", secret=True)
+        if key:
+            providers["apiKey"] = key
+
+    if not agents.get("timezone"):
+        agents["timezone"] = ask(
+            "Timezone", "ARGON_TIMEZONE", default="America/Los_Angeles")
+
+    # -- how he talks to it ------------------------------------------------
+    discord = cfg.setdefault("channels", {}).setdefault("discord", {})
+    if not discord.get("token"):
+        token = ask("Discord bot token [dim](blank to skip)[/dim]",
+                    "ARGON_DISCORD_TOKEN", secret=True)
+        if token:
+            discord["token"] = token
+            discord["enabled"] = True
+            user = ask("Your Discord user ID", "ARGON_DISCORD_USER")
+            if user:
+                discord["allowFrom"] = [user]
+    discord.setdefault("enabled", bool(discord.get("token")))
+
+    # -- the API the widgets and the phone use -----------------------------
+    # Generated, never asked for: a token someone chooses is a token someone
+    # can guess, and this one fronts an endpoint that can run agent turns.
+    api = cfg.setdefault("api", {})
+    minted = False
+    if not api.get("token"):
+        api["token"] = secrets.token_urlsafe(32)
+        minted = True
+
+    path.write_text(json.dumps(cfg, indent=2) + "\n")
+    path.chmod(0o600)  # it holds every credential Argon has
+
+    seeded = sync_workspace_templates(ws, silent=True)
+
+    console.print(f"[green]✓[/green] {path}")
+    if minted:
+        console.print("[green]✓[/green] API token generated for the widgets and iOS app")
+    if seeded:
+        console.print(f"[green]✓[/green] seeded {', '.join(seeded)}")
+
+    # -- what is still missing ---------------------------------------------
+    todo: list[str] = []
+    if not providers.get("apiKey"):
+        todo.append(f"Add your {provider} API key to {path}")
+    if not discord.get("token"):
+        todo.append("Add a Discord bot token, or talk to it with `argon chat`")
+
+    secrets_file = ws / "google" / "client_secrets.json"
+    if not secrets_file.exists():
+        todo.append(
+            "Google: create a Desktop OAuth client at console.cloud.google.com\n"
+            "     (enable Calendar, Tasks, Classroom, Drive, Gmail), then save it as\n"
+            f"     {secrets_file}"
+        )
+    else:
+        from argon.google.auth import GoogleAuth
+
+        for account, state in sorted(GoogleAuth(ws).status().items()):
+            if state != "ok":
+                todo.append(f"argon google-auth {account}")
+
+    if todo:
+        console.print("\n[bold]Still to do[/bold]")
+        for i, item in enumerate(todo, 1):
+            console.print(f"  {i}. {item}")
+    console.print("\nThen: [bold]argon doctor[/bold] to see what is actually working.")
 
 
 @app.command()

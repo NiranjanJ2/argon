@@ -12,6 +12,7 @@ import functools
 import hmac
 import json
 import re
+import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -539,11 +540,33 @@ def start_api_server(config: Config) -> None:
         logger.warning("api.token is unset — every /v1 request will be rejected.")
 
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
-    threading.Thread(
-        target=lambda: app.run(
-            host=config.api.host, port=config.api.port, debug=False, use_reloader=False
-        ),
-        daemon=True,
-        name="argon-api",
-    ).start()
+
+    # Bind here rather than inside the thread, so a port that is already taken
+    # is an error the caller sees. It used to log "HTTP API on ..." and print
+    # "OK API on ..." while the thread died of "Address already in use" a line
+    # later — on a fresh machine that reads as a working API.
+    try:
+        from werkzeug.serving import make_server
+
+        # Werkzeug prints to stderr and calls sys.exit() on a bind failure
+        # rather than raising, which would take the whole gateway down over a
+        # port conflict — Discord, cron and check-ins do not need this socket.
+        # Probe first so the error is ours to handle.
+        probe = socket.socket()
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((config.api.host, config.api.port))
+        finally:
+            probe.close()
+
+        server = make_server(config.api.host, config.api.port, app, threaded=True)
+    except (OSError, SystemExit) as exc:
+        logger.error(
+            "HTTP API could not bind {}:{} — {}. The iOS app and the desktop "
+            "widgets will not be able to reach Argon.",
+            config.api.host, config.api.port, exc,
+        )
+        raise
+
+    threading.Thread(target=server.serve_forever, daemon=True, name="argon-api").start()
     logger.info("HTTP API on http://{}:{}", config.api.host, config.api.port)
