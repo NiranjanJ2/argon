@@ -271,11 +271,10 @@ def status() -> Any:
     data["ios"] = ios_mode.snapshot()
     # Today's remaining events, so the readouts can show what he has to leave
     # for. Cached in the agenda module; a calendar outage yields [].
-    from argon.services import agenda
-
     # The plan drives when Argon speaks, so the readouts have to show it or
     # they are describing a different day from the one Argon is running.
     from argon.productivity.plan import DayPlan
+    from argon.services import agenda
 
     plan = DayPlan(ws)
     data["plan"] = {

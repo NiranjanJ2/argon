@@ -25,6 +25,10 @@ argon/
 Code and state are separate. The checkout holds no data; everything mutable
 lives in `~/.argon` (override with `ARGON_HOME`).
 
+Two files share a name across that boundary. `AGENTS.md` in the checkout is
+guidance for people changing this codebase; `~/.argon/AGENTS.md` is the
+operating prompt Argon itself runs on, seeded from `argon/prompts/`.
+
 ```
 ~/.argon/
   config.json

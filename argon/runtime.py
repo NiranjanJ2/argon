@@ -15,10 +15,10 @@ from loguru import logger
 from argon import clock
 from argon.channels.manager import ChannelManager
 from argon.config import Config
+from argon.core import target
 from argon.core.bus import MessageBus, OutboundMessage
 from argon.core.loop import AgentLoop
 from argon.core.session import SessionManager
-from argon.core import target
 from argon.paths import get_cron_store
 from argon.providers.base import GenerationSettings, LLMProvider
 from argon.providers.openai_compat import OpenAICompatProvider

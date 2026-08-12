@@ -34,10 +34,6 @@ def ensure_dir(path: Path) -> Path:
     return path
 
 
-def get_data_dir() -> Path:
-    return ensure_dir(argon_home())
-
-
 def get_config_path() -> Path:
     return argon_home() / "config.json"
 
@@ -53,10 +49,6 @@ def get_media_dir(channel: str | None = None) -> Path:
 
 def get_cron_store() -> Path:
     return get_runtime_subdir("cron") / "jobs.json"
-
-
-def get_cli_history_path() -> Path:
-    return get_runtime_subdir("history") / "cli_history"
 
 
 def get_bridge_auth_dir() -> Path:

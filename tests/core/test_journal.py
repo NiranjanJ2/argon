@@ -240,8 +240,8 @@ def test_the_legacy_history_dump_is_archived_not_deleted(tmp_path):
 def test_days_are_consolidated_oldest_first(tmp_path, monkeypatch):
     """It took the newest pending day and marked it done, so an older one was
     stepped over and could never be reached again."""
-    from argon.core.journal import Journal
     from argon.core import journal as journal_mod
+    from argon.core.journal import Journal
 
     monkeypatch.setattr(journal_mod.clock, "today_key", lambda *a, **k: "2026-08-11")
     j = Journal(tmp_path)

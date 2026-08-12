@@ -8,13 +8,14 @@ the model mostly skipped it. The brief fetches it now instead of hoping.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from argon.productivity import state as state_mod
-from argon.services import agenda, reminder as reminder_mod
+from argon.services import agenda
+from argon.services import reminder as reminder_mod
 from argon.services.agenda import _one_per_thing, describe_assignment
 from argon.services.reminder import OCCASIONS, ReminderService
 

@@ -11,8 +11,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import pytest
-
 from argon.productivity import state as state_mod
 from argon.services import reminder as reminder_mod
 from argon.services.reminder import (

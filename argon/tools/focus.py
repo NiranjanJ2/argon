@@ -13,7 +13,6 @@ from argon.paths import get_runtime_subdir
 from argon.productivity.state import DailyState
 from argon.tools.base import Tool
 
-
 #: Outside these hours a block needs explicit confirmation.
 NIGHT_START_HOUR = 23
 NIGHT_END_HOUR = 7

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import weakref
 from datetime import datetime
 from pathlib import Path
@@ -22,32 +21,12 @@ if TYPE_CHECKING:
 #: 8MB of repeated API errors once; this is the ceiling that stops a repeat.
 HISTORY_MAX_BYTES = 2_000_000
 
-
-def _ensure_text(value: Any) -> str:
-    """Normalize tool-call payload values to text for file storage."""
-    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-
-
-def _normalize_save_memory_args(args: Any) -> dict[str, Any] | None:
-    """Normalize provider tool-call arguments to the expected dict shape."""
-    if isinstance(args, str):
-        args = json.loads(args)
-    if isinstance(args, list):
-        return args[0] if args and isinstance(args[0], dict) else None
-    return args if isinstance(args, dict) else None
-
 _TOOL_CHOICE_ERROR_MARKERS = (
     "tool_choice",
     "toolchoice",
     "does not support",
     'should be ["none", "auto"]',
 )
-
-
-def _is_tool_choice_unsupported(content: str | None) -> bool:
-    """Detect provider errors caused by forced tool_choice being unsupported."""
-    text = (content or "").lower()
-    return any(m in text for m in _TOOL_CHOICE_ERROR_MARKERS)
 
 
 class MemoryStore:

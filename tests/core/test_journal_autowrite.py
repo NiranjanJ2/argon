@@ -50,7 +50,6 @@ class TestDescribersMatchRealSchemas:
         import inspect
 
         from argon.tools.base import Tool
-        from argon.core.journal import _TOOL_NOTES
 
         found: dict[str, set[str]] = {}
         for mod in ("tasks", "status", "focus", "quiet", "memory", "bell", "cron"):

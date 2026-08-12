@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from argon.config import Config
+from argon.core import target
 from argon.core.bus import InboundMessage, MessageBus, OutboundMessage
 from argon.core.commands import CommandContext, CommandRouter, register_builtin_commands
 from argon.core.context import ContextBuilder
@@ -21,7 +22,6 @@ from argon.core.memory import MemoryConsolidator
 from argon.core.runner import AgentRunner, AgentRunSpec
 from argon.core.session import Session, SessionManager
 from argon.core.skills import BUILTIN_SKILLS_DIR
-from argon.core import target
 from argon.providers.base import LLMProvider
 from argon.tools.cron import CronTool
 from argon.tools.fs import ReadFileTool

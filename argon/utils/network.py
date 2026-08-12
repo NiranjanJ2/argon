@@ -92,13 +92,3 @@ def validate_resolved_url(url: str) -> tuple[bool, str]:
                 return False, f"Redirect target {hostname} resolves to private address {addr}"
 
     return True, ""
-
-
-def contains_internal_url(command: str) -> bool:
-    """Return True if the command string contains a URL targeting an internal/private address."""
-    for m in _URL_RE.finditer(command):
-        url = m.group(0)
-        ok, _ = validate_url_target(url)
-        if not ok:
-            return True
-    return False
