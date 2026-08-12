@@ -37,6 +37,8 @@ def classroom_due(coursework: dict) -> datetime | None:
 
 
 def _fmt_coursework(cw: dict, *, full_description: bool = False) -> dict:
+    from argon.utils.helpers import when_label
+
     desc = cw.get("description") or None
     due = classroom_due(cw)
     return {
@@ -45,6 +47,7 @@ def _fmt_coursework(cw: dict, *, full_description: bool = False) -> dict:
         "title": cw.get("title"),
         "description": desc if full_description or not desc else desc[:400],
         "due": due.isoformat() if due else None,
+        "due_when": when_label(due),
         "type": cw.get("workType"),
         "max_points": cw.get("maxPoints"),
         "state": cw.get("state"),

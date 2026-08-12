@@ -248,7 +248,14 @@ def build_runtime(config: Config) -> Runtime:
         # — on_cron_job guards this; this path did not.
         tool = heartbeat_agent.tools.get("message")
         if isinstance(tool, MessageTool) and tool.sent_in_turn:
-            return response or "(sent)"
+            # The text itself, never a placeholder. "(sent)" went into the
+            # ledger as what was said, so the next check-in was shown "(sent)"
+            # as its own history and could not tell it had already asked —
+            # nine near-identical "what's your plan today?" messages in a day.
+            # It also defeated the reword filter, which then suppressed the
+            # *ledger entry* while the message had already gone out, so the
+            # daily cap under-counted and never engaged.
+            return tool.last_sent or response or "(sent)"
 
         # Filter before delivering, not after: a model that answers the
         # decision rather than writing a message ("No.") would otherwise be

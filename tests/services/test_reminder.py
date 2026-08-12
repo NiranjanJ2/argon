@@ -465,9 +465,13 @@ def test_the_gate_does_not_ask_about_a_day_he_already_planned(tmp_path, monkeypa
     from argon.services import agenda
 
     service, clock = _service(tmp_path, monkeypatch, _at(12, 30))
+    # Reminders he scheduled himself — "I told you I'll start the math homework
+    # at 3" is an answer, even though he never used the word plan.
     monkeypatch.setattr(agenda, "upcoming", lambda ws: [
-        {"summary": "Start Math homework", "start": _at(15), "end": None},
-        {"summary": "Start UCLA work", "start": _at(19), "end": None},
+        {"summary": "Start Math homework", "start": _at(15), "end": None,
+         "kind": "reminder"},
+        {"summary": "Start UCLA work", "start": _at(19), "end": None,
+         "kind": "reminder"},
     ])
 
     occasion = service.pick_occasion()

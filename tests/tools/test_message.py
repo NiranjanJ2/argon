@@ -139,3 +139,53 @@ async def test_a_send_marks_the_turn_and_start_turn_resets_it():
 def test_the_schema_offers_the_model_no_destination():
     props = MessageTool().parameters["properties"]
     assert set(props) == {"content", "media"}
+
+
+class TestWhatWasActuallySent:
+    """The ledger needs the text, not a placeholder.
+
+    ``on_check_in`` recorded "(sent)" whenever the model delivered through this
+    tool, so the next check-in was shown "(sent)" as its own history and could
+    not tell it had already asked. Nine near-identical "what's your plan?"
+    messages in one day followed from that single string.
+    """
+
+    def test_the_delivered_text_is_kept(self):
+        import asyncio
+
+        sent = []
+
+        async def capture(msg):
+            sent.append(msg)
+
+        tool = MessageTool(capture, "discord", "123")
+        tool.start_turn()
+        asyncio.run(tool.execute(content="What's your plan for today?"))
+
+        assert tool.last_sent == "What's your plan for today?"
+        assert sent[0].content == "What's your plan for today?"
+
+    def test_a_new_turn_clears_it(self):
+        import asyncio
+
+        async def capture(_msg):
+            pass
+
+        tool = MessageTool(capture, "discord", "123")
+        tool.start_turn()
+        asyncio.run(tool.execute(content="first"))
+        tool.start_turn()
+
+        assert tool.last_sent == ""
+
+    def test_a_failed_send_records_nothing(self):
+        import asyncio
+
+        async def boom(_msg):
+            raise RuntimeError("discord down")
+
+        tool = MessageTool(boom, "discord", "123")
+        tool.start_turn()
+        asyncio.run(tool.execute(content="never arrived"))
+
+        assert tool.last_sent == "" and tool.sent_in_turn is False

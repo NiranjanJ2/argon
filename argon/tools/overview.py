@@ -89,10 +89,14 @@ class GetDailyOverviewTool(Tool):
             orderBy="startTime",
             maxResults=20,
         ).execute().get("items", [])
+        from argon.utils.helpers import when_label
+
         return [
             {
                 "summary": e.get("summary"),
                 "start": e.get("start"),
+                "when": when_label((e.get("start") or {}).get("dateTime")
+                                   or (e.get("start") or {}).get("date")),
                 "end": e.get("end"),
                 "location": e.get("location"),
             }
@@ -112,7 +116,10 @@ class GetDailyOverviewTool(Tool):
         assignments, unreadable = upcoming_assignments(svc, days_ahead=7)
         if unreadable:
             logger.warning(f"get_daily_overview: unreadable courses {unreadable}")
+        from argon.utils.helpers import when_label
+
         return [
-            {"title": a["title"], "course": a.get("course_name"), "due": a["due"]}
+            {"title": a["title"], "course": a.get("course_name"), "due": a["due"],
+             "due_when": when_label(a["due"])}
             for a in assignments
         ]

@@ -29,6 +29,7 @@ class MessageTool(Tool):
         self._chat_id = default_chat_id
         self._message_id = default_message_id
         self._sent_in_turn: bool = False
+        self._last_sent: str = ""
 
     def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         self._channel = channel
@@ -40,11 +41,23 @@ class MessageTool(Tool):
 
     def start_turn(self) -> None:
         self._sent_in_turn = False
+        self._last_sent = ""
 
     @property
     def sent_in_turn(self) -> bool:
         """Did the model already deliver this turn? Guards double-sends."""
         return self._sent_in_turn
+
+    @property
+    def last_sent(self) -> str:
+        """What was actually delivered this turn.
+
+        The check-in ledger needs the real text. Recording the placeholder
+        "(sent)" instead meant the model was shown "(sent)" as its own history
+        and could not tell it had already asked — so it asked what Niranjan's
+        plan was nine times in one day, each time slightly reworded.
+        """
+        return self._last_sent
 
     @property
     def name(self) -> str:
@@ -86,10 +99,11 @@ class MessageTool(Tool):
         if not self._send_callback:
             return "Error: message sending not configured"
 
+        body = strip_think(content)
         msg = OutboundMessage(
             channel=self._channel,
             chat_id=self._chat_id,
-            content=strip_think(content),
+            content=body,
             media=media or [],
             metadata={"message_id": self._message_id} if self._message_id else {},
         )
@@ -98,4 +112,5 @@ class MessageTool(Tool):
         except Exception as e:
             return f"Error sending message: {e}"
         self._sent_in_turn = True
+        self._last_sent = body
         return f"Sent{f' with {len(media)} attachment(s)' if media else ''}."

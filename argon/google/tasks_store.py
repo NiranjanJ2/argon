@@ -77,6 +77,12 @@ def _decode_meta(raw: str | None) -> tuple[dict[str, Any], str]:
 # Task dict conversion
 # ---------------------------------------------------------------------------
 
+def _when(stamp: str | None) -> str | None:
+    from argon.utils.helpers import when_label
+
+    return when_label(stamp)
+
+
 def _to_task(gt: dict[str, Any]) -> dict[str, Any]:
     """Convert a Google Tasks API item to an Argon task dict."""
     meta, notes = _decode_meta(gt.get("notes"))
@@ -90,6 +96,8 @@ def _to_task(gt: dict[str, Any]) -> dict[str, Any]:
         "subject": meta.get("sub"),
         "notes": notes or None,
         "due": gt.get("due"),
+        # Weekday spelled out; the model invents them otherwise.
+        "due_when": _when(gt.get("due")),
         "classroom_id": meta.get("cid"),
         "time_estimate_min": meta.get("e"),
         "time_actual_min": meta.get("act"),

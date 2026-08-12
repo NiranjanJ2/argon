@@ -14,9 +14,15 @@ def _now() -> datetime:
 
 
 def _fmt_event(e: dict) -> dict:
+    from argon.utils.helpers import when_label
+
     return {
         "id": e.get("id"),
         "summary": e.get("summary"),
+        # Spelled out, because the model gets weekday arithmetic wrong: asked
+        # for his week it called Wed 08/12 a Monday and Fri 08/14 a Saturday.
+        "when": when_label((e.get("start") or {}).get("dateTime")
+                           or (e.get("start") or {}).get("date")),
         "description": e.get("description"),
         "location": e.get("location"),
         "start": e.get("start"),

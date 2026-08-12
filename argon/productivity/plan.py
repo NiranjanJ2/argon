@@ -169,6 +169,7 @@ class DayPlan:
         data["blocks"] = stored
         data["declined"] = False
         data["seeded"] = False
+        data["stated"] = True
         self._save(data)
         return [Block(**b) for b in stored]
 
@@ -187,12 +188,17 @@ class DayPlan:
         """
         if self.exists() or self.declined():
             return self.blocks()
-        blocks = []
+        blocks, from_him = [], False
         for entry in entries or []:
             start = entry.get("start")
             if start is None:
                 continue
             end = entry.get("end")
+            # A reminder is something he scheduled; a plain calendar event is a
+            # fixture that appeared on his week. Both shape the day, but only
+            # the first is him saying what he intends to do.
+            if entry.get("kind") == "reminder":
+                from_him = True
             blocks.append({
                 "start": "{:%H:%M}".format(start),
                 "end": "{:%H:%M}".format(end) if end else None,
@@ -203,12 +209,29 @@ class DayPlan:
         stored = self.set_blocks(blocks)
         data = self._load()
         data["seeded"] = True
+        data["stated"] = from_him
         self._save(data)
         return stored
 
     def seeded(self) -> bool:
         """Was this plan adopted from commitments rather than stated by him?"""
         return bool(self._load().get("seeded"))
+
+    def answered(self) -> bool:
+        """Has he actually said what he is doing today?
+
+        True when he stated a plan, and when the plan was adopted from
+        reminders he had scheduled himself — "I told you I'll start the math
+        homework at 3" is an answer even though he never used the word plan.
+
+        False when the only thing shaping the day is ambient calendar entries.
+        One recurring "All Project Sync" was enough to make the day look
+        planned, so Argon stopped asking and said two things all day.
+        """
+        data = self._load()
+        if not data.get("blocks"):
+            return False
+        return not data.get("seeded") or bool(data.get("stated"))
 
     def mark(self, block_id: str, status: str) -> bool:
         data = self._load()

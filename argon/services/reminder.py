@@ -44,11 +44,23 @@ PLAN_ASK_COOLDOWN_MIN = 100
 #: is not structure, it is an alarm clock.
 PLAN_ASK_FROM_HOUR = 8
 
-#: Occasions the daily cap does not apply to, because he chose the time himself.
-#: A day of eight discretionary "want to use this hour?" offers used to exhaust
-#: the budget by five and silently swallow the 7 PM block he had actually asked
-#: to be reminded about — the cap suppressing exactly the messages it exists to
-#: make room for. He can still bound these: plan fewer blocks.
+#: How many times in one day Argon may ask what the plan is before letting it
+#: go. He did say to keep asking until he names something — but nine identical
+#: questions between 8 AM and 9:30 PM, three days running, all unanswered, is
+#: not persistence. If he has ignored it this many times, he has answered.
+MAX_PLAN_ASKS_PER_DAY = 3
+
+#: Moments he chose himself, each tied to one block or event. Two rules follow.
+#:
+#: The daily cap does not apply: eight discretionary "want to use this hour?"
+#: offers used to exhaust the budget by five and silently swallow the 7 PM block
+#: he had actually asked to be reminded about — the cap suppressing exactly the
+#: messages it exists to make room for. He can still bound these: plan less.
+#:
+#: Nor does the reword filter, because the ledger already dedupes them by id.
+#: Running both silenced every single block_end: "How did the All Project Sync
+#: go?" necessarily shares its subject with "All Project Sync starts now", and
+#: the block's name is the whole point of the message.
 HIS_OWN_SCHEDULE = frozenset({"block_start", "block_end", "upcoming"})
 
 #: How the model declines to say anything.
@@ -344,17 +356,30 @@ class ReminderService:
             )
 
         if occasion.kind == "plan_request":
-            again = (
-                "He has not answered yet today, so keep it short and do not "
-                "repeat yourself.\n"
-                if self._plan.times_asked() else ""
+            asked = self._plan.times_asked()
+            again = ""
+            if asked:
+                # It asked nine times in one day, each a reword of the last,
+                # because it was shown "(sent)" as its own history and could
+                # not see it had already asked. The history is real now; say
+                # plainly that a second ask must not be the same question.
+                again = (
+                    "You have already asked {} time(s) today and he has not "
+                    "answered. Do not ask the same question again — either put "
+                    "it a different way with something concrete from his list, "
+                    "or reply {} and leave it.\n"
+                ).format(asked, SKIP_TOKEN)
+            known = (
+                "He already has these fixed today, so ask what goes around "
+                "them rather than starting from a blank day.\n"
+                if self._plan.exists() else ""
             )
             return (
                 "ASK WHAT HIS DAY LOOKS LIKE. One question, plain — what is he "
                 "doing today and roughly when. Whatever he says, record it with "
                 "set_day_plan; those blocks become when you check in, so this "
                 "is the message that makes the rest of the day work.\n"
-                f"{again}"
+                f"{known}{again}"
                 "If he says he doesn't want to plan, call set_day_plan with "
                 "planning: false and leave him alone about it.\n\n"
             )
@@ -502,10 +527,22 @@ class ReminderService:
         self._seed_plan()
 
         # No plan means one job: get one. This is the only nag by design — he
-        # asked to be pestered until he says what he wants out of the day —
-        # and it stops the moment there are blocks or he says he isn't planning.
-        if not self._plan.exists() and not self._plan.declined():
-            if PLAN_ASK_FROM_HOUR <= now.hour and self._ready("plan_request", now):
+        # asked to be pestered until he says what he wants out of the day.
+        #
+        # A seeded plan does not count as an answer. One recurring calendar
+        # entry ("All Project Sync", 7-8pm) was enough to make the day look
+        # planned, so Argon never asked what he was actually doing and said two
+        # things all day, one of them about a meeting he had not mentioned. The
+        # seed gives the day its known fixtures; it is not him telling you his
+        # plan. The prompt shows the seeded blocks so the question can be
+        # "you've got X at 7 — what else?" rather than starting from nothing.
+        if not self._plan.answered() and not self._plan.declined():
+            asked_enough = self._plan.times_asked() >= MAX_PLAN_ASKS_PER_DAY
+            if (
+                PLAN_ASK_FROM_HOUR <= now.hour
+                and not asked_enough
+                and self._ready("plan_request", now)
+            ):
                 return OCCASIONS["plan_request"]
             return None
 
@@ -659,7 +696,14 @@ class ReminderService:
         if is_silence(text):
             logger.debug("Check-in ({}): nothing to say", occasion.kind)
             return ""
-        if is_near_duplicate(text, self.ledger.said_today()):
+        # The reword filter is for occasions that could repeat themselves. The
+        # ones keyed to a specific block or event cannot: each fires once, by
+        # id. Running it on them silenced every single block_end, because
+        # "How did the All Project Sync go?" necessarily shares its subject
+        # with "All Project Sync starts now." — the block name is the point.
+        if occasion.kind not in HIS_OWN_SCHEDULE and is_near_duplicate(
+            text, self.ledger.said_today()
+        ):
             logger.info("Check-in ({}) suppressed as a reword: {}", occasion.kind, text[:60])
             return ""
         if text:

@@ -449,3 +449,34 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
         for name in added:
             Console().print(f"  [dim]Created {name}[/dim]")
     return added
+
+
+def when_label(value: Any, tz: Any = None) -> str | None:
+    """A date or timestamp as "Wed 08/12, 8:00 AM" — weekday spelled out.
+
+    Asked what was on his week, the model answered "08/12 Mon", "08/14 Sat",
+    "08/16 Mon". The dates were right and three of the four weekdays were
+    invented: Aug 12 2026 is a Wednesday, the 14th a Friday, the 16th a Sunday.
+    Nothing in the tool output named a weekday, so it did the arithmetic in its
+    head and got it wrong — and a confidently wrong weekday is worse than none,
+    because he plans around it.
+
+    So the weekday is computed here, once, and every tool that reports a time
+    carries it. The model never has to work one out.
+    """
+    from datetime import date, datetime
+
+    moment = value
+    if isinstance(moment, str):
+        try:
+            moment = datetime.fromisoformat(moment.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if isinstance(moment, datetime):
+        if tz is not None and moment.tzinfo is not None:
+            moment = moment.astimezone(tz)
+        stamp = moment.strftime("%a %m/%d, %-I:%M %p")
+        return stamp if moment.hour or moment.minute else moment.strftime("%a %m/%d")
+    if isinstance(moment, date):
+        return moment.strftime("%a %m/%d")
+    return None
