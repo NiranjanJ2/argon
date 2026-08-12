@@ -192,6 +192,42 @@ def put_on_calendar(summary: str, at_ms: int, *, minutes: int = 15) -> str:
     return event.get("id", "")
 
 
+def remove_from_calendar(summary: str, at_ms: int) -> bool:
+    """Delete the mirrored event for a reminder that was cancelled.
+
+    ``cron add`` wrote an event and ``cron remove`` did not delete one, so
+    cancelling "Lock in for school day" removed the job and left the event on
+    his calendar — where it then turned up in his week summary as a commitment
+    he had explicitly called off. A mirror needs both halves.
+
+    Only ever deletes events Argon created: matched on the MIRROR_TAG it writes
+    into the description, never on the summary alone.
+    """
+    from argon.google.service import build_google_service
+    from argon.paths import argon_home
+
+    start = datetime.fromtimestamp(at_ms / 1000, tz=clock.tz())
+    svc = build_google_service(argon_home(), "calendar", "v3", "work")
+    items = svc.events().list(
+        calendarId="primary",
+        timeMin=_stamp(start - timedelta(minutes=1)),
+        timeMax=_stamp(start + timedelta(minutes=1)),
+        singleEvents=True,
+        maxResults=10,
+    ).execute().get("items", [])
+
+    for item in items:
+        if MIRROR_TAG not in (item.get("description") or ""):
+            continue  # his own event that happens to sit at this minute
+        if (item.get("summary") or "") != summary:
+            continue
+        svc.events().delete(calendarId="primary", eventId=item["id"]).execute()
+        _invalidate()
+        logger.info("Removed '{}' from the calendar", summary)
+        return True
+    return False
+
+
 def _stamp(moment: datetime) -> str:
     """Second precision — Swift's ISO8601 parser rejects six fractional digits."""
     return moment.replace(microsecond=0).isoformat()

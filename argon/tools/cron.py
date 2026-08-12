@@ -263,6 +263,36 @@ class CronTool(Tool):
     def _remove_job(self, job_id: str | None) -> str:
         if not job_id:
             return "Error: job_id is required for remove"
-        if self._cron.remove_job(job_id):
-            return f"Removed job {job_id}"
-        return f"Job {job_id} not found"
+        # Read the job before it is gone: the mirrored calendar event is found
+        # by its time and summary, and both live on the job.
+        job = next((j for j in self._cron.list_jobs(include_disabled=True)
+                    if j.id == job_id), None)
+        if not self._cron.remove_job(job_id):
+            return f"Job {job_id} not found"
+        return f"Removed job {job_id}{self._unmirror(job)}"
+
+    def _unmirror(self, job: Any) -> str:
+        """Take the cancelled reminder off the calendar too.
+
+        Cancelling "Lock in for school day" removed the job and left the event,
+        which then turned up in his week summary as a commitment he had just
+        called off.
+        """
+        if job is None:
+            return ""
+        schedule = getattr(job, "schedule", None)
+        at_ms = getattr(schedule, "at_ms", None)
+        message = getattr(getattr(job, "payload", None), "message", "") or ""
+        if not at_ms or not message:
+            return ""
+        try:
+            from argon.services import agenda
+
+            if agenda.remove_from_calendar(message, at_ms):
+                return " and removed it from your calendar"
+        except Exception as exc:  # noqa: BLE001 — the job is gone regardless
+            from loguru import logger
+
+            logger.warning("Could not unmirror a cancelled reminder: {}", exc)
+            return " — but it may still be on your calendar"
+        return ""
