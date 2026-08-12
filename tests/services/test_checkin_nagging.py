@@ -79,6 +79,13 @@ class TestItStopsAsking:
         occasion = service.pick_occasion()
         assert occasion is None or occasion.kind != "plan_request"
 
+    def test_it_stops_asking_once_the_evening_is_here(self, tmp_path, monkeypatch):
+        """It asked at 9:12 PM what his day looked like. By then the day is the
+        thing being wrapped up, not planned."""
+        service, _ = _service(tmp_path, monkeypatch, _at(21, 0))
+        occasion = service.pick_occasion()
+        assert occasion is None or occasion.kind != "plan_request"
+
     def test_the_prompt_admits_it_already_asked(self, tmp_path, monkeypatch):
         service, _ = _service(tmp_path, monkeypatch, _at(18, 0))
         service._plan.record_asked()

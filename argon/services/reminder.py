@@ -40,9 +40,11 @@ SESSION_FLOOR_MINUTES = 25
 #: until he names something; this is what "pestered" is allowed to mean.
 PLAN_ASK_COOLDOWN_MIN = 100
 
-#: Don't ask for a plan before this hour. Waking someone to ask about their day
-#: is not structure, it is an alarm clock.
-PLAN_ASK_FROM_HOUR = 8
+#: Stop asking what the day looks like after this hour. It asked at 9:12 PM,
+#: which is not a question about the day any more — by then the evening wrap-up
+#: is the honest occasion, and "what are you up to today?" reads as an assistant
+#: that has not noticed what time it is.
+PLAN_ASK_UNTIL_HOUR = 20
 
 #: How many times in one day Argon may ask what the plan is before letting it
 #: go. He did say to keep asking until he names something — but nine identical
@@ -546,7 +548,7 @@ class ReminderService:
         if not self._plan.answered() and not self._plan.declined():
             asked_enough = self._plan.times_asked() >= MAX_PLAN_ASKS_PER_DAY
             if (
-                PLAN_ASK_FROM_HOUR <= now.hour
+                now.hour < PLAN_ASK_UNTIL_HOUR
                 and not asked_enough
                 and self._ready("plan_request", now)
             ):
