@@ -146,11 +146,23 @@ class TestScheduledRemindersCountToo:
 
     @staticmethod
     def _write_jobs(tmp_path, monkeypatch, minutes_out, *, enabled=True):
+        """Write one cron job *minutes_out* from a pinned 9 AM.
+
+        These used to offset from the real clock, so "90 minutes from now" fell
+        past midnight when the suite ran after 22:30 and `reminders()` — which
+        only reports jobs due before end of day — correctly returned nothing.
+        The tests failed for the first time at 22:50 on a night the code had
+        not changed. Pin the clock; a suite whose result depends on when you
+        run it is not evidence of anything.
+        """
         import json as _json
 
         from argon import paths
 
-        at_ms = int((clock.now() + timedelta(minutes=minutes_out)).timestamp() * 1000)
+        pinned = clock.now().replace(hour=9, minute=0, second=0, microsecond=0)
+        monkeypatch.setattr(clock, "now", lambda: pinned)
+        monkeypatch.setattr(agenda.clock, "now", lambda: pinned)
+        at_ms = int((pinned + timedelta(minutes=minutes_out)).timestamp() * 1000)
         store = tmp_path / "jobs.json"
         store.write_text(_json.dumps({"jobs": [{
             "id": "abc123", "name": "Start UCLA work", "enabled": enabled,
@@ -178,12 +190,13 @@ class TestScheduledRemindersCountToo:
         assert agenda.upcoming(tmp_path) == []
 
     def test_tomorrows_job_is_not_todays_problem(self, tmp_path, monkeypatch, calendar):
-        self._write_jobs(tmp_path, monkeypatch, 60 * 30)
+        self._write_jobs(tmp_path, monkeypatch, 60 * 20)  # tomorrow, from 9 AM
         assert agenda.upcoming(tmp_path) == []
 
     def test_events_and_reminders_interleave_by_time(self, tmp_path, monkeypatch, calendar):
         self._write_jobs(tmp_path, monkeypatch, 90)
-        calendar.append(_event(30, summary="Standup"))
+        calendar.append({**_event(30, summary="Standup"),
+                         "start": clock.now() + timedelta(minutes=30)})
         assert [e["summary"] for e in agenda.upcoming(tmp_path)] == [
             "Standup", "Start UCLA work (2h)",
         ]
