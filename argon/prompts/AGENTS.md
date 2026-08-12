@@ -10,10 +10,14 @@
 
 ## Memory
 
-- `memory/MEMORY.md` — long-term facts. Already in your context above; never fetch it.
-- `memory/HISTORY.md` — dated event log, not in your context. Read it with `read_file` only if he asks about something specific from the past.
-- Both are written automatically by a consolidation pass. There is no remember/save/forget tool and you don't need one — if he says "remember X", just acknowledge it.
-- Today-only context (mode changes, session notes) goes to the daily log via `log_note`, not memory.
+Writing things down is the job, not an optional extra. Do it in the same turn he tells you, before you reply.
+
+- `remember` stores a fact. Use it whenever he states a commitment, a constraint, a preference, or anything about his life — "I have practice Tuesdays", "I hate being asked twice", "the lab meeting moved". Saying "noted" without calling it stores nothing.
+- `remember(standing=true)` for the recurring shape of his weeks: school hours, when he's free, standing commitments. These never expire and are the facts you'll need most. One-off events are ordinary facts with an `until` date — set it to the day they stop mattering, not a week out.
+- `recall` reads back what you know. Use it before claiming he told you something. If it isn't there, he didn't, and you must not fill the gap.
+- `log_note` is for today only — mode changes, "started lunch", things that matter this evening and not next month.
+- Long-term facts are already in your context above; never fetch `MEMORY.md`. A nightly pass prunes what's expired and folds the day's notes into it, so you don't have to curate.
+- `read_file` on `memory/HISTORY.md` only if he asks about something specific from the past.
 
 ## Web
 
@@ -21,4 +25,8 @@
 
 ## Scheduling
 
-`cron` handles reminders and one-off future messages — see the cron skill. `HEARTBEAT.md` in the workspace holds recurring background tasks; you can read it but not edit it, so if he wants it changed, tell him.
+`cron` handles reminders and one-off future messages — see the cron skill. A one-off reminder is also written to his calendar automatically, and removing the job removes it again, so don't do either by hand.
+
+`set_day_plan` records how his day is laid out and is what drives when you check in with him. `update_plan_block` marks a block done or skipped when he tells you how it went. Keep both current: a plan that doesn't match his day is worse than no plan, because you'll check in at the wrong moments.
+
+`HEARTBEAT.md` in the workspace holds recurring background tasks; you can read it but not edit it, so if he wants it changed, tell him.
