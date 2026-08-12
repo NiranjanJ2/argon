@@ -9,6 +9,33 @@ single place authoritative held. Fixes that told the model to behave did not.
 
 ## Unreleased
 
+### A clone that starts — 2026-08-11
+
+`setup.sh` could not have worked on any machine: it wrote `~/.nanobot/config.json`,
+installed a `nanobot` binary, configured a provider no longer in use, demanded a
+WhatsApp number for a disabled channel, and never created the API token — the one
+field whose absence makes every `/v1` route refuse requests while the service
+still reports itself healthy.
+
+- **`argon init`** owns the config now, because it is Python and can be tested.
+  Generates the API token rather than asking for one, chmods 600, seeds the
+  workspace, lists what is still missing. Re-running fills gaps only: it never
+  rotates the token (that would lock out the widgets and the phone) and never
+  clobbers settings.
+- **`setup.sh` is thin** — prerequisites, venv, `argon init`, an optional systemd
+  unit templated from the running user rather than one machine's hardcoded paths.
+- **The gateway used to print `OK API on 0.0.0.0:3995` and then fail to bind it.**
+  Werkzeug exits from inside the serving thread, so the conflict appeared a line
+  *after* the success message. The port is probed before anything is claimed, and
+  the failure stays non-fatal — Discord, cron and check-ins do not need that socket.
+- Smaller: `pip install -e .[discord]` asked for an extra that does not exist,
+  the Python floor disagreed with `pyproject`, and `HeartbeatConfig.model` was
+  declared twice so its documented default was dead.
+
+Found by cloning the repo to an empty directory and running it end to end, which
+is also now a test. The suite is time-independent as of this change — five tests
+read the wall clock and failed after 23:00; verified green under five timezones.
+
 ### The day's plan drives everything — 2026-08-11
 
 Argon used to reach out on a timer: fixed windows plus an `idle` nudge every two
