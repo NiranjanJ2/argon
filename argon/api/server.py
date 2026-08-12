@@ -273,6 +273,21 @@ def status() -> Any:
     # for. Cached in the agenda module; a calendar outage yields [].
     from argon.services import agenda
 
+    # The plan drives when Argon speaks, so the readouts have to show it or
+    # they are describing a different day from the one Argon is running.
+    from argon.productivity.plan import DayPlan
+
+    plan = DayPlan(ws)
+    data["plan"] = {
+        "blocks": [b.as_dict() for b in plan.blocks()],
+        "answered": plan.answered(),
+        "declined": plan.declined(),
+    }
+    data["schoolwork"] = [
+        {"title": a["title"], "course": a["course"], "due": a["due"],
+         "due_when": a["due_when"], "days_left": a["days_left"]}
+        for a in agenda.schoolwork(ws)[:6]
+    ]
     data["agenda"] = [
         {
             "id": e["id"],
@@ -392,6 +407,29 @@ def tasks_update(task_id: str) -> Any:
     except Exception:
         logger.exception("Could not update a task from the iOS dashboard")
         return jsonify({"error": "task store unavailable"}), 503
+
+
+@app.patch("/v1/plan/<block_id>")
+@require_token
+def plan_update(block_id: str) -> Any:
+    """Mark a block of today's plan done or skipped.
+
+    The plan decides when Argon speaks, so a block he finished at his desk has
+    to be tickable from there — otherwise the readout says one thing, the
+    check-in gate believes another, and he gets asked how a block went that he
+    closed an hour ago.
+    """
+    from argon.productivity.plan import DayPlan
+
+    status = _body().get("status")
+    if status not in {"done", "skipped", "pending"}:
+        return jsonify({"error": "status must be done, skipped or pending"}), 400
+
+    ws = _rt.config.workspace_path if _rt.config else argon_home()
+    plan = DayPlan(ws)
+    if not plan.mark(block_id, status):
+        return jsonify({"error": "no such block"}), 404
+    return jsonify({"blocks": [b.as_dict() for b in plan.blocks()]})
 
 
 @app.get("/v1/ios/mode")

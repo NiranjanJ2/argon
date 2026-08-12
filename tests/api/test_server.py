@@ -679,3 +679,52 @@ def test_the_override_endpoint_can_clear(tmp_path, monkeypatch):
 def test_an_override_with_no_minutes_uses_the_configured_default(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     assert client.post("/v1/ios/override", headers=AUTH, json={}).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# The plan is what decides when Argon speaks, so it has to be tickable from the
+# desk. Without this the readout says one thing, the gate believes another, and
+# he gets asked how a block went that he closed an hour ago.
+# ---------------------------------------------------------------------------
+
+
+def _plan_client(tmp_path, monkeypatch):
+    from argon.productivity.plan import DayPlan
+
+    client = _client(tmp_path, monkeypatch)
+    plan = DayPlan(tmp_path)
+    plan.set_blocks([
+        {"start": "5pm", "end": "6pm", "what": "SAT prep"},
+        {"start": "7pm", "what": "UCLA work"},
+    ])
+    return client, plan
+
+
+def test_a_block_can_be_marked_done_from_the_desktop(tmp_path, monkeypatch):
+    client, plan = _plan_client(tmp_path, monkeypatch)
+
+    reply = client.patch("/v1/plan/b0", json={"status": "done"},
+                         headers={"Authorization": "Bearer s3cret-token"})
+
+    assert reply.status_code == 200
+    assert [b.status for b in plan.blocks()] == ["done", "pending"]
+
+
+def test_an_unknown_block_is_a_404(tmp_path, monkeypatch):
+    client, _ = _plan_client(tmp_path, monkeypatch)
+    reply = client.patch("/v1/plan/b9", json={"status": "done"},
+                         headers={"Authorization": "Bearer s3cret-token"})
+    assert reply.status_code == 404
+
+
+def test_a_bad_status_is_refused(tmp_path, monkeypatch):
+    client, plan = _plan_client(tmp_path, monkeypatch)
+    reply = client.patch("/v1/plan/b0", json={"status": "finished-ish"},
+                         headers={"Authorization": "Bearer s3cret-token"})
+    assert reply.status_code == 400
+    assert [b.status for b in plan.blocks()] == ["pending", "pending"]
+
+
+def test_it_needs_the_token(tmp_path, monkeypatch):
+    client, _ = _plan_client(tmp_path, monkeypatch)
+    assert client.patch("/v1/plan/b0", json={"status": "done"}).status_code == 401

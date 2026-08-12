@@ -90,6 +90,28 @@ export const className = `
                text-overflow: ellipsis; white-space: nowrap; }
   .row .when { font-size: 10px; color: #9BAAC0; flex: none; }
 
+  .plan { margin-top: 14px; padding-top: 12px;
+          border-top: 1px solid rgba(169,221,255,0.10); }
+  .blk { display: flex; align-items: center; gap: 9px; padding: 5px 8px;
+         border-radius: 8px; color: #C7D4E6; }
+  .blk.live { background: rgba(101,216,255,0.12); color: #F4F8FF; }
+  .blk.gone { color: #6C7A8D; }
+  .blk .span { font-size: 10px; flex: none; width: 74px; color: #9BAAC0; }
+  .blk .what { flex: 1; min-width: 0; overflow: hidden;
+               text-overflow: ellipsis; white-space: nowrap; }
+  .blk .tick { font-size: 10px; color: #65D8FF; cursor: pointer; flex: none;
+               opacity: 0; transition: opacity 120ms ease; }
+  .blk:hover .tick { opacity: 1; }
+
+  .due { margin-top: 14px; padding-top: 12px;
+         border-top: 1px solid rgba(169,221,255,0.10); }
+  .hw { display: flex; align-items: center; gap: 9px; padding: 4px 8px;
+        color: #C7D4E6; }
+  .hw .name { flex: 1; min-width: 0; overflow: hidden;
+              text-overflow: ellipsis; white-space: nowrap; }
+  .hw .when { font-size: 10px; color: #9BAAC0; flex: none; }
+  .hw.urgent .when { color: #FF9F45; }
+
   .agenda { margin-top: 14px; padding-top: 12px;
             border-top: 1px solid rgba(169,221,255,0.10); }
   .ev { display: flex; align-items: center; gap: 9px; padding: 4px 8px;
@@ -113,6 +135,8 @@ const Icon = ({ name }) => (
     {name === "play" && <polygon points="6,4 16,10 6,16" />}
     {name === "cal" && <g><rect x="3" y="4" width="14" height="13" rx="2" />
                           <line x1="3" y1="8" x2="17" y2="8" /></g>}
+    {name === "cap" && <g><polygon points="10,4 18,8 10,12 2,8" />
+                          <path d="M5 9.5V14c0 1 2.2 2 5 2s5-1 5-2V9.5" /></g>}
   </svg>
 );
 
@@ -132,6 +156,8 @@ export const render = ({ output }) => {
 
   const now = v.now || {};
   const agenda = v.agenda || [];
+  const plan = v.plan || {};
+  const due = v.due || [];
 
   return (
     <div>
@@ -169,6 +195,46 @@ export const render = ({ output }) => {
           ) : (
             <div className="empty">Nothing on the list.</div>
           )}
+        </div>
+      )}
+
+      {plan.text && (!plan.blocks || plan.blocks.length === 0) && (
+        <div className="plan">
+          <div className="eyebrow">Plan</div>
+          <div className="empty">{plan.text}</div>
+        </div>
+      )}
+
+      {plan.blocks && plan.blocks.length > 0 && (
+        <div className="plan">
+          <div className="eyebrow">Plan</div>
+          {plan.blocks.map((b) => (
+            <div key={b.id}
+                 className={"blk" + (b.live ? " live" : b.ahead ? "" : " gone")}>
+              <span className="span">{b.span}</span>
+              <span className="what">{b.what}</span>
+              {b.status === "pending" ? (
+                <span className="tick" onClick={(e) => act(e, "block", b.id, "done")}>
+                  done
+                </span>
+              ) : (
+                <span className="when">{b.label}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {due.length > 0 && (
+        <div className="due">
+          <div className="eyebrow">Due</div>
+          {due.map((d) => (
+            <div key={d.title + d.when} className={d.urgent ? "hw urgent" : "hw"}>
+              <Icon name="cap" />
+              <span className="name">{d.title}</span>
+              <span className="when">{d.when}</span>
+            </div>
+          ))}
         </div>
       )}
 

@@ -92,6 +92,28 @@ export const className = `
            color: #FF9F45; background: rgba(255,159,69,0.09);
            border: 1px solid rgba(255,159,69,0.22); }
 
+  /* Today's plan — the blocks that decide when Argon speaks. A readout that
+     does not show them describes a different day from the one Argon runs. */
+  .blk { display: flex; align-items: center; gap: 10px; padding: 6px 9px;
+         border-radius: 9px; color: #C7D4E6; font-size: 12px; }
+  .blk.live { background: rgba(101,216,255,0.12); color: #F4F8FF; }
+  .blk.gone { color: #6C7A8D; }
+  .blk .span { font-size: 10.5px; color: #9BAAC0; flex: none; width: 82px; }
+  .blk .what { flex: 1; min-width: 0; overflow: hidden;
+               text-overflow: ellipsis; white-space: nowrap; }
+  .blk .tick { font-size: 10px; color: #65D8FF; cursor: pointer; flex: none;
+               opacity: 0; transition: opacity 120ms ease; }
+  .blk:hover .tick { opacity: 1; }
+  .blk .mark { font-size: 10px; color: #6C7A8D; flex: none; }
+
+  .hw { display: flex; align-items: center; gap: 10px; padding: 5px 9px;
+        color: #C7D4E6; font-size: 12px; }
+  .hw .name { flex: 1; min-width: 0; overflow: hidden;
+              text-overflow: ellipsis; white-space: nowrap; }
+  .hw .course { font-size: 10px; color: #6C7A8D; }
+  .hw .when { font-size: 10.5px; color: #9BAAC0; flex: none; }
+  .hw.urgent .when { color: #FF9F45; }
+
   .section { display: flex; align-items: center; gap: 8px; margin: 18px 0 8px; }
   .section .dot { width: 6px; height: 6px; border-radius: 50%; }
   .section .name { font-size: 16px; }
@@ -214,6 +236,8 @@ export const render = ({ output }) => {
   }
 
   const groups = v.groups || [];
+  const plan = v.plan || {};
+  const due = v.due || [];
   const focus = v.focus || {};
   const phone = v.phone || {};
 
@@ -254,6 +278,61 @@ export const render = ({ output }) => {
               Anything you or Argon adds shows up here on the same shared list.
             </div>
           )}
+        </div>
+      )}
+
+      {plan.text && (!plan.blocks || plan.blocks.length === 0) && (
+        <div>
+          <div className="section">
+            <span className="dot" style={{ background: "#9BAAC0" }} />
+            <span className="display name">Plan</span>
+          </div>
+          <div className="blk gone"><span className="what">{plan.text}</span></div>
+        </div>
+      )}
+
+      {plan.blocks && plan.blocks.length > 0 && (
+        <div>
+          <div className="section">
+            <span className="dot" style={{ background: "#65D8FF",
+                                           boxShadow: "0 0 5px #65D8FF" }} />
+            <span className="display name">Plan</span>
+            <span className="count">{plan.blocks.length}</span>
+          </div>
+          {plan.blocks.map((b) => (
+            <div key={b.id}
+                 className={"blk" + (b.live ? " live" : b.ahead ? "" : " gone")}>
+              <span className="span">{b.span}</span>
+              <span className="what">{b.what}</span>
+              {b.status === "pending" ? (
+                <span className="tick" onClick={(e) => act(e, "block", b.id, "done")}>
+                  done
+                </span>
+              ) : (
+                <span className="mark">{b.label}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {due.length > 0 && (
+        <div>
+          <div className="section">
+            <span className="dot" style={{ background: "#A9DDFF",
+                                           boxShadow: "0 0 5px #A9DDFF" }} />
+            <span className="display name">Due</span>
+            <span className="count">{due.length}</span>
+          </div>
+          {due.map((d) => (
+            <div key={d.title + d.when} className={d.urgent ? "hw urgent" : "hw"}>
+              <span className="name">
+                {d.title}
+                {d.course && <span className="course"> · {d.course}</span>}
+              </span>
+              <span className="when">{d.when}</span>
+            </div>
+          ))}
         </div>
       )}
 
