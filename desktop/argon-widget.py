@@ -101,25 +101,84 @@ BAD_CONVERGENCE = {"diverged", "failed"}
 # Fetch
 # ---------------------------------------------------------------------------
 
+#: Cloudflare answers "Python-urllib/3.x" with a 403 as a matter of course, so
+#: going through the tunnel needs a User-Agent that is not the stdlib default.
+#: On the LAN it makes no difference; through the tunnel it is the whole
+#: difference between working and a bare "HTTP 403 from /v1/status".
+USER_AGENT = "Argon-Widget/1.0 (+https://argon.agentneon.dev)"
+
+#: How long to give the LAN address before deciding he is not at home. Short:
+#: on a foreign network the connection is refused or dropped almost at once,
+#: and every second here is a second the widget shows nothing.
+REACH_TIMEOUT_S = 1.5
+
+#: Remembers which base worked last time, so the common case is one request.
+#: Process-local — SwiftBar runs a fresh process per refresh, Übersicht does
+#: not, and neither wants a stale answer surviving a network change.
+_reachable = None
+
+
 def load_config():
+    """``(bases, token)`` — every base to try, in preference order.
+
+    The LAN address is direct and fast; the public one goes out through
+    Cloudflare and back. Trying home first keeps the widget instant at his desk
+    and still working from school, which is the entire point of exposing it.
+    """
     url = os.environ.get("ARGON_URL", "")
     token = os.environ.get("ARGON_TOKEN", "")
+    fallback = os.environ.get("ARGON_URL_REMOTE", "")
     if not (url and token):
         try:
             data = json.loads(CONFIG_PATH.read_text())
             url = url or data.get("url", "")
             token = token or data.get("token", "")
+            fallback = fallback or data.get("remoteUrl", "")
         except (OSError, ValueError):
             pass
-    return url.rstrip("/"), token
+    bases = [b.rstrip("/") for b in (url, fallback) if b]
+    return bases, token
+
+
+def reach(bases, token, call):
+    """Run ``call(base)`` against the first base that answers.
+
+    Sticks to whichever worked last, so the usual refresh is a single request.
+    On failure it falls back and re-pins, which is what happens when he opens
+    the laptop at school or walks back in the door.
+    """
+    global _reachable
+    ordered = list(bases)
+    if _reachable in ordered:
+        ordered.remove(_reachable)
+        ordered.insert(0, _reachable)
+
+    last = None
+    for base in ordered:
+        try:
+            result = call(base)
+        except Exception as exc:  # noqa: BLE001 — try the next base, then report
+            last = exc
+            continue
+        _reachable = base
+        return result
+    raise last if last else RuntimeError("no server configured")
 
 
 def get(url, token, path):
     req = urllib.request.Request(
-        url + path, headers={"Authorization": "Bearer " + token}
+        url + path,
+        headers={"Authorization": "Bearer " + token, "User-Agent": USER_AGENT},
     )
-    with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+    # A LAN address that is not on this network must fail fast, or the widget
+    # stalls for the full timeout on every refresh away from home.
+    timeout = REACH_TIMEOUT_S if _is_lan(url) else TIMEOUT_S
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def _is_lan(url):
+    return "://192.168." in url or "://10." in url or "://localhost" in url
 
 
 def send(url, token, path, body, method="POST"):
@@ -128,7 +187,8 @@ def send(url, token, path, body, method="POST"):
         data=json.dumps(body).encode("utf-8"),
         method=method,
         headers={"Authorization": "Bearer " + token,
-                 "Content-Type": "application/json"},
+                 "Content-Type": "application/json",
+                 "User-Agent": USER_AGENT},
     )
     with urllib.request.urlopen(req, timeout=ACTION_TIMEOUT_S) as resp:
         return json.loads(resp.read().decode("utf-8"))
@@ -136,11 +196,11 @@ def send(url, token, path, body, method="POST"):
 
 def collect():
     """Raw server state, or ``{"error": ...}``."""
-    url, token = load_config()
-    if not url or not token:
+    bases, token = load_config()
+    if not bases or not token:
         return {"error": "Not configured — see " + str(CONFIG_PATH)}
     try:
-        status = get(url, token, "/v1/status")
+        status = reach(bases, token, lambda b: get(b, token, "/v1/status"))
     except urllib.error.HTTPError as e:
         reason = "Token rejected" if e.code == 401 else "HTTP {}".format(e.code)
         return {"error": reason + " from /v1/status"}
@@ -150,7 +210,7 @@ def collect():
     # Tasks may fail on their own: a dead Google grant should not cost the
     # focus readout, which is served from local state and cannot be affected.
     try:
-        payload = get(url, token, "/v1/tasks")
+        payload = reach(bases, token, lambda b: get(b, token, "/v1/tasks"))
         status["tasks"] = payload.get("tasks", [])
         status["tasks_state"] = payload.get("state", {})
         status["tasks_cached"] = payload.get("cached", False)
@@ -734,24 +794,27 @@ def do_action(argv):
         return 2
 
     verb = argv[0]
-    url, token = load_config()
-    if not url or not token:
+    bases, token = load_config()
+    if not bases or not token:
         notify("Not configured — see " + str(CONFIG_PATH))
         return 1
+
+    def post(path, body, method="POST"):
+        return reach(bases, token, lambda b: send(b, token, path, body, method))
 
     def task_path(task_id):
         return "/v1/tasks/" + urllib.parse.quote(task_id, safe="")
 
     try:
         if verb in ("start", "complete", "stop") and len(argv) > 1:
-            send(url, token, task_path(argv[1]), {"action": verb}, "PATCH")
+            post(task_path(argv[1]), {"action": verb}, "PATCH")
             if verb == "complete":
                 notify("Completed {}".format(argv[2] if len(argv) > 2 else "task"))
         elif verb == "tomorrow" and len(argv) > 1:
             due = (now() + timedelta(days=1)).strftime("%Y-%m-%d")
-            send(url, token, task_path(argv[1]), {"due": due}, "PATCH")
+            post(task_path(argv[1]), {"due": due}, "PATCH")
         elif verb == "priority" and len(argv) > 2:
-            send(url, token, task_path(argv[1]), {"priority": argv[2]}, "PATCH")
+            post(task_path(argv[1]), {"priority": argv[2]}, "PATCH")
         elif verb == "add":
             title = osa(
                 'text returned of (display dialog "Add a task" default answer "" '
@@ -759,14 +822,13 @@ def do_action(argv):
             )
             if not title:
                 return 0  # cancelled, which is not a failure
-            send(url, token, "/v1/tasks", {"title": title, "priority": "medium"})
+            post("/v1/tasks", {"title": title, "priority": "medium"})
         elif verb == "block" and len(argv) > 2:
-            send(url, token, "/v1/plan/" + urllib.parse.quote(argv[1], safe=""),
+            post("/v1/plan/" + urllib.parse.quote(argv[1], safe=""),
                  {"status": argv[2]}, "PATCH")
         elif verb == "unlock":
             minutes = int(argv[1]) if len(argv) > 1 else 120
-            send(url, token, "/v1/ios/override",
-                 {"minutes": minutes, "source": "desktop"})
+            post("/v1/ios/override", {"minutes": minutes, "source": "desktop"})
             notify("Blocks released and held off for {} minutes".format(minutes))
         else:
             notify("Unknown action: " + verb)
@@ -921,6 +983,43 @@ def selftest():
 
     params = action_params("block", "b1", "done")
     assert params["param2"] == '"block"' and params["param4"] == '"done"'
+
+    # -- reaching the server -----------------------------------------------
+    # Home is direct; school goes out through Cloudflare and back. Trying the
+    # LAN first keeps it instant at his desk and still working when away.
+    global _reachable
+    _reachable = None
+    tried = []
+
+    def only(good):
+        def call(base):
+            tried.append(base)
+            if base != good:
+                raise OSError("no route to host")
+            return {"base": base}
+        return call
+
+    lan, wan = "http://192.168.68.72:3995", "https://argon.agentneon.dev"
+    assert reach([lan, wan], "t", only(lan))["base"] == lan
+    assert tried == [lan]
+
+    tried.clear()
+    _reachable = None
+    assert reach([lan, wan], "t", only(wan))["base"] == wan
+    assert tried == [lan, wan]          # tries home, falls through
+
+    tried.clear()
+    assert reach([lan, wan], "t", only(wan))["base"] == wan
+    assert tried == [wan]               # and stays pinned there
+
+    try:
+        reach([lan, wan], "t", only("nowhere"))
+        raise AssertionError("both bases failed; that must propagate")
+    except OSError:
+        pass
+    _reachable = None
+
+    assert _is_lan(lan) and not _is_lan(wan)
 
     # Empty and broken payloads must both still render.
     render_swiftbar(build_view({"ios": {}, "tasks": []}))

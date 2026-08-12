@@ -25,6 +25,7 @@ if [ ! -f "$CONFIG_DIR/desktop.json" ]; then
   cat > "$CONFIG_DIR/desktop.json" <<'JSON'
 {
   "url": "http://192.168.68.72:3995",
+  "remoteUrl": "https://argon.agentneon.dev",
   "token": ""
 }
 JSON
