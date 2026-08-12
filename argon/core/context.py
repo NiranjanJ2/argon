@@ -26,6 +26,7 @@ class ContextBuilder:
         self,
         skill_names: list[str] | None = None,
         extra_context: str | None = None,
+        recent: str = "",
     ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         parts = [self._get_identity()]
@@ -34,7 +35,7 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
-        memory = self.memory.context()
+        memory = self.memory.context(recent=recent)
         if memory:
             parts.append(f"# Memory\n\n{memory}")
 
@@ -135,7 +136,15 @@ Skills with available="false" need dependencies installed first - you can try in
         else:
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
         messages = [
-            {"role": "system", "content": self.build_system_prompt(skill_names, extra_context)},
+            {
+                "role": "system",
+                # What he just said is the retrieval key: a thread named in
+                # it comes back in full, which is what makes a project
+                # mentioned three weeks later mean anything.
+                "content": self.build_system_prompt(
+                    skill_names, extra_context, recent=current_message
+                ),
+            },
             *history,
         ]
         if messages[-1].get("role") == current_role:

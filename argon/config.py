@@ -56,7 +56,12 @@ class AgentDefaults(Base):
     reasoning_effort: str | None = None
     timezone: str = "America/Los_Angeles"
     # Clear raw chat history after N hours idle (0 = never).
-    idle_session_reset_hours: float = 0.167
+    #: How long a silence has to be before the conversation is treated as
+    #: over. This was 0.167 — ten minutes — so stepping away for a coffee
+    #: started a new conversation, and every message he sent felt like a fresh
+    #: chat because it very nearly was one. A day is closer to how people
+    #: actually talk to an assistant; the 4 AM rollover ends it regardless.
+    idle_session_reset_hours: float = 14.0
     # Hard cap on raw messages kept per session (0 = token-based only).
     # Left at 0 a single cron session grew to 14MB and was rewritten on every save.
     max_session_messages: int = 60

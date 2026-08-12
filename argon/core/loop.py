@@ -290,6 +290,13 @@ class AgentLoop:
         self.tools.register(LogNoteTool(state, log))
         self.tools.register(ReadLogTool(log))
 
+        # Threads: the things with a history, so a project mentioned three
+        # weeks later means something. See argon/core/threads.py.
+        from argon.tools.threads import ReadThreadTool, TrackThreadTool
+
+        self.tools.register(TrackThreadTool(self.workspace))
+        self.tools.register(ReadThreadTool(self.workspace))
+
         # The day's plan drives when Argon reaches out at all — see
         # argon/productivity/plan.py.
         from argon.productivity.plan import DayPlan

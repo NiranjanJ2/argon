@@ -185,6 +185,16 @@ class CheckInLedger:
         return len(self._load(clock.today_key())["said"])
 
 
+def _evenings_until(now: datetime, deadline: datetime) -> int:
+    """How many evenings he actually has before a deadline.
+
+    Counts tonight if the deadline is not today. Crude on purpose: the point is
+    "two evenings, six hours of work", not a scheduling solver.
+    """
+    days = (deadline.date() - now.date()).days
+    return max(0, days)
+
+
 def _gap_key(gap: Any) -> str:
     """Identify a free stretch by where it ends — the next thing he committed to.
 
@@ -384,10 +394,12 @@ class ReminderService:
             # overdue list are fetched and stated here rather than left to a
             # tool call the model kept skipping.
             overdue = self._overdue_lines()
+            pressure = self._pressure_lines()
+            habits = self._habits_line()
             return (
                 "THIS IS THE AFTER-SCHOOL BRIEF — he is home and the evening is "
                 "his. It is the one message of the day that has to be good.\n\n"
-                "Due from Google Classroom:\n{}\n\n{}"
+                "Due from Google Classroom:\n{}\n\n{}{}{}"
                 "Lead with what is live: at most two or three things, hardest or "
                 "nearest first. Then ask one plain question — what is he doing "
                 "with the evening. No lists of everything you know, no menu of "
@@ -400,6 +412,8 @@ class ReminderService:
             ).format(
                 self._schoolwork_lines(),
                 "Past due and still open:\n{}\n\n".format(overdue) if overdue else "",
+                "Tight on time:\n{}\n\n".format(pressure) if pressure else "",
+                habits,
                 known, again,
             )
 
@@ -445,6 +459,34 @@ class ReminderService:
         except Exception:  # noqa: BLE001 — a calendar outage must not mute the gate
             logger.warning("Could not seed the day plan from commitments")
 
+    def _habits_line(self) -> str:
+        """What his own record says, when there is enough of it to mean anything.
+
+        HabitsTracker has recorded every work start and completion for months
+        into a file nothing ever opened — the read methods existed and had no
+        callers. A week of evidence about how he actually works is worth more
+        than any amount of asking him how it is going.
+        """
+        try:
+            from argon.productivity.habits import HabitsTracker
+
+            summary = HabitsTracker(self.workspace).get_summary() or {}
+        except Exception:  # noqa: BLE001 — never let this cost the brief
+            return ""
+        bits = []
+        rate = summary.get("completion_rate")
+        if isinstance(rate, (int, float)):
+            bits.append("he finishes about {:.0%} of what he plans".format(rate))
+        start = summary.get("typical_work_start")
+        if start:
+            bits.append("usually starts around {}".format(start))
+        if not bits:
+            return ""
+        return (
+            "For context, from his own record: {}. Use it to be realistic, not "
+            "to lecture him with it.\n\n".format(", and ".join(bits))
+        )
+
     def _schoolwork_lines(self) -> str:
         """Classroom assignments due soon, as prompt lines. Never raises."""
         from argon.services import agenda
@@ -456,6 +498,57 @@ class ReminderService:
         if not work:
             return "- nothing due from Classroom"
         return "\n".join("- " + agenda.describe_assignment(a) for a in work[:6])
+
+    def _pressure_lines(self) -> str:
+        """Hours of work against hours of runway, for anything with both.
+
+        Argon has had the estimate and the deadline side by side the whole
+        time and never once multiplied them. "That is six hours of work and
+        you have four evenings" is the sentence a to-do list cannot say, and
+        the arithmetic is trivial — what was missing was anyone doing it.
+        """
+        from argon.services import agenda
+
+        try:
+            from argon.google.tasks_store import GoogleTasksStore
+
+            tasks = GoogleTasksStore(self.workspace).get_all()
+        except Exception:  # noqa: BLE001 — offline must not blank the brief
+            tasks = []
+        try:
+            work = agenda.schoolwork(self.workspace)
+        except Exception:  # noqa: BLE001
+            work = []
+
+        now = self._now()
+        lines: list[str] = []
+
+        for task in tasks:
+            estimate = task.get("time_estimate_min")
+            due = task.get("due")
+            if not estimate or not due:
+                continue
+            try:
+                deadline = datetime.fromisoformat(str(due).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            evenings = _evenings_until(now, deadline.astimezone(now.tzinfo))
+            hours = estimate / 60
+            if evenings <= 0:
+                lines.append("- {}: {:.0f}h of work, due today".format(task["title"], hours))
+            elif hours > evenings * 2:  # more than two workable hours an evening
+                lines.append(
+                    "- {}: {:.0f}h of work and {} evening(s) before it is due".format(
+                        task["title"], hours, evenings)
+                )
+
+        for item in work:
+            days = item.get("days_left")
+            if days is not None and days <= 1:
+                lines.append("- {} is due {}".format(
+                    item["title"], "today" if days <= 0 else "tomorrow"))
+
+        return "\n".join(lines[:4])
 
     def _overdue_lines(self) -> str:
         """Open tasks that are past due, with how far past. Never raises."""

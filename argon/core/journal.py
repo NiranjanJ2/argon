@@ -262,12 +262,39 @@ class Journal:
         self.write_facts(prune([*self.facts(), fact], clock.today_key()))
         return fact
 
-    def context(self) -> str:
-        """What goes in the system prompt: durable facts + today so far."""
+    def context(self, recent: str = "") -> str:
+        """What goes in the system prompt.
+
+        Three tiers, after the shape the agent-memory systems have converged
+        on: standing facts and an index of every live thread are always here;
+        today's page is here verbatim; and any thread *named* in ``recent``
+        gets pulled up in full. That last part is what makes mentioning a
+        project after three weeks work — the name is the lookup key.
+        """
+        from argon.core.threads import Threads
+
         parts: list[str] = []
         facts = prune(self.facts(), clock.today_key())
         if facts:
             parts.append("\n".join(f.line() for f in facts))
+
+        threads = Threads(self.root.parent)
+        index = threads.index()
+        if index:
+            parts.append(
+                "## What's going on\n\n"
+                "Everything with a history. Times are elapsed, not dates.\n\n"
+                f"{index}"
+            )
+        if recent:
+            detail = threads.recall(recent)
+            if detail:
+                parts.append(
+                    "## Brought up just now\n\n"
+                    "He mentioned these, so here they are in full.\n\n"
+                    f"{detail}"
+                )
+
         today = self.read_day()
         if today:
             parts.append(f"## Today ({clock.today_key()})\n\n{today}")
