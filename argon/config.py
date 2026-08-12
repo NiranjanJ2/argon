@@ -111,6 +111,11 @@ class CheckInConfig(Base):
     min_gap_minutes: int = 25
     quiet_start_hour: int = 23
     quiet_end_hour: int = 7
+    #: Before this hour Argon may still deliver things Niranjan scheduled — a
+    #: block starting, an event about to begin — but must not start a
+    #: conversation of its own. School days are his; the evening is when there
+    #: is anything to talk about.
+    unprompted_from_hour: int = 16
 
 
 class GatewayConfig(Base):

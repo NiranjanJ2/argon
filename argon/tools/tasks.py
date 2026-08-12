@@ -91,7 +91,16 @@ class ListTasksTool(Tool):
 
     @property
     def description(self) -> str:
-        return "List Niranjan's pending tasks, sorted by priority then due date."
+        return (
+            "List Niranjan's pending tasks, sorted by priority then due date. "
+            "Each carries days_overdue and days_open. Read them the way a "
+            "secretary would: a task that has sat there for a week, or is days "
+            "past its due date and still open, has usually stopped being real — "
+            "it was finished and never ticked off, or quietly dropped. Ask him "
+            "which, rather than listing it again as ordinary pending work. Use "
+            "your judgement about when it is worth raising; there is no "
+            "threshold that makes it true."
+        )
 
     @property
     def read_only(self) -> bool:

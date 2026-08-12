@@ -235,3 +235,23 @@ def test_the_legacy_history_dump_is_archived_not_deleted(tmp_path):
     assert not (root / "HISTORY.md").exists()
     # The one surviving fact is preserved through the migration.
     assert any("cron" in f.text for f in Journal(tmp_path).facts())
+
+
+def test_days_are_consolidated_oldest_first(tmp_path, monkeypatch):
+    """It took the newest pending day and marked it done, so an older one was
+    stepped over and could never be reached again."""
+    from argon.core.journal import Journal
+    from argon.core import journal as journal_mod
+
+    monkeypatch.setattr(journal_mod.clock, "today_key", lambda *a, **k: "2026-08-11")
+    j = Journal(tmp_path)
+    for day in ("2026-08-08", "2026-08-09", "2026-08-10"):
+        j.note("something", day=day)
+
+    assert j.pending_day() == "2026-08-08"
+    j.mark_consolidated("2026-08-08")
+    assert j.pending_day() == "2026-08-09"
+    j.mark_consolidated("2026-08-09")
+    assert j.pending_day() == "2026-08-10"
+    j.mark_consolidated("2026-08-10")
+    assert j.pending_day() is None

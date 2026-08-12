@@ -83,6 +83,30 @@ def _when(stamp: str | None) -> str | None:
     return when_label(stamp)
 
 
+def _parse_stamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(_TZ)
+    except (TypeError, ValueError):
+        return None
+
+
+def _age_days(value: Any) -> int | None:
+    """Whole days since a task was last touched."""
+    stamp = _parse_stamp(value)
+    return max(0, (_now() - stamp).days) if stamp else None
+
+
+def _overdue_days(due: Any) -> int | None:
+    """Whole days past a due date, or None if it is not past."""
+    stamp = _parse_stamp(due)
+    if stamp is None:
+        return None
+    days = (_now().date() - stamp.date()).days
+    return days if days > 0 else None
+
+
 def _to_task(gt: dict[str, Any]) -> dict[str, Any]:
     """Convert a Google Tasks API item to an Argon task dict."""
     meta, notes = _decode_meta(gt.get("notes"))
@@ -98,6 +122,14 @@ def _to_task(gt: dict[str, Any]) -> dict[str, Any]:
         "due": gt.get("due"),
         # Weekday spelled out; the model invents them otherwise.
         "due_when": _when(gt.get("due")),
+        # How long this has been sitting there, stated rather than left to be
+        # worked out from a timestamp. "UCLA work" and "Math homework" both
+        # carried a due date six days past while Argon went on listing them as
+        # ordinary pending work — a secretary would have asked whether they
+        # were still real. No rule here decides that; it just stops being
+        # invisible.
+        "days_open": _age_days(gt.get("updated") or gt.get("id")),
+        "days_overdue": _overdue_days(gt.get("due")),
         "classroom_id": meta.get("cid"),
         "time_estimate_min": meta.get("e"),
         "time_actual_min": meta.get("act"),

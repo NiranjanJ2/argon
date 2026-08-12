@@ -270,6 +270,7 @@ class ReminderService:
         min_gap_minutes: int = 25,
         quiet_start_hour: int = 23,
         quiet_end_hour: int = 7,
+        unprompted_from_hour: int = 16,
     ) -> None:
         self.workspace = workspace
         # Explicit tz wins (tests); otherwise the process-wide clock.
@@ -281,6 +282,7 @@ class ReminderService:
         self.min_gap_minutes = min_gap_minutes
         self.quiet_start_hour = quiet_start_hour
         self.quiet_end_hour = quiet_end_hour
+        self.unprompted_from_hour = unprompted_from_hour
         self._state = DailyState(workspace)
         self._plan = DayPlan(workspace)
         self.ledger = CheckInLedger(workspace)
@@ -516,8 +518,13 @@ class ReminderService:
             self._pending_block = block
             return OCCASIONS["block_start"]
 
-        # Everything below is discretionary: the full floor and the cap apply.
+        # Everything below is discretionary: the full floor, the cap, and the
+        # hour before which Argon does not start conversations. A block he
+        # scheduled for 10 AM still lands — a secretary would not chat before
+        # four, but would certainly tell you about your ten o'clock.
         if at_cap or quiet_for < self.min_gap_minutes:
+            return None
+        if now.hour < self.unprompted_from_hour:
             return None
 
         # Before concluding the day has no shape, adopt what he has already
@@ -606,6 +613,9 @@ class ReminderService:
             "sentences, unprompted, in your own voice, the way a friend texts.\n\n"
             "Reply with the message itself and nothing else — no preamble, no "
             "explanation, no quotes around it.\n\n"
+            "If a task is days past due and still open, it has usually stopped "
+            "being real — finished and never ticked off, or quietly dropped. "
+            "Asking which is more useful than repeating it back to him.\n\n"
             "If a task shows scheduled_for, he has already decided when to do "
             "it. Mentioning it is fine — telling him to start it now is not. "
             "Never argue with a plan he has already made.\n\n"

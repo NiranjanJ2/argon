@@ -35,8 +35,10 @@ class RememberTool(Tool):
             "the internship', 'tomorrow is a rest day', 'I hate being asked "
             "twice'. Saying you'll remember does nothing; this is what stores it. "
             "Today's notes are reviewed at the end of the day and the ones that "
-            "still matter are kept. Set lasting=true only for facts that will be "
-            "true for months."
+            "still matter are kept. Set lasting=true for facts true for months. "
+            "Set standing=true for anything about how his weeks are shaped — "
+            "school hours, when he is free, recurring commitments; those are the "
+            "ones you will need most and they never expire."
         )
 
     @property
@@ -63,6 +65,14 @@ class RememberTool(Tool):
                     "type": "string",
                     "description": "YYYY-MM-DD after which it stops mattering. Only with lasting.",
                 },
+                "standing": {
+                    "type": "boolean",
+                    "description": (
+                        "True for a recurring shape of his schedule or life — "
+                        "'school days end at 3:40', 'free after 4pm', 'practice "
+                        "Tuesdays'. Never expires. Implies lasting."
+                    ),
+                },
             },
             "required": ["fact"],
         }
@@ -71,9 +81,15 @@ class RememberTool(Tool):
         fact = str(kwargs.get("fact") or "").strip()
         if not fact:
             return "Error: fact required."
-        if kwargs.get("lasting"):
-            stored = self._journal.add_fact(fact, until=kwargs.get("until") or None)
-            return f"Stored long-term: {stored.text}"
+        standing = bool(kwargs.get("standing"))
+        if standing or kwargs.get("lasting"):
+            stored = self._journal.add_fact(
+                fact,
+                until=None if standing else (kwargs.get("until") or None),
+                standing=standing,
+            )
+            kind = "Stored as a standing fact" if standing else "Stored long-term"
+            return f"{kind}: {stored.text}"
         self._journal.note(fact, kind="said")
         return "Noted for today."
 

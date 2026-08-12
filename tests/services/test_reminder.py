@@ -77,13 +77,14 @@ def _mode(service: ReminderService, mode: str) -> None:
 
 def test_an_untouched_afternoon_still_earns_a_check_in(tmp_path, monkeypatch):
     """The old policy needed a home-arrival stamp and stayed mute without one."""
-    service, _ = _service(tmp_path, monkeypatch, _at(13, 30))
+    service, _ = _service(tmp_path, monkeypatch, _at(17, 30))
     assert service.pick_occasion() is not None
 
 
-def test_the_morning_asks_what_the_day_looks_like(tmp_path, monkeypatch):
-    """The day starts by asking, not by announcing. There is no plan yet."""
-    service, _ = _service(tmp_path, monkeypatch, _at(8, 30))
+def test_the_day_starts_by_asking_what_it_looks_like(tmp_path, monkeypatch):
+    """Not in the morning any more: he is at school. The question belongs to
+    the part of the day he actually controls."""
+    service, _ = _service(tmp_path, monkeypatch, _at(16, 30))
     assert service.pick_occasion().kind == "plan_request"
 
 
@@ -94,7 +95,7 @@ def test_evening_gets_a_wrap_up(tmp_path, monkeypatch):
 
 
 def test_a_long_session_is_worth_remarking_on(tmp_path, monkeypatch):
-    service, clock = _service(tmp_path, monkeypatch, _at(13, 0))
+    service, clock = _service(tmp_path, monkeypatch, _at(17, 0))
     _mode(service, "working")
     clock.advance(40)
     assert service.pick_occasion().kind == "session"
@@ -111,13 +112,13 @@ def test_quiet_hours_silence_everything(tmp_path, monkeypatch):
 
 
 def test_napping_silences_everything(tmp_path, monkeypatch):
-    service, _ = _service(tmp_path, monkeypatch, _at(13, 30))
+    service, _ = _service(tmp_path, monkeypatch, _at(17, 30))
     _mode(service, "napping")
     assert service.pick_occasion() is None
 
 
 def test_a_short_session_is_not_worth_interrupting(tmp_path, monkeypatch):
-    service, clock = _service(tmp_path, monkeypatch, _at(13, 0))
+    service, clock = _service(tmp_path, monkeypatch, _at(17, 0))
     _mode(service, "working")
     clock.advance(10)
     assert service.pick_occasion() is None
@@ -125,14 +126,14 @@ def test_a_short_session_is_not_worth_interrupting(tmp_path, monkeypatch):
 
 def test_mid_session_nothing_but_the_session_may_interrupt(tmp_path, monkeypatch):
     """Deep work must not be broken into by an idle or ambient nudge."""
-    service, clock = _service(tmp_path, monkeypatch, _at(13, 0))
+    service, clock = _service(tmp_path, monkeypatch, _at(17, 0))
     _mode(service, "lock_in")
     clock.advance(5)
     assert service.pick_occasion() is None
 
 
 def test_an_occasion_does_not_repeat_inside_its_cooldown(tmp_path, monkeypatch):
-    service, clock = _service(tmp_path, monkeypatch, _at(13, 30))
+    service, clock = _service(tmp_path, monkeypatch, _at(17, 30))
     first = service.pick_occasion()
     service.ledger.record_fired(first.kind, clock.now)
     assert service.pick_occasion() != first
@@ -140,21 +141,21 @@ def test_an_occasion_does_not_repeat_inside_its_cooldown(tmp_path, monkeypatch):
 
 def test_a_silent_check_in_still_starts_the_cooldown(tmp_path, monkeypatch):
     """Otherwise a quiet model is re-asked every tick and burns calls."""
-    service, clock = _service(tmp_path, monkeypatch, _at(13, 30))
+    service, clock = _service(tmp_path, monkeypatch, _at(17, 30))
     service.ledger.record_fired("idle", clock.now)
     assert service.ledger.minutes_since_fired("idle", clock.now) == 0
     assert service.ledger.spoken_count() == 0
 
 
 def test_the_daily_cap_holds(tmp_path, monkeypatch):
-    service, clock = _service(tmp_path, monkeypatch, _at(13, 30), max_per_day=2)
+    service, clock = _service(tmp_path, monkeypatch, _at(17, 30), max_per_day=2)
     for i in range(2):
         service.ledger.record_said("idle", f"message {i}", clock.now - timedelta(hours=2))
     assert service.pick_occasion() is None
 
 
 def test_messages_are_spaced_out(tmp_path, monkeypatch):
-    service, clock = _service(tmp_path, monkeypatch, _at(13, 30), min_gap_minutes=25)
+    service, clock = _service(tmp_path, monkeypatch, _at(17, 30), min_gap_minutes=25)
     service.ledger.record_said("morning", "hey", clock.now - timedelta(minutes=5))
     assert service.pick_occasion() is None
 
@@ -171,7 +172,7 @@ def test_quiet_hours_wrap_past_midnight(tmp_path, monkeypatch, hour, quiet):
 
 
 def test_the_prompt_carries_what_was_already_said(tmp_path, monkeypatch):
-    service, clock = _service(tmp_path, monkeypatch, _at(13, 30))
+    service, clock = _service(tmp_path, monkeypatch, _at(17, 30))
     # Hours ago, so the min-gap guard still allows a fresh occasion.
     service.ledger.record_said(
         "morning", "chem pset is due tonight", clock.now - timedelta(hours=5)
@@ -182,19 +183,19 @@ def test_the_prompt_carries_what_was_already_said(tmp_path, monkeypatch):
 
 
 def test_the_ledger_survives_a_restart(tmp_path, monkeypatch):
-    service, clock = _service(tmp_path, monkeypatch, _at(13, 30))
+    service, clock = _service(tmp_path, monkeypatch, _at(17, 30))
     service.ledger.record_said("idle", "hey", clock.now)
 
-    revived, _ = _service(tmp_path, monkeypatch, _at(13, 30))
+    revived, _ = _service(tmp_path, monkeypatch, _at(17, 30))
     assert revived.ledger.spoken_count() == 1
     assert revived.ledger.said_today() == ["hey"]
 
 
 def test_a_new_day_clears_the_ledger(tmp_path, monkeypatch):
-    service, clock = _service(tmp_path, monkeypatch, _at(13, 30))
+    service, clock = _service(tmp_path, monkeypatch, _at(17, 30))
     service.ledger.record_said("idle", "yesterday", clock.now)
 
-    fresh, _ = _service(tmp_path, monkeypatch, _at(13, 30) + timedelta(days=1))
+    fresh, _ = _service(tmp_path, monkeypatch, _at(17, 30) + timedelta(days=1))
     assert fresh.ledger.spoken_count() == 0
 
 
@@ -210,7 +211,7 @@ async def test_tick_records_what_was_actually_said(tmp_path, monkeypatch):
         prompts.append(prompt)
         return "hey, how'd the pset go?"
 
-    service, _ = _service(tmp_path, monkeypatch, _at(13, 30), handler=speak)
+    service, _ = _service(tmp_path, monkeypatch, _at(17, 30), handler=speak)
 
     assert await service.tick() == "hey, how'd the pset go?"
     assert service.ledger.said_today() == ["hey, how'd the pset go?"]
@@ -218,7 +219,7 @@ async def test_tick_records_what_was_actually_said(tmp_path, monkeypatch):
 
 
 async def test_a_silent_turn_records_nothing(tmp_path, monkeypatch):
-    service, _ = _service(tmp_path, monkeypatch, _at(13, 30))
+    service, _ = _service(tmp_path, monkeypatch, _at(17, 30))
     assert await service.tick() == ""
     assert service.ledger.spoken_count() == 0
 
@@ -252,7 +253,7 @@ async def test_a_refusal_is_never_recorded_as_something_said(tmp_path, monkeypat
     async def refuse(_prompt: str) -> str:
         return "SKIP"
 
-    service, _ = _service(tmp_path, monkeypatch, _at(13, 30), handler=refuse)
+    service, _ = _service(tmp_path, monkeypatch, _at(17, 30), handler=refuse)
     assert await service.tick() == ""
     assert service.ledger.spoken_count() == 0
 
@@ -261,13 +262,13 @@ async def test_a_bare_no_is_never_recorded(tmp_path, monkeypatch):
     async def answer_the_question(_prompt: str) -> str:
         return "No."
 
-    service, _ = _service(tmp_path, monkeypatch, _at(13, 30), handler=answer_the_question)
+    service, _ = _service(tmp_path, monkeypatch, _at(17, 30), handler=answer_the_question)
     assert await service.tick() == ""
     assert service.ledger.spoken_count() == 0
 
 
 def test_the_prompt_asks_for_a_message_not_a_decision(tmp_path, monkeypatch):
-    service, _ = _service(tmp_path, monkeypatch, _at(13, 30))
+    service, _ = _service(tmp_path, monkeypatch, _at(17, 30))
     prompt = service.build_prompt(service.pick_occasion())
     assert "WRITE THE TEXT MESSAGE" in prompt
     assert reminder_mod.SKIP_TOKEN in prompt
@@ -287,34 +288,34 @@ def test_the_prompt_asks_for_a_message_not_a_decision(tmp_path, monkeypatch):
 
 def test_declining_to_plan_ends_the_asking(tmp_path, monkeypatch):
     """"I'm not planning today" has to land somewhere the gate reads."""
-    service, _ = _service(tmp_path, monkeypatch, _at(13, 30), tasks=0)
+    service, _ = _service(tmp_path, monkeypatch, _at(17, 30), tasks=0)
     service._plan.decline()
     assert service.pick_occasion() is None
 
 
 def test_a_free_stretch_is_offered_back_not_filled(tmp_path, monkeypatch):
     """With a plan and nothing scheduled now, the question is his to answer."""
-    service, _ = _service(tmp_path, monkeypatch, _at(13, 30), tasks=3)
-    service._plan.set_blocks([{"start": "17:00", "end": "18:00", "what": "Gym"}])
+    service, _ = _service(tmp_path, monkeypatch, _at(17, 30), tasks=3)
+    service._plan.set_blocks([{"start": "21:00", "end": "22:00", "what": "Gym"}])
     assert service.pick_occasion().kind == "open_stretch"
 
 
 def test_a_short_gap_is_not_worth_a_message(tmp_path, monkeypatch):
     """Twenty minutes before the next block is not usable time."""
-    service, _ = _service(tmp_path, monkeypatch, _at(13, 30), tasks=3)
-    service._plan.set_blocks([{"start": "14:00", "end": "16:00", "what": "SAT prep"}])
+    service, _ = _service(tmp_path, monkeypatch, _at(17, 30), tasks=3)
+    service._plan.set_blocks([{"start": "18:00", "end": "20:00", "what": "SAT prep"}])
     occasion = service.pick_occasion()
     assert occasion is None or occasion.kind != "open_stretch"
 
 
 def test_asking_for_a_plan_does_not_need_the_task_list(tmp_path, monkeypatch):
     """"What's your day look like" is answerable with Google down."""
-    service, _ = _service(tmp_path, monkeypatch, _at(13, 30), tasks=-1)
+    service, _ = _service(tmp_path, monkeypatch, _at(17, 30), tasks=-1)
     assert service.pick_occasion().kind == "plan_request"
 
 
 def test_an_active_session_counts_as_material(tmp_path, monkeypatch):
-    service, clock = _service(tmp_path, monkeypatch, _at(13, 0), tasks=0)
+    service, clock = _service(tmp_path, monkeypatch, _at(17, 0), tasks=0)
     _mode(service, "working")
     clock.advance(40)
     assert service.pick_occasion().kind == "session"
@@ -326,7 +327,7 @@ def test_an_active_session_counts_as_material(tmp_path, monkeypatch):
 
 
 def test_a_snooze_silences_every_occasion(tmp_path, monkeypatch):
-    service, _ = _service(tmp_path, monkeypatch, _at(8, 30), tasks=5)
+    service, _ = _service(tmp_path, monkeypatch, _at(16, 30), tasks=5)
     assert service.pick_occasion() is not None
 
     reminder_mod.snooze(tmp_path, hours=24, reason="rest day")
@@ -334,7 +335,7 @@ def test_a_snooze_silences_every_occasion(tmp_path, monkeypatch):
 
 
 def test_a_snooze_expires(tmp_path, monkeypatch):
-    service, clock = _service(tmp_path, monkeypatch, _at(8, 30), tasks=5)
+    service, clock = _service(tmp_path, monkeypatch, _at(16, 30), tasks=5)
     reminder_mod.snooze(tmp_path, hours=2, reason="nap")
     assert service.pick_occasion() is None
 
@@ -343,7 +344,7 @@ def test_a_snooze_expires(tmp_path, monkeypatch):
 
 
 def test_a_snooze_can_be_lifted(tmp_path, monkeypatch):
-    service, _ = _service(tmp_path, monkeypatch, _at(8, 30), tasks=5)
+    service, _ = _service(tmp_path, monkeypatch, _at(16, 30), tasks=5)
     reminder_mod.snooze(tmp_path, hours=24, reason="rest day")
     reminder_mod.clear_snooze(tmp_path)
     assert service.pick_occasion() is not None
@@ -376,7 +377,7 @@ async def test_a_reworded_check_in_is_never_delivered(tmp_path, monkeypatch):
     async def reword(_prompt: str) -> str:
         return "Ready to lock in a session for the project due next week?"
 
-    service, clock = _service(tmp_path, monkeypatch, _at(13, 30), handler=reword, tasks=3)
+    service, clock = _service(tmp_path, monkeypatch, _at(17, 30), handler=reword, tasks=3)
     service.ledger.record_said(
         "idle",
         "Project due next week—let's lock in a session to start it.",
@@ -399,11 +400,11 @@ def test_one_free_stretch_earns_one_message(tmp_path, monkeypatch):
     Three messages about the same free afternoon is precisely the "random
     messages throughout the day" this whole design exists to stop.
     """
-    service, clock = _service(tmp_path, monkeypatch, _at(12, 30))
-    service._plan.set_blocks([{"start": "15:00", "end": "16:00", "what": "Math"}])
+    service, clock = _service(tmp_path, monkeypatch, _at(16, 30))
+    service._plan.set_blocks([{"start": "19:00", "end": "20:00", "what": "Math"}])
 
     spoke = []
-    for _ in range(9):  # 12:30 -> 14:00, the whole gap
+    for _ in range(9):  # 16:30 -> 18:00, the whole gap
         occasion = service.pick_occasion()
         if occasion and occasion.kind == "open_stretch":
             spoke.append(clock.now)
@@ -427,7 +428,7 @@ def test_the_daily_cap_cannot_swallow_his_own_schedule(tmp_path, monkeypatch):
 
 
 def test_the_cap_still_binds_discretionary_messages(tmp_path, monkeypatch):
-    service, clock = _service(tmp_path, monkeypatch, _at(13, 0), max_per_day=2)
+    service, clock = _service(tmp_path, monkeypatch, _at(17, 0), max_per_day=2)
     service._plan.set_blocks([{"start": "17:00", "end": "18:00", "what": "Gym"}])
     for i in range(3):
         service.ledger.record_said("open_stretch", "offer {}".format(i), clock.now)
@@ -440,14 +441,14 @@ def test_back_to_back_blocks_both_get_a_word(tmp_path, monkeypatch):
     """A 2-4 block followed by a 4-6 block: the end of one and the start of the
     next are due at the same instant. The full 25-minute floor let the second
     one's 20-minute grace window close first, so it was never mentioned."""
-    service, clock = _service(tmp_path, monkeypatch, _at(16, 0))
+    service, clock = _service(tmp_path, monkeypatch, _at(19, 0))
     service._plan.set_blocks([
-        {"start": "14:00", "end": "16:00", "what": "SAT prep"},
-        {"start": "16:00", "end": "18:00", "what": "Math homework"},
+        {"start": "17:00", "end": "19:00", "what": "SAT prep"},
+        {"start": "19:00", "end": "21:00", "what": "Math homework"},
     ])
 
     seen = []
-    for _ in range(3):  # 16:00, 16:10, 16:20
+    for _ in range(3):  # 19:00, 19:10, 19:20
         occasion = service.pick_occasion()
         if occasion:
             seen.append((occasion.kind, service._pending_block.what))
@@ -464,13 +465,13 @@ def test_the_gate_does_not_ask_about_a_day_he_already_planned(tmp_path, monkeypa
     """He had a 3 PM and a 7 PM reminder and had said so twice in chat."""
     from argon.services import agenda
 
-    service, clock = _service(tmp_path, monkeypatch, _at(12, 30))
+    service, clock = _service(tmp_path, monkeypatch, _at(16, 30))
     # Reminders he scheduled himself — "I told you I'll start the math homework
     # at 3" is an answer, even though he never used the word plan.
     monkeypatch.setattr(agenda, "upcoming", lambda ws: [
-        {"summary": "Start Math homework", "start": _at(15), "end": None,
+        {"summary": "Start Math homework", "start": _at(19), "end": None,
          "kind": "reminder"},
-        {"summary": "Start UCLA work", "start": _at(19), "end": None,
+        {"summary": "Start UCLA work", "start": _at(21), "end": None,
          "kind": "reminder"},
     ])
 

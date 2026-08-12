@@ -276,6 +276,7 @@ def build_runtime(config: Config) -> Runtime:
         min_gap_minutes=checkin_cfg.min_gap_minutes,
         quiet_start_hour=checkin_cfg.quiet_start_hour,
         quiet_end_hour=checkin_cfg.quiet_end_hour,
+        unprompted_from_hour=checkin_cfg.unprompted_from_hour,
     )
 
     return Runtime(

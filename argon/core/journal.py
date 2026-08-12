@@ -81,6 +81,7 @@ def describe_tool(name: str, args: dict[str, Any]) -> str | None:
 
 _FACT_RE = re.compile(
     r"^-\s*(?P<date>\d{4}-\d{2}-\d{2})\s*·\s*(?P<text>.*?)"
+    r"(?:\s*\((?P<standing>standing)\))?"
     r"(?:\s*\(until\s+(?P<until>\d{4}-\d{2}-\d{2})\))?\s*$"
 )
 
@@ -92,9 +93,15 @@ class Fact:
     learned: str          # YYYY-MM-DD
     text: str
     until: str | None = None   # YYYY-MM-DD, after which it is dropped
+    #: A recurring shape of his life — "school day ends at 3:40", "practice on
+    #: Tuesdays" — rather than something that happens once. These never expire
+    #: and are never dropped to make room, because they are the facts Argon
+    #: needs most and the ones a one-off deadline would otherwise crowd out.
+    standing: bool = False
 
     def line(self) -> str:
-        tail = f" (until {self.until})" if self.until else ""
+        tail = " (standing)" if self.standing else ""
+        tail += f" (until {self.until})" if self.until and not self.standing else ""
         # UNDATED facts came from an older build or from hand-editing. Printing
         # the sentinel puts "0000-00-00" in every system prompt, which reads as
         # corruption to anyone looking at it, model included.
@@ -103,7 +110,7 @@ class Fact:
         return f"- {self.learned} · {self.text}{tail}"
 
     def expired(self, today: str) -> bool:
-        return bool(self.until and self.until < today)
+        return bool(not self.standing and self.until and self.until < today)
 
 
 def parse_facts(text: str) -> list[Fact]:
@@ -119,6 +126,7 @@ def parse_facts(text: str) -> list[Fact]:
                 learned=match["date"],
                 text=match["text"].strip(),
                 until=match["until"],
+                standing=bool(match["standing"]),
             ))
         else:
             # Written by an older build, or by hand. Keep it rather than lose it.
@@ -130,21 +138,72 @@ def render_facts(facts: list[Fact]) -> str:
     return "# Memory\n\n" + "\n".join(f.line() for f in facts) + "\n"
 
 
+#: Below this many significant words, two facts are only "the same" if they are
+#: literally the same. Word overlap on a short sentence is meaningless — "fact 1"
+#: and "fact 28" share every word longer than two characters.
+_OVERLAP_FLOOR_WORDS = 5
+
+
+def _norm(text: str) -> str:
+    """Text with punctuation and spacing differences flattened away."""
+    return " ".join(re.findall(r"[a-z0-9:]+", text.lower()))
+
+
+def _key(text: str) -> frozenset[str]:
+    """The words that make a fact what it is, for comparing two of them."""
+    return frozenset(_norm(text).split())
+
+
+def _same_fact(a: str, b: str) -> bool:
+    """Are these two the same thing said twice?
+
+    Exact text matching let MEMORY.md accumulate:
+
+        Math Analysis summer assignments are due 2026-08-16 20:00 PT.
+        Math Analysis summer assignments are due 2026-08-16 20:00 PT
+
+    — a trailing full stop apart, both in every system prompt. The model
+    re-states what it already knows on each consolidation, never identically,
+    so the comparison has to survive punctuation and small rewordings.
+
+    It must not go further than that. Judging short facts by word overlap
+    collapses "fact 1" and "fact 28" into one, so below a handful of words this
+    falls back to comparing the normalised text.
+    """
+    first, second = _key(a), _key(b)
+    if _norm(a) == _norm(b):
+        return True
+    if min(len(first), len(second)) < _OVERLAP_FLOOR_WORDS:
+        return False
+    # Containment, not symmetric overlap. "School resumes 2026-08-12" and
+    # "School resumes 2026-08-12; before then there is no school." are one
+    # fact restated, but they score 0.5 on Jaccard because the longer version
+    # is penalised for saying more. What matters is whether one is wholly
+    # inside the other; the later wording then wins, so nothing is lost.
+    shared = len(first & second)
+    return shared / min(len(first), len(second)) >= 0.9
+
+
 def prune(facts: list[Fact], today: str, *, limit: int = MAX_FACTS) -> list[Fact]:
     """Drop expired and duplicate facts, then keep the newest ``limit``."""
-    seen: set[str] = set()
     kept: list[Fact] = []
     for fact in facts:
         if fact.expired(today):
             continue
-        key = fact.text.strip().lower()
-        if key in seen:
+        # Later wins: a restated fact is usually the fresher wording, and its
+        # `until` reflects what was known most recently.
+        clash = next((k for k in kept if _same_fact(k.text, fact.text)), None)
+        if clash is not None:
+            kept[kept.index(clash)] = fact
             continue
-        seen.add(key)
         kept.append(fact)
-    # Newest last so the file reads chronologically, but the cap drops oldest.
+    # Newest last so the file reads chronologically, but the cap drops oldest —
+    # never a standing fact, which is the kind worth keeping longest.
     kept.sort(key=lambda f: f.learned)
-    return kept[-limit:]
+    standing = [f for f in kept if f.standing]
+    passing = [f for f in kept if not f.standing]
+    room = max(0, limit - len(standing))
+    return sorted([*standing, *passing[-room:]], key=lambda f: f.learned)
 
 
 class Journal:
@@ -194,10 +253,12 @@ class Journal:
         self.memory_file.parent.mkdir(parents=True, exist_ok=True)
         self.memory_file.write_text(render_facts(facts), encoding="utf-8")
 
-    def add_fact(self, text: str, *, until: str | None = None) -> Fact:
+    def add_fact(
+        self, text: str, *, until: str | None = None, standing: bool = False
+    ) -> Fact:
         """Record a durable fact immediately, without waiting for nightfall."""
         fact = Fact(learned=clock.today_key(), text=" ".join(text.split())[:MAX_FACT_CHARS],
-                    until=until)
+                    until=None if standing else until, standing=standing)
         self.write_facts(prune([*self.facts(), fact], clock.today_key()))
         return fact
 
@@ -237,12 +298,18 @@ class Journal:
         return removed
 
     def pending_day(self) -> str | None:
-        """The most recent finished day that still needs consolidating."""
+        """The *oldest* finished day that still needs consolidating.
+
+        This took the newest, then marked it done — so if the gateway was down
+        for a day, or two days ran together, the older one was stepped over and
+        could never be reached again: ``done`` had already advanced past it.
+        Days are folded in the order they happened, one per rollover.
+        """
         today = clock.today_key()
         done = self.last_consolidated()
         candidates = sorted(p.stem for p in self.days.glob("*.md") if p.stem < today)
         candidates = [d for d in candidates if done is None or d > done]
-        return candidates[-1] if candidates else None
+        return candidates[0] if candidates else None
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +337,15 @@ _CONSOLIDATE_TOOL = [
                                 "until": {
                                     "type": "string",
                                     "description": "YYYY-MM-DD after which this stops mattering. Omit if permanent.",
+                                },
+                                "standing": {
+                                    "type": "boolean",
+                                    "description": (
+                                        "True for a recurring shape of his life — "
+                                        "'school days end at 3:40', 'practice on "
+                                        "Tuesdays', 'he is free after 4'. These never "
+                                        "expire. False for one-off events."
+                                    ),
                                 },
                             },
                             "required": ["fact"],
@@ -300,10 +376,19 @@ Call carry_forward to decide what survives.
 
 Keep a fact only if it will still matter in a week: a commitment, a preference,
 a deadline, a change in his life, something he asked you to remember. Do not
-keep routine chatter, anything already in long-term memory, or anything you are
-inferring rather than reading. Write each fact as a plain sentence that will
-still make sense months from now, and set `until` on anything with a natural
-end date.
+keep routine chatter, or anything you are inferring rather than reading.
+
+**Never restate something already in long-term memory above.** Repeating it in
+slightly different words does not refresh it; it just puts the same fact in
+every prompt twice. If an existing fact needs correcting, drop it and write the
+new version.
+
+Mark a fact `standing` when it is a recurring shape of his life rather than a
+single event — "school days end at 3:40", "practice on Tuesdays", "he is free
+after 4pm". Those are the facts worth most and they never expire. Everything
+else is a one-off: write it as a plain sentence and set `until` to the day it
+stops mattering. "He is starting math homework at 3pm today" is one-off and
+should expire tonight, not in a week.
 
 Drop an existing fact only when today's entries show it is finished or wrong.
 Keeping nothing and dropping nothing is a perfectly good answer."""
@@ -346,8 +431,10 @@ async def consolidate_day(
         if not text:
             continue
         until = item.get("until") if isinstance(item, dict) else None
+        standing = bool(item.get("standing")) if isinstance(item, dict) else False
         added.append(Fact(learned=day, text=text[:MAX_FACT_CHARS],
-                          until=until if _valid_day(until) else None))
+                          until=None if standing else (until if _valid_day(until) else None),
+                          standing=standing))
 
     journal.write_facts(prune([*surviving, *added], clock.today_key()))
     journal.mark_consolidated(day)
