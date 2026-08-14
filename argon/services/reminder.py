@@ -106,7 +106,6 @@ OCCASIONS: dict[str, Occasion] = {
         Occasion("block_start", "a block of his plan starts about now", 0),
         Occasion("block_end", "a block of his plan just finished", 0),
         Occasion("open_stretch", "he left this stretch of the day unclaimed", 0),
-        Occasion("session", "a work session has been running a while", 45),
         Occasion("evening", "the day is winding down", 0),
     )
 }
@@ -667,10 +666,14 @@ class ReminderService:
             return OCCASIONS["block_end"]
 
         if mode in ("working", "lock_in"):
-            # Otherwise mid-flow, only the session occasion earns an interruption.
-            minutes = self._state.get_work_session_duration_minutes() or 0
-            if minutes >= SESSION_FLOOR_MINUTES and self._ready("session", now):
-                return OCCASIONS["session"]
+            # Mid-flow, nothing else earns an interruption. There used to be a
+            # `session` occasion here that fired every 45 minutes while he
+            # worked; on the first day of school it went off six times and four
+            # were suppressed as rewords of each other, because "you're on
+            # APUSH, want to switch to Math?" is all there is to say and he did
+            # not ask. Every moment worth interrupting for is already covered:
+            # a block starting, a block ending, an event about to begin. Being
+            # mid-work is not an occasion.
             return None
 
         if mode == "done":

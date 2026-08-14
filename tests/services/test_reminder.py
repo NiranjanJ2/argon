@@ -94,11 +94,15 @@ def test_evening_gets_a_wrap_up(tmp_path, monkeypatch):
     assert service.pick_occasion().kind == "evening"
 
 
-def test_a_long_session_is_worth_remarking_on(tmp_path, monkeypatch):
+def test_being_mid_work_is_not_an_occasion(tmp_path, monkeypatch):
+    """There was a `session` occasion here that fired every 45 minutes while he
+    worked. On the first day of school it went off six times and four were
+    suppressed as rewords of each other, because "you're on APUSH, want to
+    switch to Math?" is the only thing it had to say and he had not asked."""
     service, clock = _service(tmp_path, monkeypatch, _at(17, 0))
     _mode(service, "working")
     clock.advance(40)
-    assert service.pick_occasion().kind == "session"
+    assert service.pick_occasion() is None
 
 
 # ---------------------------------------------------------------------------
@@ -314,11 +318,13 @@ def test_asking_for_a_plan_does_not_need_the_task_list(tmp_path, monkeypatch):
     assert service.pick_occasion().kind == "plan_request"
 
 
-def test_an_active_session_counts_as_material(tmp_path, monkeypatch):
+def test_a_block_boundary_still_interrupts_work(tmp_path, monkeypatch):
+    """Removing the mid-work nag must not silence the moments he chose."""
     service, clock = _service(tmp_path, monkeypatch, _at(17, 0), tasks=0)
+    service._plan.set_blocks([{"start": "17:00", "end": "19:00", "what": "SAT prep"}])
     _mode(service, "working")
-    clock.advance(40)
-    assert service.pick_occasion().kind == "session"
+    clock.advance(120)          # 19:00 — the block he set is over
+    assert service.pick_occasion().kind == "block_end"
 
 
 # ---------------------------------------------------------------------------

@@ -30,7 +30,10 @@ class GetDailyOverviewTool(Tool):
             "Get today's full picture in one call: "
             "calendar events for today, all pending tasks (sorted by priority), "
             "and classroom assignments due in the next 7 days. "
-            "Use this at the start of a session or when Niranjan asks what's going on."
+            "Use this at the start of a session or when Niranjan asks what's going on. "
+            "The `board` field is the answer to \"what's due\" already written out — "
+            "relay every line of `board.text` rather than summarising it, and check "
+            "your reply against `board.counts`."
         )
 
     @property
@@ -49,14 +52,60 @@ class GetDailyOverviewTool(Tool):
         from argon.google.auth import GoogleAuth
 
         auth = GoogleAuth(self._workspace)
-        return json.dumps(
-            {
-                "calendar_today": self._section(auth, "work", self._calendar_today),
-                "tasks": self._section(auth, "work", self._tasks),
-                "assignments_next_7d": self._section(auth, "school", self._assignments),
-            },
-            indent=2,
-        )
+        payload = {
+            "calendar_today": self._section(auth, "work", self._calendar_today),
+            "tasks": self._section(auth, "work", self._tasks),
+            "assignments_next_7d": self._section(auth, "school", self._assignments),
+        }
+        # Asked "what's due", the model read all twelve assignments and wrote
+        # three of them into prose as though that were the board — including
+        # dropping a whole course. Nothing was truncated; it simply lost items
+        # while transcribing JSON into a sentence. So the list it should relay
+        # is built here, exactly once, and the counts make a short answer
+        # visibly wrong instead of quietly wrong.
+        payload["board"] = self._board(payload)
+        return json.dumps(payload, indent=2)
+
+    @staticmethod
+    def _board(payload: dict[str, Any]) -> dict[str, Any]:
+        """The list to read back verbatim, plus what it should add up to."""
+        assignments = payload.get("assignments_next_7d")
+        tasks = payload.get("tasks")
+        events = payload.get("calendar_today")
+
+        lines: list[str] = []
+        if isinstance(assignments, list) and assignments:
+            lines.append("Due from Classroom:")
+            for a in assignments:
+                course = f" ({a['course']})" if a.get("course") else ""
+                lines.append(f"  - {a.get('title', '?')}{course} — {a.get('due_when') or a.get('due')}")
+        if isinstance(tasks, list) and tasks:
+            lines.append("Tasks:")
+            for t in tasks:
+                when = f" — {t['due_when']}" if t.get("due_when") else ""
+                lines.append(f"  - {t.get('title', '?')}{when}")
+        if isinstance(events, list) and events:
+            lines.append("On the calendar today:")
+            for e in events:
+                lines.append(f"  - {e.get('summary', '?')} — {e.get('when') or ''}")
+
+        counts = {
+            "assignments": len(assignments) if isinstance(assignments, list) else 0,
+            "tasks": len(tasks) if isinstance(tasks, list) else 0,
+            "events": len(events) if isinstance(events, list) else 0,
+        }
+        return {
+            "counts": counts,
+            "text": "\n".join(lines) or "Nothing due and nothing scheduled.",
+            "how_to_use": (
+                "When he asks what is due or what the board looks like, relay "
+                "`text` — every line of it. Do not summarise it into a "
+                "sentence and do not choose the important ones: he is asking "
+                "what exists, and an answer missing {} of {} assignments is "
+                "worse than no answer because he cannot tell.".format(
+                    max(0, counts["assignments"] - 3), counts["assignments"])
+            ),
+        }
 
     def _section(self, auth, account: str, fetch: Callable[[], Any]) -> Any:
         """Run one section, degrading to an actionable error instead of failing."""

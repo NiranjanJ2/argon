@@ -20,9 +20,8 @@ class HabitsTracker:
         self._path = workspace / "habits" / "habits.json"
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
-    def _load(self) -> dict[str, Any]:
-        if self._path.exists():
-            return json.loads(self._path.read_text())
+    @staticmethod
+    def _defaults() -> dict[str, Any]:
         return {
             "subject_times": {},       # subject -> list of actual minutes
             "priority_order": {},      # subject -> avg priority rank (1=highest)
@@ -31,6 +30,27 @@ class HabitsTracker:
             "session_lengths": [],     # list of total work session minutes per day
             "task_completion_rate": [],# list of (total_tasks, completed_tasks) per day
         }
+
+    def _load(self) -> dict[str, Any]:
+        """Whatever is on disk, merged over a complete set of defaults.
+
+        This returned the file verbatim, so a single missing key was a KeyError
+        on the next write — and `set_mode("working")` is the most common state
+        change there is. A hand-written reset that spelled `work_start_times`
+        as `work_starts` took it down for two days, through the first day of
+        school, reported to him only as "set_mode failed (internal error)".
+        A stats file must never be able to break a state change.
+        """
+        data = self._defaults()
+        try:
+            stored = json.loads(self._path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return data
+        if isinstance(stored, dict):
+            for key, value in stored.items():
+                if key in data and isinstance(value, type(data[key])):
+                    data[key] = value
+        return data
 
     def _save(self, data: dict[str, Any]) -> None:
         self._path.write_text(json.dumps(data, indent=2))
