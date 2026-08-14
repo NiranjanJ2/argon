@@ -28,31 +28,44 @@ class ContextBuilder:
         extra_context: str | None = None,
         recent: str = "",
     ) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
-        parts = [self._get_identity()]
+        """Build the system prompt: everything stable first, then what changes.
+
+        Order is a cost and latency decision, not a stylistic one. Providers
+        cache on an exact prefix, so the first byte that differs from last turn
+        throws away everything after it. Memory used to sit in the middle, and
+        the thread recall inside it keys off whatever he just said — so every
+        single message invalidated the skills below it and Argon re-processed
+        ~1,500 tokens it had already paid for. Measured hit rate was 24.9%.
+
+        So: identity, the persona files and the skills never move; then memory,
+        which turns over daily; then today's page; then the recall block, which
+        is different every message and therefore last.
+        """
+        stable = [self._get_identity()]
 
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
-            parts.append(bootstrap)
-
-        memory = self.memory.context(recent=recent)
-        if memory:
-            parts.append(f"# Memory\n\n{memory}")
+            stable.append(bootstrap)
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
+                stable.append(f"# Active Skills\n\n{always_content}")
 
         skills_summary = self.skills.build_skills_summary()
         if skills_summary:
-            parts.append(f"""# Skills
+            stable.append(f"""# Skills
 
 The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")
+
+        parts = stable
+        memory = self.memory.context(recent=recent)
+        if memory:
+            parts.append(f"# Memory\n\n{memory}")
 
         if extra_context:
             parts.append(extra_context)

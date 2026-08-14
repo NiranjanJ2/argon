@@ -103,21 +103,28 @@ class SetDayPlanTool(Tool):
         if not blocks:
             return "Error: give at least one block, or planning: false."
 
+        # What it is replacing, so a rewrite cannot be silent. Asked "what's the
+        # board looking like" it rewrote his whole day and answered "Plan set",
+        # and he had to work out for himself what had happened to it.
+        before = {b.what for b in self._plan.blocks()}
         stored = self._plan.set_blocks(blocks)
+        after = {b.what for b in stored}
+        dropped = sorted(before - after)
         if not stored:
             return (
                 "Error: none of those blocks had a usable start time. "
                 "Use '14:00' or '2pm'."
             )
-        dropped = len(blocks) - len(stored)
+        unusable = len(blocks) - len(stored)
         lines = "; ".join(
             "{}{} {}".format(b.start, "-" + b.end if b.end else "", b.what)
             for b in stored
         )
         # Say what was dropped. A block silently missing from the plan is worse
         # than none at all — he would believe Argon had it.
-        note = " ({} block(s) had no usable time and were dropped)".format(dropped) if dropped else ""
-        return "Plan set: {}{}".format(lines, note)
+        note = " ({} block(s) had no usable time and were skipped)".format(unusable) if unusable else ""
+        lost = "  REMOVED from his plan: {}".format(", ".join(dropped)) if dropped else ""
+        return "Plan set: {}{}{}".format(lines, note, lost)
 
 
 class UpdatePlanBlockTool(Tool):
