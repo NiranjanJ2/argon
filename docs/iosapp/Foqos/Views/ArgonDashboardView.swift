@@ -177,33 +177,32 @@ struct ArgonDashboardView: View {
               guard !task.isStarted else { return }
               Task { await bridge.startTask(task) }
             }
-            // Swipe left to push it to tomorrow, swipe right to tick it off.
-            // Deferring is the thing done most often and to the most items, so
-            // it gets the gesture that is reachable with a thumb; finishing is
-            // rarer and more deliberate, and a full swipe that completed work
-            // by accident is not a mistake that can be undone from here.
+            // Swipe left to tick it off, swipe right to push it to tomorrow.
+            // His call on which way round: the muscle memory that matters is
+            // his, not a usability argument. Completing stays first on the
+            // trailing edge so a full swipe does the obvious thing.
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-              Button {
-                Task { await bridge.updateTask(task, due: tomorrowString) }
-              } label: {
-                Label("Tomorrow", systemImage: "moon.zzz.fill")
-              }
-              .tint(ArgonPalette.cobalt)
-
-              Button {
-                Task { await bridge.completeTask(task) }
-              } label: {
-                Label("Complete", systemImage: "checkmark")
-              }
-              .tint(.green)
-            }
-            .swipeActions(edge: .leading, allowsFullSwipe: true) {
               Button {
                 Task { await bridge.completeTask(task) }
               } label: {
                 Label("Done", systemImage: "checkmark.circle.fill")
               }
               .tint(.green)
+
+              Button {
+                Task { await bridge.updateTask(task, due: tomorrowString) }
+              } label: {
+                Label("Tomorrow", systemImage: "moon.zzz.fill")
+              }
+              .tint(ArgonPalette.cobalt)
+            }
+            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+              Button {
+                Task { await bridge.updateTask(task, due: tomorrowString) }
+              } label: {
+                Label("Tomorrow", systemImage: "moon.zzz.fill")
+              }
+              .tint(ArgonPalette.cobalt)
             }
             .contextMenu {
               Button("Start", systemImage: "play.fill") {
