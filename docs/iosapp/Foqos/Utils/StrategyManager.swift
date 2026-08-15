@@ -1,0 +1,944 @@
+import SwiftData
+import SwiftUI
+import WidgetKit
+
+class StrategyManager: ObservableObject {
+  static var shared = StrategyManager()
+
+  static let availableStrategies: [BlockingStrategy] = [
+    NFCSoftUnblockBlockingStrategy(),
+    QRSoftUnblockBlockingStrategy(),
+    ManualBlockingStrategy(),
+    NFCBlockingStrategy(),
+    NFCManualBlockingStrategy(),
+    NFCTimerBlockingStrategy(),
+    NFCPauseTimerBlockingStrategy(),
+    QRCodeBlockingStrategy(),
+    QRManualBlockingStrategy(),
+    QRTimerBlockingStrategy(),
+    QRPauseTimerBlockingStrategy(),
+    ShortcutTimerBlockingStrategy(),
+  ]
+
+  @Published var elapsedTime: TimeInterval = 0
+  @Published var sessionDisplayTime: TimeInterval = 0
+  @Published var timer: Timer?
+  @Published var activeSession: BlockedProfileSession?
+
+  @Published var showCustomStrategyView: Bool = false
+  @Published var customStrategyView: (any View)? = nil
+  @Published var customStrategyViewPresentationDetents: Set<PresentationDetent> = [
+    .medium, .large,
+  ]
+
+  @Published var errorMessage: String?
+
+  /// How long an emergency unblock also holds Argon off. Matches the server's
+  /// `ios.overrideMinutes` default; the server enforces its own window too.
+  private let argonOverrideMinutes = 120
+
+  @AppStorage("emergencyUnblocksRemaining") private var emergencyUnblocksRemaining: Int = 3
+  @AppStorage("emergencyUnblocksResetPeriodInWeeks") private
+    var emergencyUnblocksResetPeriodInWeeks: Int = 4
+  @AppStorage("lastEmergencyUnblocksResetDate") private var lastEmergencyUnblocksResetDateTimestamp:
+    Double = 0
+
+  private let liveActivityManager = LiveActivityManager.shared
+
+  private let timersUtil = TimersUtil()
+  private let appBlocker = AppBlockerUtil()
+
+  var isBlocking: Bool {
+    return activeSession?.isActive == true
+  }
+
+  var isBreakActive: Bool {
+    return activeSession?.isBreakActive == true
+  }
+
+  var isBreakAvailable: Bool {
+    return activeSession?.isBreakAvailable ?? false
+  }
+
+  var isPauseActive: Bool {
+    return activeSession?.isPauseActive == true
+  }
+
+  func defaultReminderMessage(forProfile profile: BlockedProfiles?) -> String {
+    let baseMessage = "Get back to productivity"
+    guard let profile else {
+      return baseMessage
+    }
+    return baseMessage + " by enabling \(profile.name)"
+  }
+
+  func loadActiveSession(context: ModelContext) {
+    activeSession = getActiveSession(context: context)
+
+    if activeSession?.isActive == true {
+      startTimer()
+
+      // Start live activity for existing session if one exists
+      // live activities can only be started when the app is in the foreground
+      if let session = activeSession {
+        liveActivityManager.startSessionActivity(session: session)
+      }
+    } else {
+      stopTimer()
+      elapsedTime = 0
+      sessionDisplayTime = 0
+
+      // Close live activity if no session is active and a scheduled session might have ended
+      liveActivityManager.endSessionActivity()
+    }
+
+    // Reload widget to reflect any changes from extension (e.g., timer expiration)
+    WidgetCenter.shared.reloadTimelines(ofKind: "ProfileControlWidget")
+  }
+
+  func toggleBlocking(context: ModelContext, activeProfile: BlockedProfiles?) {
+    if isBlocking {
+      stopBlocking(context: context)
+    } else {
+      startBlocking(context: context, activeProfile: activeProfile)
+    }
+  }
+
+  func toggleBreak(context: ModelContext) {
+    guard let session = activeSession else {
+      print("active session does not exist")
+      return
+    }
+
+    if session.isBreakActive {
+      stopBreak(context: context)
+    } else {
+      startBreak(context: context)
+    }
+  }
+
+  func startTimer() {
+    stopTimer()
+    updateSessionTimes()
+
+    timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+      self?.updateSessionTimes()
+    }
+  }
+
+  func stopTimer() {
+    timer?.invalidate()
+    timer = nil
+  }
+
+  private func updateSessionTimes(at date: Date = Date()) {
+    guard let session = activeSession else {
+      elapsedTime = 0
+      sessionDisplayTime = 0
+      return
+    }
+
+    let focusTime = SessionTimeCalculator.elapsedFocusTime(for: session, at: date)
+    elapsedTime = focusTime
+    sessionDisplayTime = SessionTimeCalculator.displayedTime(
+      for: session,
+      elapsedFocusTime: focusTime,
+      at: date
+    )
+  }
+
+  func toggleSessionFromDeeplink(
+    _ profileId: String,
+    url: URL,
+    context: ModelContext
+  ) {
+    guard let profileUUID = UUID(uuidString: profileId) else {
+      self.errorMessage = "failed to parse profile in tag"
+      return
+    }
+
+    do {
+      guard
+        let profile: BlockedProfiles = try BlockedProfiles.findProfile(
+          byID: profileUUID,
+          in: context
+        )
+      else {
+        self.errorMessage =
+          "Failed to find a profile stored locally that matches the tag"
+        return
+      }
+
+      let manualStrategy = getStrategy(id: ManualBlockingStrategy.id, context: context)
+
+      if let localActiveSession = getActiveSession(context: context) {
+        if localActiveSession.blockedProfile.disableBackgroundStops {
+          print(
+            "profile: \(localActiveSession.blockedProfile.name) has disable background stops enabled, not stopping it"
+          )
+          self.errorMessage =
+            "profile: \(localActiveSession.blockedProfile.name) has disable background stops enabled, not stopping it"
+          return
+        }
+
+        _ =
+          manualStrategy
+          .stopBlocking(
+            context: context,
+            session: localActiveSession
+          )
+
+        if localActiveSession.blockedProfile.id != profile.id {
+          print(
+            "User is switching sessions from deep link"
+          )
+
+          _ = manualStrategy.startBlocking(
+            context: context,
+            profile: profile,
+            forceStart: true
+          )
+        }
+      } else {
+        _ = manualStrategy.startBlocking(
+          context: context,
+          profile: profile,
+          forceStart: true
+        )
+      }
+    } catch {
+      self.errorMessage = "Something went wrong fetching profile"
+    }
+  }
+
+  func startSessionFromBackground(
+    _ profileId: UUID,
+    context: ModelContext,
+    durationInMinutes: Int? = nil
+  ) {
+    do {
+      guard
+        let profile = try BlockedProfiles.findProfile(
+          byID: profileId,
+          in: context
+        )
+      else {
+        self.errorMessage =
+          "Failed to find a profile stored locally that matches the tag"
+        return
+      }
+
+      if let localActiveSession = getActiveSession(context: context) {
+        print(
+          "session is already active for profile: \(localActiveSession.blockedProfile.name), not starting a new one"
+        )
+        return
+      }
+
+      if let duration = durationInMinutes {
+        if duration < 15 || duration > 1440 {
+          self.errorMessage = "Duration must be between 15 and 1440 minutes"
+          return
+        }
+
+        if let strategyTimerData = StrategyTimerData.toData(
+          from: StrategyTimerData(durationInMinutes: duration, hideStopButton: false)
+        ) {
+          profile.strategyData = strategyTimerData
+          profile.updatedAt = Date()
+          BlockedProfiles.updateSnapshot(for: profile)
+          try context.save()
+        }
+
+        let shortcutTimerStrategy = getStrategy(
+          id: ShortcutTimerBlockingStrategy.id, context: context)
+        _ = shortcutTimerStrategy.startBlocking(
+          context: context,
+          profile: profile,
+          forceStart: true
+        )
+      } else {
+        let manualStrategy = getStrategy(id: ManualBlockingStrategy.id, context: context)
+        _ = manualStrategy.startBlocking(
+          context: context,
+          profile: profile,
+          forceStart: true
+        )
+      }
+    } catch {
+      self.errorMessage = "Something went wrong fetching profile"
+    }
+  }
+
+  func pauseActiveSessionFromBackground(
+    context: ModelContext,
+    schedulePause: (BlockedProfiles) throws -> Void =
+      DeviceActivityCenterUtil.schedulePauseTimerActivity
+  ) throws -> String {
+    guard let session = getActiveSession(context: context) else {
+      throw PauseActiveSessionError.noActiveSession
+    }
+
+    let profile = session.blockedProfile
+    let profileName = profile.name
+    let strategy = StrategyManager.availableStrategies.first {
+      $0.getIdentifier() == session.tag
+    }
+
+    guard strategy?.hasPauseMode == true else {
+      throw PauseActiveSessionError.unsupportedStrategy(profileName: profileName)
+    }
+
+    guard !session.isPauseActive else {
+      throw PauseActiveSessionError.alreadyPaused(profileName: profileName)
+    }
+
+    guard !session.isBreakActive else {
+      throw PauseActiveSessionError.breakActive(profileName: profileName)
+    }
+
+    do {
+      try schedulePause(profile)
+    } catch {
+      throw PauseActiveSessionError.schedulingFailed(
+        profileName: profileName,
+        reason: error.localizedDescription
+      )
+    }
+
+    return profileName
+  }
+
+  func stopSessionFromBackground(
+    _ profileId: UUID,
+    context: ModelContext
+  ) {
+    do {
+      guard
+        let profile = try BlockedProfiles.findProfile(
+          byID: profileId,
+          in: context
+        )
+      else {
+        self.errorMessage =
+          "Failed to find a profile stored locally that matches the tag"
+        return
+      }
+
+      let manualStrategy = getStrategy(id: ManualBlockingStrategy.id, context: context)
+
+      guard let localActiveSession = getActiveSession(context: context) else {
+        print(
+          "session is not active for profile: \(profile.name), not stopping it"
+        )
+        return
+      }
+
+      if localActiveSession.blockedProfile.id != profile.id {
+        print(
+          "session is not active for profile: \(profile.name), not stopping it"
+        )
+        self.errorMessage =
+          "session is not active for profile: \(profile.name), not stopping it"
+        return
+      }
+
+      if profile.disableBackgroundStops {
+        print(
+          "profile: \(profile.name) has disable background stops enabled, not stopping it"
+        )
+        self.errorMessage =
+          "profile: \(profile.name) has disable background stops enabled, not stopping it"
+        return
+      }
+
+      let _ = manualStrategy.stopBlocking(
+        context: context,
+        session: localActiveSession
+      )
+    } catch {
+      self.errorMessage = "Something went wrong fetching profile"
+    }
+  }
+
+  /// Apply a trusted, authenticated command from the paired Argon server.
+  ///
+  /// Argon owns the desired focus state, so this path intentionally bypasses
+  /// physical-unblock and background-stop requirements used by public shortcuts.
+  @discardableResult
+  func applyArgonLock(
+    profileName: String,
+    expiresAt: Date?,
+    context: ModelContext
+  ) throws -> String {
+    let profiles = try BlockedProfiles.fetchProfiles(in: context)
+    guard
+      let profile =
+        profiles.first(where: {
+          $0.name.compare(profileName, options: [.caseInsensitive, .diacriticInsensitive])
+            == .orderedSame
+        })
+        ?? (profiles.count == 1 ? profiles.first : nil)
+    else {
+      throw ArgonScreenTimeError.profileNotFound(profileName)
+    }
+
+    if let activeSession = getActiveSession(context: context) {
+      if activeSession.blockedProfile.id == profile.id {
+        try configureArgonExpiry(expiresAt, for: profile, context: context)
+        if expiresAt != nil {
+          DeviceActivityCenterUtil.startStrategyTimerActivity(for: profile)
+        }
+        loadActiveSession(context: context)
+        return profile.name
+      }
+      let manualStrategy = getStrategy(id: ManualBlockingStrategy.id, context: context)
+      _ = manualStrategy.stopBlocking(context: context, session: activeSession)
+    }
+
+    try configureArgonExpiry(expiresAt, for: profile, context: context)
+    if expiresAt != nil {
+      let timerStrategy = getStrategy(
+        id: ShortcutTimerBlockingStrategy.id,
+        context: context
+      )
+      _ = timerStrategy.startBlocking(
+        context: context,
+        profile: profile,
+        forceStart: true
+      )
+      AppBlockerUtil().activateRestrictions(
+        for: BlockedProfiles.getSnapshot(for: profile)
+      )
+    } else {
+      let manualStrategy = getStrategy(id: ManualBlockingStrategy.id, context: context)
+      _ = manualStrategy.startBlocking(
+        context: context,
+        profile: profile,
+        forceStart: true
+      )
+    }
+    return profile.name
+  }
+
+  /// Clear the active restrictions after a trusted command from Argon.
+  @discardableResult
+  func applyArgonUnlock(context: ModelContext) -> String? {
+    guard let activeSession = getActiveSession(context: context) else {
+      AppBlockerUtil().deactivateRestrictions()
+      loadActiveSession(context: context)
+      return nil
+    }
+
+    let profileName = activeSession.blockedProfile.name
+    let manualStrategy = getStrategy(id: ManualBlockingStrategy.id, context: context)
+    _ = manualStrategy.stopBlocking(context: context, session: activeSession)
+    return profileName
+  }
+
+  private func configureArgonExpiry(
+    _ expiry: Date?,
+    for profile: BlockedProfiles,
+    context: ModelContext
+  ) throws {
+    guard let expiry else { return }
+    let secondsRemaining = expiry.timeIntervalSinceNow
+    guard secondsRemaining > 0 else {
+      throw ArgonScreenTimeError.expired
+    }
+
+    // Rounding down makes the on-device failsafe release slightly early rather
+    // than ever extending a server-specified boundary.
+    let minutes = max(1, min(1440, Int(secondsRemaining / 60)))
+    profile.strategyData = StrategyTimerData.toData(
+      from: StrategyTimerData(
+        durationInMinutes: minutes,
+        hideStopButton: false
+      )
+    )
+    profile.updatedAt = Date()
+    BlockedProfiles.updateSnapshot(for: profile)
+    try context.save()
+  }
+
+  func getRemainingEmergencyUnblocks() -> Int {
+    return emergencyUnblocksRemaining
+  }
+
+  func emergencyUnblock(context: ModelContext) {
+    // Do not allow emergency unblocks if there are no remaining
+    if emergencyUnblocksRemaining == 0 {
+      return
+    }
+
+    // Do not allow emergency unblocks if there is no active session
+    guard let activeSession = getActiveSession(context: context) else {
+      return
+    }
+
+    // Stop the active session using the manual strategy, by passes any other strategy in view
+    let manualStrategy = getStrategy(id: ManualBlockingStrategy.id, context: context)
+    _ = manualStrategy.stopBlocking(
+      context: context,
+      session: activeSession
+    )
+
+    // Do end sections for the profile
+    self.liveActivityManager.endSessionActivity()
+    self.scheduleReminder(profile: activeSession.blockedProfile)
+    self.stopTimer()
+
+    // Decrement the remaining emergency unblocks
+    emergencyUnblocksRemaining -= 1
+
+    // Hold Argon off too. Without this the reconciler re-applies the server's
+    // desired mode on its next poll — about 20 seconds — and the emergency
+    // unblock the user just spent is silently undone.
+    ArgonOverride.engage(minutes: argonOverrideMinutes)
+    ArgonBridge.shared.reportEmergencyOverride(minutes: argonOverrideMinutes)
+
+    // Refresh widgets when emergency unblock ends session
+    WidgetCenter.shared.reloadTimelines(ofKind: "ProfileControlWidget")
+  }
+
+  func resetEmergencyUnblocks() {
+    emergencyUnblocksRemaining = 3
+    lastEmergencyUnblocksResetDateTimestamp = Date().timeIntervalSinceReferenceDate
+  }
+
+  func checkAndResetEmergencyUnblocks() {
+    // Initialize the last reset date if it hasn't been set
+    if lastEmergencyUnblocksResetDateTimestamp == 0 {
+      lastEmergencyUnblocksResetDateTimestamp = Date().timeIntervalSinceReferenceDate
+      return
+    }
+
+    let lastResetDate = Date(
+      timeIntervalSinceReferenceDate: lastEmergencyUnblocksResetDateTimestamp)
+    let weeksInSeconds: TimeInterval = TimeInterval(
+      emergencyUnblocksResetPeriodInWeeks * 7 * 24 * 60 * 60)
+    let elapsedTime = Date().timeIntervalSince(lastResetDate)
+
+    // Check if the reset period has elapsed
+    if elapsedTime >= weeksInSeconds {
+      emergencyUnblocksRemaining = 3
+      lastEmergencyUnblocksResetDateTimestamp = Date().timeIntervalSinceReferenceDate
+    }
+  }
+
+  func getNextResetDate() -> Date? {
+    guard lastEmergencyUnblocksResetDateTimestamp > 0 else {
+      return nil
+    }
+
+    let lastResetDate = Date(
+      timeIntervalSinceReferenceDate: lastEmergencyUnblocksResetDateTimestamp)
+    let calendar = Calendar.current
+    return calendar.date(
+      byAdding: .weekOfYear,
+      value: emergencyUnblocksResetPeriodInWeeks,
+      to: lastResetDate
+    )
+  }
+
+  func getResetPeriodInWeeks() -> Int {
+    return emergencyUnblocksResetPeriodInWeeks
+  }
+
+  func setResetPeriodInWeeks(_ weeks: Int) {
+    emergencyUnblocksResetPeriodInWeeks = weeks
+    lastEmergencyUnblocksResetDateTimestamp = Date().timeIntervalSinceReferenceDate
+  }
+
+  static func getStrategyFromId(id: String) -> BlockingStrategy {
+    if let strategy = availableStrategies.first(
+      where: {
+        $0.getIdentifier() == id
+      })
+    {
+      return strategy
+    } else {
+      return NFCBlockingStrategy()
+    }
+  }
+
+  private func getStrategy(id: String, context: ModelContext) -> BlockingStrategy {
+    var strategy = StrategyManager.getStrategyFromId(id: id)
+
+    strategy.onSessionCreation = { session in
+      switch session {
+      case .paused:
+        self.handlePauseStarted(context: context)
+      case .started(let session):
+        self.handleSessionStarted(session: session)
+      case .ended(let endedProfile):
+        self.handleSessionEnded(profile: endedProfile)
+      }
+    }
+
+    strategy.onErrorMessage = { message in
+      self.dismissView()
+
+      self.errorMessage = message
+    }
+
+    return strategy
+  }
+
+  private func startBreak(context: ModelContext) {
+    guard let session = activeSession else {
+      print("Breaks only available in active session")
+      return
+    }
+
+    if !session.isBreakAvailable {
+      print("Breaks is not availble")
+      return
+    }
+
+    let remainingBreakAllowance = session.remainingBreakAllowance()
+    guard remainingBreakAllowance > 0 else {
+      print("No break allowance remaining")
+      return
+    }
+
+    session.startBreak()
+    appBlocker.deactivateRestrictionsForBreak(
+      for: BlockedProfiles.getSnapshot(for: session.blockedProfile))
+    try? context.save()
+
+    // Start the break timer activity
+    DeviceActivityCenterUtil.startBreakTimerActivity(
+      for: session.blockedProfile,
+      durationInSeconds: remainingBreakAllowance
+    )
+
+    // Schedule a reminder to get back to the profile after the break
+    scheduleBreakReminder(
+      profile: session.blockedProfile,
+      durationInSeconds: remainingBreakAllowance
+    )
+
+    // Refresh widgets when break starts
+    WidgetCenter.shared.reloadTimelines(ofKind: "ProfileControlWidget")
+
+    updateSessionTimes()
+
+    // Update live activity to show break state
+    liveActivityManager.updateBreakState(session: session)
+  }
+
+  private func stopBreak(context: ModelContext) {
+    guard let session = activeSession else {
+      print("Breaks only available in active session")
+      return
+    }
+
+    if !session.isBreakActive {
+      print("Breaks is not availble")
+      return
+    }
+
+    session.endBreak()
+    appBlocker.activateRestrictions(for: BlockedProfiles.getSnapshot(for: session.blockedProfile))
+    try? context.save()
+
+    // Remove the break timer activity
+    DeviceActivityCenterUtil.removeBreakTimerActivity(for: session.blockedProfile)
+
+    // Cancel all notifications that were scheduled during break
+    timersUtil.cancelAllNotifications()
+
+    // Refresh widgets when break ends
+    WidgetCenter.shared.reloadTimelines(ofKind: "ProfileControlWidget")
+
+    updateSessionTimes()
+
+    // Update live activity to show break has ended
+    liveActivityManager.updateBreakState(session: session)
+  }
+
+  private func handlePauseStarted(context: ModelContext) {
+    self.dismissView()
+
+    // load the active session since the pause start time was set in a different thread
+    loadActiveSession(context: context)
+
+    // Refresh widgets when pause starts
+    WidgetCenter.shared.reloadTimelines(ofKind: "ProfileControlWidget")
+
+    // Update live activity to show pause state
+    if let session = activeSession {
+      liveActivityManager.updatePauseState(session: session)
+    }
+  }
+
+  private func handleSessionStarted(session: BlockedProfileSession) {
+    self.dismissView()
+
+    if SoftUnblockGrantStore.activeSession?.sessionId != session.id {
+      SoftUnblockGrantScheduler.stopAll()
+      SoftUnblockGrantStore.clearAll()
+    }
+
+    // Remove any timers and notifications that were scheduled
+    self.timersUtil.cancelAll()
+    // Update the snapshot of the profile in case some settings were changed
+    BlockedProfiles.updateSnapshot(for: session.blockedProfile)
+
+    self.errorMessage = nil
+
+    self.activeSession = session
+    self.startTimer()
+    self.liveActivityManager
+      .startSessionActivity(session: session)
+
+    // Refresh widgets when session starts
+    WidgetCenter.shared.reloadTimelines(ofKind: "ProfileControlWidget")
+  }
+
+  private func handleSessionEnded(profile: BlockedProfiles) {
+    self.dismissView()
+
+    SoftUnblockGrantScheduler.stopAll()
+    SoftUnblockGrantStore.clearAll()
+
+    // Remove any timers and notifications that were scheduled
+    self.timersUtil.cancelAll()
+    self.activeSession = nil
+    self.liveActivityManager.endSessionActivity()
+    self.scheduleReminder(profile: profile)
+
+    self.stopTimer()
+    self.elapsedTime = 0
+    self.sessionDisplayTime = 0
+
+    // Refresh widgets when session ends
+    WidgetCenter.shared.reloadTimelines(ofKind: "ProfileControlWidget")
+
+    // Remove all break timer activities
+    DeviceActivityCenterUtil.removeAllBreakTimerActivities()
+
+    // Remove all strategy timer activities
+    DeviceActivityCenterUtil.removeAllStrategyTimerActivities()
+
+    // Remove all pause timer activities
+    DeviceActivityCenterUtil.removeAllPauseTimerActivities()
+  }
+
+  private func dismissView() {
+    showCustomStrategyView = false
+    customStrategyView = nil
+    customStrategyViewPresentationDetents = [.medium, .large]
+  }
+
+  private func presentCustomStrategyView(
+    _ view: any View,
+    presentationDetents: Set<PresentationDetent>
+  ) {
+    customStrategyView = view
+    customStrategyViewPresentationDetents = presentationDetents
+    showCustomStrategyView = true
+  }
+
+  private func getActiveSession(context: ModelContext)
+    -> BlockedProfileSession?
+  {
+    // Before fetching the active session, sync any schedule sessions
+    syncScheduleSessions(context: context)
+
+    return
+      BlockedProfileSession
+      .mostRecentActiveSession(in: context)
+  }
+
+  private func syncScheduleSessions(context: ModelContext) {
+    // Process any active scheduled sessions
+    if let activeScheduledSession = SharedData.getActiveSharedSession() {
+      BlockedProfileSession.upsertSessionFromSnapshot(
+        in: context,
+        withSnapshot: activeScheduledSession
+      )
+    }
+
+    // Process any completed scheduled sessions
+    let completedScheduleSessions = SharedData.getCompletedSessionsForSchedular()
+    for completedScheduleSession in completedScheduleSessions {
+      BlockedProfileSession.upsertSessionFromSnapshot(
+        in: context,
+        withSnapshot: completedScheduleSession
+      )
+    }
+
+    // Flush completed scheduled sessions
+    SharedData.flushCompletedSessionsForSchedular()
+  }
+
+  private func resultFromURL(_ url: String) -> NFCResult {
+    return NFCResult(id: url, url: url, DateScanned: Date())
+  }
+
+  private func startBlocking(
+    context: ModelContext,
+    activeProfile: BlockedProfiles?
+  ) {
+    guard let definedProfile = activeProfile else {
+      print(
+        "No active profile found, calling stop blocking with no session"
+      )
+      return
+    }
+
+    if let strategyId = definedProfile.blockingStrategyId {
+      let strategy = getStrategy(id: strategyId, context: context)
+      let view = strategy.startBlocking(
+        context: context,
+        profile: definedProfile,
+        forceStart: false
+      )
+
+      if let customView = view {
+        presentCustomStrategyView(
+          customView,
+          presentationDetents: strategy.startViewPresentationDetents
+        )
+      }
+    }
+  }
+
+  private func stopBlocking(context: ModelContext) {
+    guard let session = activeSession else {
+      print(
+        "No active session found, calling stop blocking with no session"
+      )
+      return
+    }
+
+    if let strategyId = session.blockedProfile.blockingStrategyId {
+      let strategy = getStrategy(id: strategyId, context: context)
+      let view = strategy.stopBlocking(context: context, session: session)
+
+      if let customView = view {
+        presentCustomStrategyView(
+          customView,
+          presentationDetents: [.medium, .large]
+        )
+      }
+    }
+  }
+
+  private func scheduleReminder(profile: BlockedProfiles) {
+    guard let reminderTimeInSeconds = profile.reminderTimeInSeconds else {
+      return
+    }
+
+    let profileName = profile.name
+    let message = profile.customReminderMessage ?? defaultReminderMessage(forProfile: profile)
+    timersUtil
+      .scheduleNotification(
+        title: profileName + " time!",
+        message: message,
+        seconds: TimeInterval(reminderTimeInSeconds)
+      )
+  }
+
+  private func scheduleBreakReminder(
+    profile: BlockedProfiles,
+    durationInSeconds: TimeInterval? = nil
+  ) {
+    let profileName = profile.name
+
+    // Schedule a reminder to let the user know that the break is about to end
+    let breakDurationInSeconds = durationInSeconds ?? TimeInterval(profile.breakTimeInMinutes * 60)
+    let breakNotificationTimeInSeconds = breakDurationInSeconds - 60
+    if breakNotificationTimeInSeconds > 0 {
+      timersUtil.scheduleNotification(
+        title: "Break almost over!",
+        message: "Hope you enjoyed your break, starting " + profileName + " in 1 minute.",
+        seconds: breakNotificationTimeInSeconds
+      )
+    }
+  }
+
+  func cleanUpGhostSchedules(context: ModelContext) {
+    let allActivities = DeviceActivityCenterUtil.getDeviceActivities()
+    let scheduleTimerActivity = ScheduleTimerActivity()
+    let scheduleActivities = scheduleTimerActivity.getAllScheduleTimerActivities(
+      from: allActivities)
+
+    print(
+      "Found \(scheduleActivities.count) schedule timer activities out of \(allActivities.count) total activities"
+    )
+
+    for activity in scheduleActivities {
+      let rawValue = activity.rawValue
+      guard let profileId = UUID(uuidString: rawValue) else {
+        // This shouldn't happen since we filtered above, but print just in case
+        print("Unexpected: failed to parse profile id from filtered activity: \(rawValue)")
+        continue
+      }
+
+      do {
+        if let profile = try BlockedProfiles.findProfile(byID: profileId, in: context) {
+          if profile.schedule == nil {
+            print(
+              "Profile '\(profile.name)' has no schedule but has device activity registered. Removing ghost schedule..."
+            )
+            DeviceActivityCenterUtil.removeScheduleTimerActivities(for: profile)
+          } else {
+            print("Profile '\(profile.name)' has schedule - activity is valid ✅")
+          }
+        } else {
+          // Profile truly doesn't exist in database
+          print("No profile found for activity \(rawValue). Removing orphaned schedule...")
+          DeviceActivityCenterUtil.removeScheduleTimerActivities(for: activity)
+        }
+      } catch {
+        // Database error occurred - do NOT delete the schedule since we don't know the true state
+        print(
+          "Error fetching profile \(rawValue): \(error.localizedDescription). Skipping cleanup for safety."
+        )
+      }
+    }
+  }
+
+  func resetBlockingState(context: ModelContext) {
+    guard !isBlocking else {
+      print("Cannot reset blocking state while a profile is active")
+      return
+    }
+
+    print("Resetting blocking state...")
+
+    // Clean up ghost schedules
+    cleanUpGhostSchedules(context: context)
+
+    // Clear all restrictions
+    appBlocker.deactivateRestrictions()
+    SoftUnblockGrantScheduler.stopAll()
+    SoftUnblockGrantStore.clearAll()
+
+    // Remove all break timer activities
+    DeviceActivityCenterUtil.removeAllBreakTimerActivities()
+
+    // Remove all strategy timer activities
+    DeviceActivityCenterUtil.removeAllStrategyTimerActivities()
+
+    print("Blocking state reset complete")
+  }
+}
+
+enum ArgonScreenTimeError: LocalizedError {
+  case profileNotFound(String)
+  case expired
+
+  var errorDescription: String? {
+    switch self {
+    case .profileNotFound(let name):
+      return
+        "Create a Screen Time profile named “\(name)” in Argon, or choose the profile in Settings."
+    case .expired:
+      return "Argon's focus window has already expired."
+    }
+  }
+}

@@ -1,0 +1,144 @@
+import SwiftUI
+
+struct PermissionsIntroScreen: View {
+  @EnvironmentObject private var themeManager: ThemeManager
+
+  let showPasscodeMessage: Bool
+
+  @State private var showContent: Bool = false
+  @State private var shieldScale: CGFloat = 0.5
+  @State private var pulseAnimation: Bool = false
+
+  var body: some View {
+    VStack(spacing: 0) {
+      // Heading
+      // Header
+      VStack(spacing: 8) {
+        Text("One Last Step")
+          .font(.argonDisplay(38))
+          .foregroundStyle(ArgonPalette.ink)
+          .opacity(showContent ? 1 : 0)
+          .offset(y: showContent ? 0 : -20)
+
+        Text("Argon needs Screen Time and notification access")
+          .font(.system(size: 16))
+          .foregroundStyle(ArgonPalette.mutedInk)
+          .opacity(showContent ? 1 : 0)
+          .offset(y: showContent ? 0 : -20)
+      }
+
+      Spacer()
+
+      ZStack {
+        ForEach(0..<2) { index in
+          Circle()
+            .stroke(
+              LinearGradient(
+                gradient: Gradient(colors: [
+                  themeManager.themeColor.opacity(0.3),
+                  themeManager.themeColor.opacity(0.1),
+                ]),
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+              ),
+              lineWidth: 3
+            )
+            .frame(width: 190, height: 190)
+            .scaleEffect(pulseAnimation ? 1.3 : 1.0)
+            .opacity(pulseAnimation ? 0 : 0.6)
+            .animation(
+              .easeOut(duration: 2)
+                .repeatForever(autoreverses: false)
+                .delay(Double(index) * 0.6),
+              value: pulseAnimation
+            )
+        }
+
+        ArgonOrb(size: 196, accentColor: themeManager.themeColor, showsOrbit: false)
+          .scaleEffect(shieldScale)
+          .opacity(showContent ? 1 : 0)
+
+        Image(systemName: "shield.lefthalf.filled")
+          .font(.system(size: 56, weight: .medium))
+          .foregroundStyle(ArgonPalette.ink)
+          .shadow(color: themeManager.themeColor, radius: 12)
+          .opacity(showContent ? 1 : 0)
+      }
+      .frame(height: 360)
+
+      Spacer()
+
+      // Message text
+      VStack(spacing: 16) {
+        (Text("Argon's Screen Time engine is based on open-source Foqos. ")
+          + Text("Read the source")
+          .foregroundColor(themeManager.themeColor)
+          + Text(
+            " to see how restrictions stay local to your iPhone."
+          ))
+          .font(.system(size: 16, weight: .medium))
+          .foregroundColor(.secondary)
+          .multilineTextAlignment(.center)
+          .lineSpacing(4)
+          .onTapGesture {
+            if let url = URL(string: "https://github.com/awaseem/foqos") {
+              UIApplication.shared.open(url)
+            }
+          }
+
+        Text("Your API token pairs this installation directly with your Argon server.")
+          .font(.system(size: 16, weight: .medium))
+          .foregroundColor(.secondary)
+          .multilineTextAlignment(.center)
+          .lineSpacing(4)
+
+        // Passcode warning message
+        if showPasscodeMessage {
+          HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+              .foregroundColor(.orange)
+            Text(
+              "Still here? You need to set a passcode on your phone for Screen Time to work properly."
+            )
+            .font(.system(size: 14, weight: .medium))
+            .foregroundColor(.orange)
+            .multilineTextAlignment(.center)
+          }
+          .padding(.horizontal, 16)
+          .padding(.vertical, 12)
+          .background(
+            RoundedRectangle(cornerRadius: 12)
+              .fill(Color.orange.opacity(0.15))
+          )
+          .transition(.opacity.combined(with: .move(edge: .bottom)))
+        }
+      }
+      .padding(.horizontal, 10)
+      .opacity(showContent ? 1 : 0)
+      .offset(y: showContent ? 0 : 20)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .onAppear {
+      // Shield scale animation
+      withAnimation(.spring(response: 0.8, dampingFraction: 0.6, blendDuration: 0).delay(0.2)) {
+        shieldScale = 1.0
+      }
+
+      // Content fade in
+      withAnimation(.easeOut(duration: 0.6).delay(0.3)) {
+        showContent = true
+      }
+
+      // Start pulse animation
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        pulseAnimation = true
+      }
+    }
+  }
+}
+
+#Preview {
+  PermissionsIntroScreen(showPasscodeMessage: false)
+    .background(Color(.systemBackground))
+    .environmentObject(ThemeManager.shared)
+}
