@@ -267,6 +267,29 @@ def overlay_for_classroom(store: GoogleTasksStore, task_id: str) -> dict[str, An
     return created
 
 
+def settle_classroom_done(store: GoogleTasksStore, completed: dict[str, Any]) -> None:
+    """Record that he finished a Classroom assignment. Never raises.
+
+    Completing the overlay alone is not enough to make it stay gone: the board
+    reads pending tasks, so a completed overlay simply stops existing and the
+    assignment reappears underneath it, unfinished, on the next sync.
+
+    Classroom cannot settle it either. Plenty of coursework has nothing to turn
+    in — read chapter 2, study for the quiz — so its submission state stays
+    "not turned in" forever and the item would nag him about work he has done.
+    His word is the authority here, so it is written down as one.
+    """
+    key = completed.get("classroom_key")
+    if not key:
+        return
+    try:
+        from argon.google.classroom_dispositions import ClassroomDispositionStore
+
+        ClassroomDispositionStore(store.workspace).complete(key)
+    except Exception as exc:  # noqa: BLE001 — the task is already completed
+        logger.warning("Could not settle Classroom assignment {}: {}", key, exc)
+
+
 def engage_task_focus(task: dict[str, Any]) -> str | None:
     """Shield the phone for a task that just started. Never raises.
 
@@ -459,10 +482,18 @@ class CompleteTaskTool(Tool):
 
         try:
             completed = self._store.complete_task(task_id, actual_min=actual_min)
+            if not completed:
+                # A Classroom assignment he never started, so it has no task to
+                # complete. Give it one and complete that, so the work is on the
+                # record rather than vanishing.
+                if overlay := overlay_for_classroom(self._store, task_id):
+                    completed = self._store.complete_task(overlay["id"], actual_min=actual_min)
         except TaskResolutionAmbiguityError as exc:
             return ToolResult(str(exc), success=False)
         if not completed:
             return ToolResult(f"No pending task matching '{task_id}'.", success=False)
+
+        settle_classroom_done(self._store, completed)
 
         title = completed["title"]
         subject = completed.get("subject")

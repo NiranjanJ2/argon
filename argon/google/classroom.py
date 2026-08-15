@@ -133,9 +133,14 @@ def upcoming_assignments(
             item["course_id"] = course["id"]
             item["classroom_key"] = assignment_key(course["id"], str(cw.get("id", "")))
             item["course_name"] = course.get("name", "")
-            if dispositions and dispositions.is_ignored(item["classroom_key"]):
+            # "done" suppresses exactly like "ignored". He said he finished it,
+            # and a lot of coursework has nothing to submit, so waiting on a
+            # submission state that will never arrive would keep nagging him
+            # about work that is done. The reason is kept distinct because the
+            # two decisions are different and he may want to undo either.
+            if dispositions and (settled := dispositions.settled(item["classroom_key"])):
                 if include_suppressed:
-                    item["suppressed_reason"] = "ignored"
+                    item["suppressed_reason"] = settled
                     assignments.append(item)
                 continue
             try:

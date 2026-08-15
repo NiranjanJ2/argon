@@ -22,6 +22,14 @@ except ImportError:  # pragma: no cover - Argon runs on Unix; thread lock is the
 _thread_lock = threading.RLock()
 
 
+#: ``done`` means he said he finished it, which Argon treats as settled even
+#: though Classroom will never report a submission. Plenty of coursework has
+#: nothing to turn in — read chapter 2, study for the quiz — so waiting for a
+#: submission state that can never arrive would nag him about finished work
+#: forever. ``ignored`` is the different decision: not doing this at all.
+_STATES = {"active", "ignored", "done"}
+
+
 def assignment_key(course_id: str, coursework_id: str) -> str:
     """Identity for a Classroom item; course-work IDs are only course-local."""
     return f"{course_id}:{coursework_id}"
@@ -48,7 +56,7 @@ class ClassroomDispositionStore:
             return {}
         validated = {
             str(key): value for key, value in raw.items()
-            if isinstance(value, dict) and value.get("state") in {"active", "ignored"}
+            if isinstance(value, dict) and value.get("state") in _STATES
         }
         if strict and len(validated) != len(raw):
             raise ValueError("Classroom disposition store contains unknown entries")
@@ -88,10 +96,26 @@ class ClassroomDispositionStore:
         """
         return self._load(strict=True).get(key, {}).get("state") == "ignored"
 
+    def is_done(self, key: str) -> bool:
+        """Has he said he finished it? Strict for the same reason as is_ignored."""
+        return self._load(strict=True).get(key, {}).get("state") == "done"
+
+    def settled(self, key: str) -> str | None:
+        """``"ignored"``, ``"done"``, or None — one read for both decisions."""
+        state = self._load(strict=True).get(key, {}).get("state")
+        return state if state in {"ignored", "done"} else None
+
     def ignore(self, key: str) -> None:
         with self._locked():
             data = self._load(strict=True)
             data[key] = {"state": "ignored", "updated_at": datetime.now(LOCAL_TZ).isoformat()}
+            self._write(data)
+
+    def complete(self, key: str) -> None:
+        """He says it is finished. Good as submitted, as far as the board goes."""
+        with self._locked():
+            data = self._load(strict=True)
+            data[key] = {"state": "done", "updated_at": datetime.now(LOCAL_TZ).isoformat()}
             self._write(data)
 
     def restore(self, key: str) -> None:

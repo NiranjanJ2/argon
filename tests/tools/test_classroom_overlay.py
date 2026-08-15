@@ -132,3 +132,51 @@ class TestStartingOne:
         result = await StartTaskTool(store, _State(), _Log()).execute(task_id="nope")
 
         assert "No task matching" in result
+
+
+class TestSettlingDone:
+    """His "done" has to outlive a Classroom sync that never sees a submission."""
+
+    def test_completing_records_a_done_disposition(self, tmp_path):
+        from argon.google.classroom_dispositions import ClassroomDispositionStore
+        from argon.tools.tasks import settle_classroom_done
+
+        store = FakeStore()
+        store.workspace = tmp_path
+
+        settle_classroom_done(store, {"id": "gtask-1", "classroom_key": "c:1"})
+
+        assert ClassroomDispositionStore(tmp_path).is_done("c:1")
+
+    def test_a_plain_task_records_nothing(self, tmp_path):
+        from argon.google.classroom_dispositions import ClassroomDispositionStore
+        from argon.tools.tasks import settle_classroom_done
+
+        store = FakeStore()
+        store.workspace = tmp_path
+
+        settle_classroom_done(store, {"id": "gtask-1"})
+
+        assert ClassroomDispositionStore(tmp_path).settled("c:1") is None
+
+    def test_done_and_ignored_stay_distinguishable(self, tmp_path):
+        # Both suppress, but they are different decisions and he may undo either.
+        from argon.google.classroom_dispositions import ClassroomDispositionStore
+
+        store = ClassroomDispositionStore(tmp_path)
+        store.complete("c:done")
+        store.ignore("c:skip")
+
+        assert store.settled("c:done") == "done"
+        assert store.settled("c:skip") == "ignored"
+        assert store.is_done("c:done") and not store.is_done("c:skip")
+        assert store.is_ignored("c:skip") and not store.is_ignored("c:done")
+
+    def test_restoring_puts_it_back_on_the_board(self, tmp_path):
+        from argon.google.classroom_dispositions import ClassroomDispositionStore
+
+        store = ClassroomDispositionStore(tmp_path)
+        store.complete("c:1")
+        store.restore("c:1")
+
+        assert store.settled("c:1") is None
