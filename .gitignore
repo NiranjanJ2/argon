@@ -33,3 +33,6 @@ HEARTBEAT.md
 USER.md
 TOOLS.md
 ._*
+
+# Resolved from pyproject on each machine; not pinned in-repo.
+uv.lock
