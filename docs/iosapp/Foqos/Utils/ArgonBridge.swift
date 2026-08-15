@@ -442,14 +442,22 @@ final class ArgonBridge: ObservableObject {
   /// Tell the server about a local emergency release, so Argon stops asking for
   /// a block instead of the two of them fighting every 20 seconds. Best effort:
   /// the local override in ArgonOverride already holds without any network.
+  /// Tell the server a release was engaged, or lifted early.
+  ///
+  /// `minutes <= 0` is *not* "cancel" to the server — it falls back to the
+  /// configured default and engages one. Cancelling has to say `clear`
+  /// explicitly, or turning the switch off would start a two-hour override
+  /// instead of ending it.
   nonisolated func reportEmergencyOverride(minutes: Int) {
     Task { @MainActor in
       guard var request = self.makeRequest(path: "/v1/ios/override", method: "POST") else {
         return
       }
-      request.httpBody = try? JSONSerialization.data(
-        withJSONObject: ["minutes": minutes, "source": "phone"]
-      )
+      let payload: [String: Any] =
+        minutes > 0
+        ? ["minutes": minutes, "source": "phone"]
+        : ["clear": true, "source": "phone"]
+      request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
       request.setValue("application/json", forHTTPHeaderField: "Content-Type")
       _ = try? await self.perform(request)
       _ = await self.refreshStatus()

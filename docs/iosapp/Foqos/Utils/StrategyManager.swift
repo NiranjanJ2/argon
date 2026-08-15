@@ -35,7 +35,7 @@ class StrategyManager: ObservableObject {
 
   /// How long an emergency unblock also holds Argon off. Matches the server's
   /// `ios.overrideMinutes` default; the server enforces its own window too.
-  private let argonOverrideMinutes = 120
+  private let argonOverrideMinutes = ArgonOverride.defaultMinutes
 
   @AppStorage("emergencyUnblocksRemaining") private var emergencyUnblocksRemaining: Int = 3
   @AppStorage("emergencyUnblocksResetPeriodInWeeks") private

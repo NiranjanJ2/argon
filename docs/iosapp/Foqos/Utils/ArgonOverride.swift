@@ -10,6 +10,11 @@ import Foundation
 enum ArgonOverride {
   private static let key = "argon.overrideUntil"
 
+  /// How long a release holds Argon off. Shared by the in-session emergency
+  /// unblock and the switch in Settings, so the two cannot drift apart and
+  /// mean different things by "emergency release".
+  static let defaultMinutes = 120
+
   /// Nil when no override is engaged or it has expired.
   static var activeUntil: Date? {
     let stamp = UserDefaults.standard.double(forKey: key)

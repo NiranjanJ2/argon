@@ -12,6 +12,9 @@ struct SettingsView: View {
 
   @State private var showResetBlockingStateAlert = false
   @State private var showDebugView = false
+  /// ArgonOverride lives in UserDefaults, not in @Published state, so the view
+  /// needs a nudge to re-read it after the switch is thrown.
+  @State private var overrideTick = 0
 
   private var appVersion: String {
     Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
@@ -23,6 +26,65 @@ struct SettingsView: View {
       get: { argonBridge.apiToken },
       set: { argonBridge.apiToken = $0 }
     )
+  }
+
+  /// The last thing on the page: kill any block, now, whatever Argon wants.
+  ///
+  /// This existed already but was only reachable from inside a running session,
+  /// which is the wrong place for an escape hatch — the moment you need one is
+  /// the moment you are least willing to hunt for it. It is deliberately a
+  /// switch rather than a button: a block that ends is a state you are in for a
+  /// while, and the switch shows you that state and how long is left.
+  ///
+  /// `ArgonOverride` is entirely on-device, so this works with no network, no
+  /// gateway and no server. Telling the server is best effort on top — without
+  /// it the reconciler would re-apply the block on its next poll, about twenty
+  /// seconds later, and silently undo what you just did.
+  @ViewBuilder
+  private var emergencyRelease: some View {
+    Section {
+      Toggle(isOn: overrideBinding) {
+        VStack(alignment: .leading, spacing: 3) {
+          Text("Emergency release")
+            .font(.headline)
+            .foregroundStyle(.red)
+          Text(overrideCaption)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+      .tint(.red)
+    } footer: {
+      Text(
+        "Cancels any Screen Time block immediately and stops Argon re-applying "
+          + "one for \(ArgonOverride.defaultMinutes) minutes. Works with no signal."
+      )
+    }
+  }
+
+  private var overrideBinding: Binding<Bool> {
+    Binding(
+      get: { ArgonOverride.isActive },
+      set: { engaged in
+        if engaged {
+          ArgonOverride.engage(minutes: ArgonOverride.defaultMinutes)
+          _ = strategyManager.applyArgonUnlock(context: context)
+          argonBridge.reportEmergencyOverride(minutes: ArgonOverride.defaultMinutes)
+        } else {
+          ArgonOverride.clear()
+          argonBridge.reportEmergencyOverride(minutes: 0)
+        }
+        overrideTick += 1
+      }
+    )
+  }
+
+  private var overrideCaption: String {
+    guard let until = ArgonOverride.activeUntil else {
+      return "Blocks are allowed to apply"
+    }
+    let minutes = max(1, Int(until.timeIntervalSinceNow / 60).advanced(by: 1))
+    return "Blocking held off for \(minutes) more minute\(minutes == 1 ? "" : "s")"
   }
 
   var body: some View {
@@ -195,6 +257,7 @@ struct SettingsView: View {
           }
         }
 
+        emergencyRelease
       }
       .navigationTitle("Settings")
       .toolbar {
