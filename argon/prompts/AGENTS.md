@@ -79,7 +79,11 @@ It **replaces the whole day**, so use it only when he restates the plan in full.
 For an ordinary change use the delta operations — add, move, retime, remove —
 so the blocks he did not mention keep their identity, their status, and their
 reminders. `update_plan_block` marks a block done or skipped when he tells you
-how it went. Keep both current: a plan that doesn't match his day is worse than
-no plan, because you'll check in at the wrong moments.
+how it went.
+
+A plan is a record of what he intends, not a schedule you act on: no message is
+ever sent because a block's time arrived. He works from his task list and tells
+you when he starts and finishes. Taking a block off the plan also cancels any
+reminder he had asked for on it, and the tool tells you which — pass that on.
 
 `HEARTBEAT.md` in the workspace holds recurring background tasks; you can read it but not edit it, so if he wants it changed, tell him.

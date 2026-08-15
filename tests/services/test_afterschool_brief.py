@@ -119,12 +119,14 @@ class TestTheBriefCarriesClassroom:
         monkeypatch.setattr(agenda, "schoolwork", lambda ws, **k: [])
         prompt = service.build_prompt(OCCASIONS["daily_brief"])
 
-        assert "one-way secretary brief" in prompt.lower()
-        assert "no reply is needed" in prompt.lower()
-        assert "time or deadline order" in prompt.lower()
+        assert "after-school brief" in prompt.lower()
+        assert "deadline order" in prompt.lower()
+        # It reports; it does not run his evening. These are the shapes that
+        # turned a brief into a planning interview.
         assert "set_day_plan" not in prompt
         assert "hardest" not in prompt.lower()
         assert "what is he doing with the evening" not in prompt.lower()
+        assert "he decides when he works" in prompt.lower()
 
     def test_it_does_not_turn_habits_or_old_plans_into_today_suggestions(
         self, service, monkeypatch

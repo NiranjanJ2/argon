@@ -38,9 +38,9 @@ TICK_MINUTES = 10
 #: After this hour, a same-day secretary brief is stale rather than useful.
 DAILY_BRIEF_UNTIL_HOUR = 20
 
-#: A concrete event or a block Niranjan placed on his plan is deduped by id,
-#: not wording.  The daily cap and sixty-minute gap still bind it.
-HIS_OWN_SCHEDULE = frozenset({"block_start", "upcoming"})
+#: A concrete event is deduped by its id, not by wording. The daily cap and the
+#: sixty-minute gap still bind it.
+HIS_OWN_SCHEDULE = frozenset({"upcoming"})
 
 #: How the model declines to say anything.
 SKIP_TOKEN = "SKIP"
@@ -77,9 +77,18 @@ OCCASIONS: dict[str, Occasion] = {
     for o in (
         Occasion("upcoming", "something on his calendar starts shortly", 0),
         Occasion("daily_brief", "the after-school secretary brief is due", 0),
-        Occasion("block_start", "a block of his plan starts about now", 0),
     )
 }
+
+#: Why there is no "your block is starting" occasion.
+#:
+#: There was one, and it did not fit how Niranjan works. He plans fluidly and
+#: works from a list, not a timetable — so a block boundary arriving while he
+#: was still asleep announced the start of work that was not starting, and he
+#: had to correct it. Marking a time he wrote down is not the same as knowing
+#: he began. Starting and finishing are things he says, and only he says them:
+#: `start_task` and `complete_task` are interactive-only, which is what keeps
+#: the task list a record of what happened rather than of what was scheduled.
 
 
 #: How long a failed attempt holds an occasion back before it may be retried.
@@ -284,8 +293,6 @@ class ReminderService:
         self.ledger = CheckInLedger(workspace)
         #: The event that caused an `upcoming` occasion, handed to build_prompt.
         self._pending: dict[str, Any] | None = None
-        #: Same, for the plan-driven occasions.
-        self._pending_block: Any = None
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -364,8 +371,15 @@ class ReminderService:
         if occasion.kind == "upcoming" and self._pending:
             from argon.services import agenda as _agenda
 
+            # A heads-up, not an announcement. "Your meeting has started" is
+            # useless — by then he is either in it or already late. The window
+            # is fifteen minutes precisely so there is time to get ready, so
+            # the message has to be about getting ready.
             return (
-                "STARTING SOON: {}\nThis is why you woke up — say this, briefly.\n\n"
+                "COMING UP: {}\n"
+                "Give him the heads-up before it starts and ask if he is set for "
+                "it — that is the whole point of telling him early. Do not say "
+                "it has started or tell him to go; he can see a clock.\n\n"
                 .format(_agenda.describe(self._pending))
             )
 
@@ -376,27 +390,16 @@ class ReminderService:
             # tool call the model kept skipping.
             overdue = self._overdue_lines()
             return (
-                "THIS IS THE AFTER-SCHOOL BRIEF — he is home and the evening is "
-                "his. This is a one-way secretary brief, not coaching and not a "
-                "planning conversation. No reply is needed.\n\n"
+                "THIS IS THE AFTER-SCHOOL BRIEF. He is home and the evening is "
+                "his. Tell him what is actually on his plate tonight, the way a "
+                "person would say it out loud — group what belongs together, "
+                "lead with whatever is tightest, and let the rest be brief.\n\n"
                 "Due from Google Classroom:\n{}\n\n{}"
-                "Report only verified exceptions and commitments he already has. "
-                "Put overdue items or real conflicts first; otherwise use time or "
-                "deadline order. Keep it to two or three short items. Do not rank "
-                "work by difficulty, propose priorities, invent a plan, ask a "
-                "question, call a mutation tool, or imply that he should respond.\n\n"
+                "Put overdue items or real conflicts first; otherwise use "
+                "deadline order. Two or three items is usually right.\n\n"
             ).format(
                 self._schoolwork_lines(),
                 "Past due and still open:\n{}\n\n".format(overdue) if overdue else "",
-            )
-
-        if occasion.kind == "block_start" and self._pending_block:
-            return (
-                "HIS PLAN SAYS: {} starts about now ({}). Say one line marking "
-                "it — he chose this time, so you are reminding him of his own "
-                "decision, not proposing one. If he confirms, start_task if it "
-                "matches a task.\n\n"
-                .format(self._pending_block.what, self._pending_block.start)
             )
 
         return ""
@@ -542,22 +545,14 @@ class ReminderService:
             # worked; on the first day of school it went off six times and four
             # were suppressed as rewords of each other, because "you're on
             # APUSH, want to switch to Math?" is all there is to say and he did
-            # not ask. Every moment worth interrupting for is already covered:
-            # a block starting or an event about to begin. Being
-            # mid-work is not an occasion.
+            # not ask. The one thing worth breaking in for — something he has
+            # to leave for — is handled above. Being mid-work is not an occasion.
             return None
 
         if mode == "done":
             return None
 
-        if (block := self._plan.starting_now(now)) is not None and not self.ledger.announced(
-            self._block_key(block)
-        ):
-            self._pending_block = block
-            return OCCASIONS["block_start"]
-
-        # The after-school brief is the only ambient check-in. A block he
-        # planned can still start before four; this invitation cannot.
+        # The after-school brief is the only ambient check-in there is.
         if now.hour < self.unprompted_from_hour:
             return None
 
@@ -606,26 +601,29 @@ class ReminderService:
             f"What Niranjan said or did today:\n{today_notes}\n\n"
             "First call get_status, and list_tasks if it would tell you anything.\n\n"
             f"Already sent today:\n{history}\n\n"
-            "Now WRITE THE TEXT MESSAGE you would send Niranjan — one or two "
-            "sentences, unprompted, in your own voice, the way a friend texts.\n\n"
-            "Reply with the message itself and nothing else — no preamble, no "
-            "explanation, no quotes around it.\n\n"
-            "If a task is days past due and still open, flag once that the "
-            "record may be stale. Do not turn an unsolicited brief into a "
-            "request for him to reconcile your records.\n\n"
-            "If a task shows scheduled_for, he has already decided when to do "
-            "it. Mentioning it is fine — telling him to start it now is not. "
-            "Never argue with a plan he has already made.\n\n"
-            "HARD RULE: only mention a task, deadline, project or piece of work "
-            "that appeared in the tool output you just read, or in the calendar "
-            "and journal blocks above — those are real, verified, and you should "
-            "use them. Your background "
-            "notes describe who Niranjan is, not what he owes — 'research at a "
-            "UCLA lab' is a fact about his life, never an assignment. Do not "
-            "invent work, and do not ask how something is going unless a tool "
-            "just told you it exists. Inventing a deadline is much worse than "
-            "saying nothing: he cannot tell the difference from a real one, and "
-            "it costs him his trust in everything else you say.\n\n"
+            "Now write what you would actually send him. Write it like a person "
+            "who knows him and has read the above — say the useful thing, in "
+            "whatever shape fits it. A couple of sentences is usually right; a "
+            "short list is fine when the content is a list. Reply with the "
+            "message itself and nothing else — no preamble, no explanation, no "
+            "quotes around it.\n\n"
+            # One hard rule, stated once. An earlier version of this prompt
+            # carried eight prohibitions, and a model given that many ways to be
+            # wrong writes the safest possible thing: a semicolon-joined dump of
+            # the tool output. That is how "I will not invent work" turned into
+            # "Cabinet Meeting #2 due 11:59 PM; Racism Reflection due 11:59 PM;"
+            # — accurate, and not worth reading.
+            "The one hard rule: every task, deadline or piece of work you "
+            "mention must have appeared in the tool output you just read or in "
+            "the blocks above. Those are verified — use them freely, in your own "
+            "words. Your background notes say who Niranjan is, not what he owes: "
+            "'research at a UCLA lab' is a fact about his life, never an "
+            "assignment. Inventing a deadline is far worse than saying nothing, "
+            "because he cannot tell it from a real one.\n\n"
+            "He decides when he works. If something already has a time he chose, "
+            "you can mention it; telling him to start now is not yours to say. "
+            "If a task is days past due and still open, flag once that the record "
+            "may be stale, and leave it there.\n\n"
             f"Don't repeat anything listed above, even reworded. If the tools "
             f"showed no tasks and nothing is going on, reply with exactly "
             f"{SKIP_TOKEN} and nothing else — that is the right answer far more "
@@ -731,8 +729,6 @@ class ReminderService:
         """
         if occasion.kind == "upcoming" and self._pending:
             self.ledger.record_announced(self._pending["id"])
-        if occasion.kind == "block_start" and self._pending_block:
-            self.ledger.record_announced(self._block_key(self._pending_block))
 
     @staticmethod
     def _block_key(block: Any) -> str:
@@ -752,6 +748,4 @@ class ReminderService:
         day = clock.today_key()
         if occasion.kind == "upcoming" and self._pending:
             return f"checkin:{day}:upcoming:{self._pending['id']}"
-        if occasion.kind == "block_start" and self._pending_block:
-            return f"checkin:{day}:{self._block_key(self._pending_block)}"
         return f"checkin:{day}:{occasion.kind}"

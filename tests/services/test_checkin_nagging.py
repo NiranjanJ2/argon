@@ -72,7 +72,7 @@ class TestTheBriefIsBounded:
     def test_the_prompt_does_not_request_plan_management(self, tmp_path, monkeypatch):
         service, _ = _service(tmp_path, monkeypatch, _at(18, 0))
         prompt = service.build_prompt(OCCASIONS["daily_brief"])
-        assert "No reply is needed" in prompt
+        assert "He decides when he works" in prompt
         assert "set_day_plan" not in prompt
         assert "what is he doing" not in prompt
 

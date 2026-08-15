@@ -120,7 +120,13 @@ class TestThePromptCarriesTheCalendar:
         service.pick_occasion()
         prompt = service.build_prompt(OCCASIONS["upcoming"])
 
-        assert "STARTING SOON" in prompt and "All Project Sync" in prompt
+        assert "COMING UP" in prompt and "All Project Sync" in prompt
+        # A heads-up, not an announcement. "Your meeting has started" is useless
+        # — by then he is in it or already late. The window is fifteen minutes
+        # so that there is time to get ready, so the message is about that.
+        assert "before it starts" in prompt
+        assert "is set for it" in prompt
+        assert "Do not say it has started" in prompt
 
     def test_every_check_in_sees_the_day(self, service, calendar):
         """Not just the upcoming one — any check-in can mention what's coming."""
@@ -132,7 +138,9 @@ class TestThePromptCarriesTheCalendar:
 
     def test_the_anti_invention_rule_still_stands(self, service, calendar):
         prompt = service.build_prompt(OCCASIONS["daily_brief"])
-        assert "HARD RULE" in prompt and "never an assignment" in prompt
+        assert "one hard rule" in prompt.lower()
+        assert "never an assignment" in prompt
+        assert "must have appeared in the tool output" in prompt
 
 
 class TestFailureIsSilentNotFatal:

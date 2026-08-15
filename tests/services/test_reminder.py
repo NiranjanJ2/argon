@@ -330,7 +330,8 @@ async def test_a_bare_no_is_never_recorded(tmp_path, monkeypatch):
 def test_the_prompt_asks_for_a_message_not_a_decision(tmp_path, monkeypatch):
     service, _ = _service(tmp_path, monkeypatch, _at(17, 30))
     prompt = service.build_prompt(service.pick_occasion())
-    assert "WRITE THE TEXT MESSAGE" in prompt
+    assert "write what you would actually send him" in prompt.lower()
+    assert "the message itself and nothing else" in prompt.lower()
     assert reminder_mod.SKIP_TOKEN in prompt
     # The old phrasing is what produced "No.".
     assert "deciding whether" not in prompt
@@ -506,7 +507,14 @@ def test_the_cap_still_binds_discretionary_messages(tmp_path, monkeypatch):
     assert service.pick_occasion() is None
 
 
-def test_back_to_back_blocks_only_announce_the_new_start(tmp_path, monkeypatch):
+def test_a_plan_block_starting_is_not_a_reason_to_speak(tmp_path, monkeypatch):
+    """He works from a list, not a timetable.
+
+    There used to be a `block_start` occasion, and it did not fit how he works.
+    A block boundary arriving while he was still asleep announced the start of
+    work that was not starting, and he had to correct it. Writing a time down is
+    not the same as beginning — starting and finishing are things he says.
+    """
     service, clock = _service(tmp_path, monkeypatch, _at(19, 0))
     service._plan.set_blocks([
         {"start": "17:00", "end": "19:00", "what": "SAT prep"},
@@ -514,17 +522,16 @@ def test_back_to_back_blocks_only_announce_the_new_start(tmp_path, monkeypatch):
     ])
 
     seen = []
-    for _ in range(3):  # 19:00, 19:10, 19:20
-        occasion = service.pick_occasion()
-        if occasion:
-            seen.append((occasion.kind, service._pending_block.what))
-            key = "start:" + service._pending_block.id
-            service.ledger.record_announced(key)
-            service.ledger.record_said(occasion.kind, "x", clock.now)
+    for _ in range(3):  # 19:00, 19:10, 19:20 — a block starts inside this window
+        if occasion := service.pick_occasion():
+            seen.append(occasion.kind)
         clock.advance(10)
 
-    assert ("block_end", "SAT prep") not in seen
-    assert ("block_start", "Math homework") in seen
+    # The after-school brief may still fire here — that is its window and it has
+    # material. What must never appear is anything triggered by the block itself.
+    assert "block_start" not in seen, "a block boundary is not an occasion"
+    assert set(seen) <= {"daily_brief"}
+    assert "block_start" not in reminder_mod.OCCASIONS
 
 
 def test_calendar_commitments_do_not_become_plan_blocks(tmp_path, monkeypatch):
