@@ -884,7 +884,12 @@ class ReminderService:
         delivered, arrived = True, text
         if self.on_deliver is not None:
             key = self._delivery_key(occasion, now)
-            result = await self.on_deliver(text, key=key) if key else await self.on_deliver(text)
+            actions = self._actions_for(occasion)
+            try:
+                result = await self.on_deliver(text, key=key, actions=actions)
+            except TypeError:
+                # A deliverer that predates buttons (tests, other callers).
+                result = await self.on_deliver(text, key=key) if key else await self.on_deliver(text)
             delivered = result is not False and getattr(result, "ok", True)
             # What he actually received. When this key was already delivered —
             # an earlier attempt whose acknowledgement arrived late — the text
@@ -929,6 +934,28 @@ class ReminderService:
         if callable(reminder_key):
             return reminder_key()
         return "start:{}:{}".format(getattr(block, "id", ""), getattr(block, "start", ""))
+
+
+    def _actions_for(self, occasion: Occasion) -> list[dict[str, Any]] | None:
+        """Buttons for the item being asked about, if the channel can show them.
+
+        A tap is the only unambiguous answer Argon gets: it carries a verb and a
+        task id chosen here, so "starting now" cannot be read as anything else.
+        Typing the same thing has to be interpreted, and interpretation is where
+        it decided he had begun work he had not begun.
+        """
+        row = self._pending_unclaimed
+        if occasion.kind not in ("daily_brief", "nudge") or not row:
+            return None
+        task_id = row.get("google_task_id") or row.get("id")
+        if not task_id:
+            return None   # a Classroom item with no task to act on
+        title = row.get("title") or "it"
+        return [
+            {"label": "Starting now", "action": "start", "task_id": task_id, "title": title},
+            {"label": "Done", "action": "complete", "task_id": task_id, "title": title},
+            {"label": "Not tonight", "action": "defer", "task_id": task_id, "title": title},
+        ]
 
     def _delivery_key(self, occasion: Occasion, now: datetime) -> str | None:
         """Idempotency key so a retry cannot deliver the same brief twice."""

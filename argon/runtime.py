@@ -88,6 +88,9 @@ class Runtime:
     outbox: Outbox
     # Resolves the channel/chat to use for messages Niranjan did not initiate.
     pick_target: Callable[[], tuple[str, str]]
+    # Carries out a button press. Exposed because it is the one mutation path
+    # that belongs to him rather than to a turn, and the iOS app will want it.
+    on_button: Callable[[dict[str, Any]], Any]
 
 
 def build_runtime(config: Config) -> Runtime:
@@ -242,7 +245,55 @@ def build_runtime(config: Config) -> Runtime:
         async with background_turn_lock:
             return await _run_background_turn(prompt)
 
-    async def notify(response: str, *, key: str | None = None) -> Any:
+    async def on_button(action: dict[str, Any]) -> str:
+        """A button was pressed. Do exactly that, with no model involved.
+
+        This is the whole reason buttons are worth building. "yeah in a bit" has
+        to be interpreted, and interpretation is where Argon decided he had
+        started work he had not started. A press carries a verb chosen by code
+        and a task id chosen by code, so the state change is precisely what he
+        tapped — and `start_task`/`complete_task` stay interactive-only, because
+        this is him acting, not automation acting for him.
+        """
+        from argon.google.tasks_store import GoogleTasksStore
+        from argon.productivity.log import DailyLog
+        from argon.productivity.state import DailyState
+
+        verb = str(action.get("action") or "")
+        task_id = str(action.get("task_id") or "")
+        title = str(action.get("title") or "that")
+        workspace = config.workspace_path
+        state = DailyState(workspace)
+
+        if verb == "start":
+            store = GoogleTasksStore(workspace)
+            task = await asyncio.to_thread(store.start_task, task_id)
+            if task is None:
+                return f"Couldn't find {title} any more — it may have been removed."
+            state.start_session(task_id=task_id, title=task.get("title") or title)
+            DailyLog(workspace).append(f"Started: {task.get('title') or title}", tag="task")
+            return f"Started {task.get('title') or title}."
+
+        if verb == "complete":
+            store = GoogleTasksStore(workspace)
+            session = state.get_session()
+            minutes = session.get("elapsed_min") if session else None
+            done = await asyncio.to_thread(store.complete_task, task_id, actual_min=minutes)
+            if done is None:
+                return f"Couldn't find {title} any more — it may already be done."
+            state.end_session_if_task(task_id, title=done.get("title"))
+            DailyLog(workspace).append(f"Completed: {done.get('title') or title}", tag="task")
+            return f"Done — {done.get('title') or title} is off the list."
+
+        if verb == "defer":
+            # Not a state change. He answered, which is all the follow-up
+            # wanted; the ledger already recorded that this item was asked
+            # about, so nothing chases it again today.
+            return f"Fine — leaving {title} for now."
+
+        return f"Don't know how to do '{verb}'."
+
+    async def notify(response: str, *, key: str | None = None, actions: Any = None) -> Any:
         """Deliver something Niranjan did not ask for. Returns whether it landed.
 
         This used to return None whether it sent, dropped, or failed — and the
@@ -258,6 +309,7 @@ def build_runtime(config: Config) -> Runtime:
         return await outbox.deliver(
             key=key or f"notify:{int(_now_ms())}",
             channel=channel, chat_id=chat_id, content=response, kind="unprompted",
+            actions=actions,
         )
 
     heartbeat = HeartbeatService(
@@ -291,6 +343,10 @@ def build_runtime(config: Config) -> Runtime:
             response = await _run_background_turn(prompt)
             return "" if response == EMPTY_FINAL_RESPONSE_MESSAGE else response
 
+    # A press goes straight to the domain operation, never through a turn.
+    if (discord_channel := channels.get_channel("discord")) is not None:
+        discord_channel.on_action = on_button
+
     checkin_cfg = config.gateway.checkins
     reminder = ReminderService(
         workspace=config.workspace_path,
@@ -309,6 +365,7 @@ def build_runtime(config: Config) -> Runtime:
         config=config, bus=bus, agent=agent, heartbeat_agent=heartbeat_agent,
         cron=cron, channels=channels, heartbeat=heartbeat, reminder=reminder,
         maintenance=maintenance, outbox=outbox, pick_target=pick_target,
+        on_button=on_button,
     )
 
 

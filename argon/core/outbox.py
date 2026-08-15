@@ -110,6 +110,7 @@ class Outbox:
         content: str,
         due_at: float | None = None,
         kind: str = "message",
+        actions: list[dict[str, Any]] | None = None,
     ) -> Delivery:
         """Record the promise, send it, and wait to be told it arrived.
 
@@ -150,9 +151,14 @@ class Outbox:
         waiter: asyncio.Future[tuple[bool, str | None]] = loop.create_future()
         self._waiters[key] = waiter
         try:
+            metadata: dict[str, Any] = {ACK_KEY: key}
+            if actions:
+                # Buttons travel with the promise so a recovered or retried
+                # delivery still arrives clickable.
+                metadata["_actions"] = actions
             await self._publish(OutboundMessage(
                 channel=channel, chat_id=chat_id, content=content,
-                metadata={ACK_KEY: key},
+                metadata=metadata,
             ))
             ok, error = await asyncio.wait_for(waiter, timeout=self._ack_timeout)
         except asyncio.TimeoutError:

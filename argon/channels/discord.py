@@ -49,6 +49,70 @@ class DiscordConfig(Base):
 
 if DISCORD_AVAILABLE:
 
+    class ArgonActionView(discord.ui.View):
+        """Buttons under a message: "Starting now", "Done", "Not tonight".
+
+        A click is the one unambiguous input Argon gets. Typing "yeah in a bit"
+        has to be interpreted, and interpretation is where it decided he had
+        started work he had not started. A button carries a task id and a verb
+        chosen by code, so the state change is exactly what he pressed — no
+        model call is involved in the mutation at all.
+
+        The handler is deliberately not a chat turn. It calls the same domain
+        operations the tools call, then rewrites the message to say what
+        happened and retires the buttons so the same click cannot land twice.
+        """
+
+        def __init__(self, channel: DiscordChannel, actions: list[dict[str, Any]]) -> None:
+            # No timeout: a reminder sent at 5 PM is still answerable at 9.
+            super().__init__(timeout=None)
+            self._channel = channel
+            for action in actions[:4]:
+                self.add_item(_ArgonActionButton(channel, action))
+
+    class _ArgonActionButton(discord.ui.Button):
+        def __init__(self, channel: DiscordChannel, action: dict[str, Any]) -> None:
+            style = {
+                "start": discord.ButtonStyle.primary,
+                "complete": discord.ButtonStyle.success,
+            }.get(action.get("action"), discord.ButtonStyle.secondary)
+            super().__init__(label=str(action.get("label") or "OK"), style=style)
+            self._channel = channel
+            self._action = action
+
+        async def callback(self, interaction: discord.Interaction) -> None:
+            sender_id = str(interaction.user.id)
+            if not self._channel.is_allowed(sender_id):
+                await interaction.response.send_message(
+                    "You are not allowed to use this bot.", ephemeral=True
+                )
+                return
+
+            handler = getattr(self._channel, "on_action", None)
+            if handler is None:
+                await interaction.response.send_message(
+                    "That button is not wired to anything.", ephemeral=True
+                )
+                return
+
+            try:
+                result = await handler(self._action)
+            except Exception as exc:  # noqa: BLE001 — never leave a dead button
+                logger.exception("Discord action {} failed", self._action)
+                await interaction.response.send_message(
+                    f"That didn't work: {exc}", ephemeral=True
+                )
+                return
+
+            # Retire the buttons: the answer has been recorded, and a second
+            # press must not start the same task twice.
+            for item in self.view.children:
+                item.disabled = True
+            original = interaction.message.content if interaction.message else ""
+            await interaction.response.edit_message(
+                content=f"{original}\n\n— {result}", view=self.view
+            )
+
     class DiscordBotClient(discord.Client):
         """discord.py client that forwards events to the channel."""
 
@@ -181,11 +245,17 @@ if DISCORD_AVAILABLE:
                 else:
                     failed_media.append(Path(media_path).name)
 
-            for index, chunk in enumerate(self._build_chunks(msg.content or "", failed_media, sent_media)):
+            chunks = self._build_chunks(msg.content or "", failed_media, sent_media)
+            actions = (msg.metadata or {}).get("_actions") or []
+            for index, chunk in enumerate(chunks):
                 kwargs: dict[str, Any] = {"content": chunk}
                 if index == 0 and reference is not None and not sent_media:
                     kwargs["reference"] = reference
                     kwargs["allowed_mentions"] = mention_settings
+                # Buttons ride the last chunk, so they sit under the whole
+                # message rather than in the middle of a split one.
+                if actions and index == len(chunks) - 1:
+                    kwargs["view"] = ArgonActionView(self._channel, actions)
                 await channel.send(**kwargs)
 
         async def _send_file(
@@ -274,6 +344,9 @@ class DiscordChannel(BaseChannel):
         self._stream_buffers: dict[str, str] = {}
         self._stream_messages: dict[str, Any] = {}
         self._last_edit_times: dict[str, float] = {}
+        #: Handles a button press. Set by the runtime, which owns the task
+        #: operations; the channel only knows that something was clicked.
+        self.on_action: Any = None
 
     async def start(self) -> None:
         """Start the Discord client."""
