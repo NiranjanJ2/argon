@@ -330,8 +330,11 @@ async def test_a_bare_no_is_never_recorded(tmp_path, monkeypatch):
 def test_the_prompt_asks_for_a_message_not_a_decision(tmp_path, monkeypatch):
     service, _ = _service(tmp_path, monkeypatch, _at(17, 30))
     prompt = service.build_prompt(service.pick_occasion())
-    assert "write what you would actually send him" in prompt.lower()
-    assert "the message itself and nothing else" in prompt.lower()
+    assert "then write the message" in prompt.lower()
+    # It thinks first, in a form code can split. The reasoning is a drafting
+    # aid and must never reach him — see `extract_message`.
+    assert "THINKING:" in prompt and "MESSAGE:" in prompt
+    assert "executive assistant" in prompt.lower()
     assert reminder_mod.SKIP_TOKEN in prompt
     # The old phrasing is what produced "No.".
     assert "deciding whether" not in prompt
@@ -547,3 +550,173 @@ def test_calendar_commitments_do_not_become_plan_blocks(tmp_path, monkeypatch):
 
     assert service.pick_occasion().kind == "daily_brief"
     assert service._plan.blocks() == []
+
+
+# ---------------------------------------------------------------------------
+# Chasing work he has not claimed
+#
+# He does want pushing — "if I haven't told it about my stuff I do want it to
+# push and ask me to start or when I plan to start". What he does not want is
+# being told he has started, or being asked twice. The brief asks once; there is
+# exactly one follow-up, and only into silence.
+# ---------------------------------------------------------------------------
+
+
+def _unclaimed_board(monkeypatch, rows):
+    from argon.commitments import SourceSnapshot
+
+    monkeypatch.setattr(
+        "argon.commitments.classroom_snapshot",
+        lambda *a, **k: SourceSnapshot("classroom", (), None, ()),
+    )
+    monkeypatch.setattr(
+        "argon.commitments.tasks_snapshot",
+        lambda *a, **k: SourceSnapshot("tasks", tuple(rows), None, ()),
+    )
+    monkeypatch.setattr("argon.services.agenda.upcoming", lambda *a, **k: [])
+
+
+class TestTheOneFollowUp:
+    def _service(self, tmp_path, monkeypatch, at):
+        service, clock = _service(tmp_path, monkeypatch, at)
+        monkeypatch.setattr(service, "_pending_event", lambda: None)
+        return service, clock
+
+    def test_the_brief_asks_when_he_plans_to_start_the_unclaimed_item(
+        self, tmp_path, monkeypatch
+    ):
+        service, _ = self._service(tmp_path, monkeypatch, _at(16, 30))
+        _unclaimed_board(monkeypatch, [
+            {"id": "t1", "title": "Chemistry reading", "source": "manual",
+             "due": "2026-07-30", "due_when": "Thu 07/30"},
+        ])
+
+        occasion = service.pick_occasion()
+        prompt = service.build_prompt(occasion)
+
+        assert occasion.kind == "daily_brief"
+        assert "Chemistry reading" in prompt
+        assert "when he plans to start" in prompt
+        assert "Do not propose a time for him" in prompt
+
+    def test_a_follow_up_chases_only_into_silence(self, tmp_path, monkeypatch):
+        service, clock = self._service(tmp_path, monkeypatch, _at(16, 30))
+        _unclaimed_board(monkeypatch, [
+            {"id": "t1", "title": "Chemistry reading", "source": "manual",
+             "due": "2026-07-30", "due_when": "Thu 07/30"},
+        ])
+        service.ledger.record_fired("daily_brief", clock.now)
+        service.ledger.record_said("daily_brief", "when are you starting chem?", clock.now)
+        monkeypatch.setattr(service, "_he_has_spoken_since", lambda _when: False)
+
+        clock.advance(90)
+        occasion = service.pick_occasion()
+
+        assert occasion is not None and occasion.kind == "nudge"
+        prompt = service.build_prompt(occasion)
+        assert "single follow-up" in prompt
+        assert "do not ask again" in prompt.lower()
+
+    def test_answering_ends_it(self, tmp_path, monkeypatch):
+        """If he replied at all, the question has been answered."""
+        service, clock = self._service(tmp_path, monkeypatch, _at(16, 30))
+        _unclaimed_board(monkeypatch, [
+            {"id": "t1", "title": "Chemistry reading", "source": "manual",
+             "due": "2026-07-30", "due_when": "Thu 07/30"},
+        ])
+        service.ledger.record_fired("daily_brief", clock.now)
+        service.ledger.record_said("daily_brief", "when are you starting chem?", clock.now)
+        monkeypatch.setattr(service, "_he_has_spoken_since", lambda _when: True)
+
+        clock.advance(90)
+        assert service.pick_occasion() is None
+
+    def test_the_same_item_is_never_asked_about_twice(self, tmp_path, monkeypatch):
+        service, clock = self._service(tmp_path, monkeypatch, _at(16, 30))
+        rows = [{"id": "t1", "title": "Chemistry reading", "source": "manual",
+                 "due": "2026-07-30", "due_when": "Thu 07/30"}]
+        _unclaimed_board(monkeypatch, rows)
+        service.ledger.record_fired("daily_brief", clock.now)
+        service.ledger.record_said("daily_brief", "asked once", clock.now)
+        monkeypatch.setattr(service, "_he_has_spoken_since", lambda _when: False)
+
+        clock.advance(90)
+        first = service.pick_occasion()
+        assert first.kind == "nudge"
+        service._consume_pending(first)          # the follow-up went out
+        service.ledger.record_said("nudge", "still planning to?", clock.now)
+
+        clock.advance(90)
+        assert service.pick_occasion() is None, "never a third time"
+
+    def test_work_he_has_given_a_time_is_not_chased(self, tmp_path, monkeypatch):
+        """Deciding when to do something is doing something about it."""
+        service, clock = self._service(tmp_path, monkeypatch, _at(16, 30))
+        _unclaimed_board(monkeypatch, [
+            {"id": "t1", "title": "Chemistry reading", "source": "manual",
+             "due": "2026-07-30", "due_when": "Thu 07/30"},
+        ])
+        monkeypatch.setattr(
+            "argon.services.agenda.upcoming",
+            lambda *a, **k: [{"summary": "Chemistry reading",
+                              "start": _at(19, 0), "kind": "event"}],
+        )
+        service.ledger.record_fired("daily_brief", clock.now)
+        service.ledger.record_said("daily_brief", "brief", clock.now)
+        monkeypatch.setattr(service, "_he_has_spoken_since", lambda _when: False)
+
+        clock.advance(90)
+        assert service.pick_occasion() is None
+
+    def test_nothing_is_chased_before_the_brief_has_gone_out(self, tmp_path, monkeypatch):
+        service, clock = self._service(tmp_path, monkeypatch, _at(16, 30))
+        _unclaimed_board(monkeypatch, [
+            {"id": "t1", "title": "Chemistry reading", "source": "manual",
+             "due": "2026-07-30", "due_when": "Thu 07/30"},
+        ])
+        monkeypatch.setattr(service, "_he_has_spoken_since", lambda _when: False)
+        # No daily_brief in the ledger: the follow-up has nothing to follow.
+        occasion = service.pick_occasion()
+        assert occasion is None or occasion.kind == "daily_brief"
+
+    def test_a_dead_task_list_is_never_chased(self, tmp_path, monkeypatch):
+        """An outage is absence of evidence, not an empty plate."""
+        from argon.commitments import SourceSnapshot
+
+        service, clock = self._service(tmp_path, monkeypatch, _at(16, 30))
+        monkeypatch.setattr(
+            "argon.commitments.classroom_snapshot",
+            lambda *a, **k: SourceSnapshot("classroom", (), None, ()),
+        )
+        monkeypatch.setattr(
+            "argon.commitments.tasks_snapshot",
+            lambda *a, **k: SourceSnapshot("tasks", (), "tasks unreachable", ()),
+        )
+        assert service._unclaimed() == []
+
+
+class TestTheReasoningNeverReachesHim:
+    """It thinks before it writes; only the message may be sent."""
+
+    def test_only_the_message_half_is_delivered(self):
+        raw = (
+            "THINKING: he has not mentioned chemistry and it is due tonight, so "
+            "a good assistant would ask when he is getting to it.\n"
+            "MESSAGE: Chemistry's due tonight — when are you planning to start?"
+        )
+        assert reminder_mod.extract_message(raw) == (
+            "Chemistry's due tonight — when are you planning to start?"
+        )
+
+    def test_reasoning_with_no_message_is_silence_not_a_leak(self):
+        raw = "THINKING: nothing here is worth interrupting him for."
+        assert reminder_mod.extract_message(raw) == ""
+
+    def test_a_plain_reply_still_works(self):
+        assert reminder_mod.extract_message("Chemistry's due tonight.") == (
+            "Chemistry's due tonight."
+        )
+
+    def test_quotes_and_stray_whitespace_are_stripped(self):
+        raw = 'THINKING: x\nMESSAGE:   "Chemistry is due tonight."   '
+        assert reminder_mod.extract_message(raw) == "Chemistry is due tonight."

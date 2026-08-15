@@ -53,6 +53,27 @@ _NON_MESSAGES = {
 }
 
 
+def extract_message(raw: str) -> str:
+    """The part of a THINKING/MESSAGE reply that may actually be sent.
+
+    The model thinks before it writes, and its reasoning is for drafting only.
+    Code decides what leaves the machine: everything after ``MESSAGE:``, and
+    nothing else. If it reasoned but produced no message, that is silence — the
+    one thing that must never happen is Niranjan receiving the deliberation
+    about whether to message him.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    marker = lowered.rfind("message:")
+    if marker != -1:
+        return text[marker + len("message:"):].strip().strip('"').strip()
+    if "thinking:" in lowered:
+        return ""   # it reasoned and never wrote; do not send the reasoning
+    return text
+
+
 def is_silence(text: str) -> bool:
     """Is this a refusal rather than a message worth sending?"""
     stripped = (text or "").strip().strip('"').strip()
@@ -77,8 +98,17 @@ OCCASIONS: dict[str, Occasion] = {
     for o in (
         Occasion("upcoming", "something on his calendar starts shortly", 0),
         Occasion("daily_brief", "the after-school secretary brief is due", 0),
+        # The one follow-up. Work that is due soon and that he has said nothing
+        # about is the thing he actually wants chasing — but once, per item, per
+        # day. See `_unclaimed`.
+        Occasion("nudge", "work is due soon that he has not claimed a time for", 0),
     )
 }
+
+#: How far ahead something has to be due before it is worth asking about. Two
+#: days: tonight and tomorrow are real, and anything past that is not yet a
+#: question he needs to answer this evening.
+UNCLAIMED_WITHIN_DAYS = 2
 
 #: Why there is no "your block is starting" occasion.
 #:
@@ -155,6 +185,16 @@ class CheckInLedger:
     def record_said(self, kind: str, text: str, now: datetime) -> None:
         with self._edit() as data:
             data["said"].append({"at": now.isoformat(), "occasion": kind, "text": text[:400]})
+
+    def fired_at(self, kind: str) -> datetime | None:
+        """When this occasion was last delivered today, or None."""
+        stamp = self._load(clock.today_key())["fired"].get(kind)
+        if not stamp:
+            return None
+        try:
+            return datetime.fromisoformat(stamp)
+        except (TypeError, ValueError):
+            return None
 
     def minutes_since_fired(self, kind: str, now: datetime) -> float | None:
         stamp = self._load(clock.today_key())["fired"].get(kind)
@@ -293,6 +333,8 @@ class ReminderService:
         self.ledger = CheckInLedger(workspace)
         #: The event that caused an `upcoming` occasion, handed to build_prompt.
         self._pending: dict[str, Any] | None = None
+        #: The one commitment a `nudge` (or the brief's question) is about.
+        self._pending_unclaimed: dict[str, Any] | None = None
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -400,12 +442,49 @@ class ReminderService:
                 "His board, verified just now:\n{}\n\n{}"
                 "Put overdue items or real conflicts first; otherwise use "
                 "deadline order. Two or three items is usually right.\n\n"
+                "{}"
             ).format(
                 self._schoolwork_lines(),
                 "Past due and still open:\n{}\n\n".format(overdue) if overdue else "",
+                self._ask_when_line(),
+            )
+
+        if occasion.kind == "nudge" and self._pending_unclaimed:
+            row = self._pending_unclaimed
+            return (
+                "HE HAS NOT CLAIMED THIS ONE: {}{}.\n"
+                "You already sent the brief and he has not said anything since. "
+                "This is the single follow-up you get on it — ask when he is "
+                "planning to start, and leave it there. Do not restate the whole "
+                "board, do not tell him to start now, and do not ask again "
+                "later: if he does not answer, that is his answer.\n\n"
+                .format(
+                    row.get("title"),
+                    " — due {}".format(row["due_when"]) if row.get("due_when") else "",
+                )
             )
 
         return ""
+
+    def _ask_when_line(self) -> str:
+        """The brief's one question, about the one thing he has not claimed.
+
+        He does want chasing — that is most of the point — but about work he has
+        said nothing about, not about everything. Anything he has already given
+        a time is settled, and asking about it reads as arguing with a decision
+        he already made.
+        """
+        row = self._pending_unclaimed
+        if not row:
+            return ""
+        return (
+            "One thing has no time set aside for it yet: {}{}. End by asking "
+            "when he plans to start that one — a real question, only about "
+            "this. Do not propose a time for him.\n\n".format(
+                row.get("title"),
+                " (due {})".format(row["due_when"]) if row.get("due_when") else "",
+            )
+        )
 
     def _schoolwork_lines(self) -> str:
         """Classroom assignments due soon, as prompt lines. Never raises.
@@ -490,6 +569,79 @@ class ReminderService:
         event = agenda.starting_soon(self.workspace, ignore=self.ledger.announced)
         return event if event and event.get("id") else None
 
+    @staticmethod
+    def _nudge_key(row: dict[str, Any]) -> str:
+        """Dedupe key for asking about one commitment. Once per item per day."""
+        return "nudge:{}".format(row.get("key") or row.get("id") or row.get("title"))
+
+    def _unclaimed(self) -> list[dict[str, Any]]:
+        """Work due soon that he has not said anything about.
+
+        This is the thing he actually wants chased. "Unclaimed" is deliberately
+        narrow: it is on the verified board, it is due inside
+        :data:`UNCLAIMED_WITHIN_DAYS`, and he has set no time for it — no
+        calendar entry, no block, no reminder. Deciding when to do something is
+        doing something about it, so anything with a time is left alone; the old
+        gate ignored that and told him to start work it had itself scheduled for
+        three hours later.
+        """
+        from argon.services import agenda
+        from argon.tools.tasks import mark_scheduled, unscheduled
+
+        try:
+            from argon.commitments import load_board
+
+            board = load_board(self.workspace)
+        except Exception:  # noqa: BLE001 — never invent work from a failure
+            return []
+        if not board.source("tasks").ok:
+            return []   # absence of evidence is not an empty list
+
+        rows = board.as_dicts()
+        try:
+            rows = mark_scheduled(
+                rows, agenda.upcoming(self.workspace) + self._plan.as_entries()
+            )
+        except Exception:  # noqa: BLE001 — a calendar outage must not invent a nudge
+            return []
+
+        horizon = (
+            datetime.fromisoformat(clock.today_key())
+            + timedelta(days=UNCLAIMED_WITHIN_DAYS)
+        ).strftime("%Y-%m-%d")
+        open_soon = [
+            row for row in unscheduled(rows)
+            if (due := (row.get("due") or "")[:10])
+            and due <= horizon
+            and not self.ledger.announced(self._nudge_key(row))
+        ]
+        open_soon.sort(key=lambda row: (row.get("due") or "9999", row.get("title") or ""))
+        return open_soon
+
+    def _he_has_spoken_since(self, when: datetime) -> bool:
+        """Has Niranjan said anything since *when*? Read from today's journal.
+
+        The follow-up exists for silence. If he answered — even "not tonight" —
+        the question has been answered and asking again is nagging.
+        """
+        try:
+            from argon.core.journal import Journal
+
+            page = Journal(self.workspace).read_day() or ""
+        except Exception:  # noqa: BLE001 — if we cannot tell, do not chase
+            return True
+        for line in page.splitlines():
+            match = re.match(r"-\s*(\d{2}):(\d{2})\s*\[said\]", line.strip())
+            if not match:
+                continue
+            spoke = when.replace(
+                hour=int(match.group(1)), minute=int(match.group(2)),
+                second=0, microsecond=0,
+            )
+            if spoke > when:
+                return True
+        return False
+
     def has_material(self) -> bool:
         """Is there verified work or a commitment for the daily brief?
 
@@ -566,7 +718,19 @@ class ReminderService:
             and self._ready("daily_brief", now)
             and self.has_material()
         ):
+            self._pending_unclaimed = (self._unclaimed() or [None])[0]
             return OCCASIONS["daily_brief"]
+
+        # The one follow-up. Only after the brief has actually gone out, only
+        # while he has said nothing at all since it, and only for an item that
+        # is still unclaimed — answering, or giving it a time, ends it. Each
+        # item is asked about once a day and no more, which is the difference
+        # between chasing a loose end and the twelve-message evening.
+        brief_at = self.ledger.fired_at("daily_brief")
+        if brief_at is not None and not self._he_has_spoken_since(brief_at):
+            if unclaimed := self._unclaimed():
+                self._pending_unclaimed = unclaimed[0]
+                return OCCASIONS["nudge"]
 
         return None
 
@@ -606,12 +770,26 @@ class ReminderService:
             f"What Niranjan said or did today:\n{today_notes}\n\n"
             "First call get_status, and list_tasks if it would tell you anything.\n\n"
             f"Already sent today:\n{history}\n\n"
-            "Now write what you would actually send him. Write it like a person "
-            "who knows him and has read the above — say the useful thing, in "
-            "whatever shape fits it. A couple of sentences is usually right; a "
-            "short list is fine when the content is a list. Reply with the "
-            "message itself and nothing else — no preamble, no explanation, no "
-            "quotes around it.\n\n"
+            # Think first, then write. Positive framing carries judgment that a
+            # list of prohibitions cannot: an assistant who knows his week
+            # decides what matters, where "do not do X, do not do Y" only ever
+            # teaches the model to say as little as possible.
+            #
+            # The reasoning is a drafting aid and nothing more. It never reaches
+            # Niranjan, and it has no vote on whether this message is allowed —
+            # that was settled before the model was woken. An assistant asked
+            # "should I follow up?" always says yes, which is why that question
+            # is not being asked here.
+            "You are his executive assistant. Before writing, think for one or "
+            "two sentences about what a good one would actually do with what is "
+            "above — what he needs to hear now, what is noise, what he has "
+            "already decided and does not need repeating.\n\n"
+            "Then write the message. Like a person who knows him: say the "
+            "useful thing, in whatever shape fits it. A couple of sentences is "
+            "usually right; a short list is fine when the content is a list.\n\n"
+            "Answer in exactly this form, and nothing else:\n"
+            "THINKING: <your reasoning — he never sees this>\n"
+            "MESSAGE: <what to send him>\n\n"
             # One hard rule, stated once. An earlier version of this prompt
             # carried eight prohibitions, and a model given that many ways to be
             # wrong writes the safest possible thing: a semicolon-joined dump of
@@ -681,7 +859,7 @@ class ReminderService:
         logger.info("Check-in: {}", occasion.kind)
 
         said = await self.on_check_in(self.build_prompt(occasion))
-        text = (said or "").strip() if isinstance(said, str) else ""
+        text = extract_message(said if isinstance(said, str) else "")
         if is_silence(text):
             # The model genuinely had nothing to say. That is a real outcome for
             # a discretionary check-in, so it consumes the occasion.
@@ -734,6 +912,10 @@ class ReminderService:
         """
         if occasion.kind == "upcoming" and self._pending:
             self.ledger.record_announced(self._pending["id"])
+        # Asked about once, whether it was the brief's question or the one
+        # follow-up. "Never a third time" is enforced here, not by the model.
+        if occasion.kind in ("nudge", "daily_brief") and self._pending_unclaimed:
+            self.ledger.record_announced(self._nudge_key(self._pending_unclaimed))
 
     @staticmethod
     def _block_key(block: Any) -> str:
@@ -753,4 +935,6 @@ class ReminderService:
         day = clock.today_key()
         if occasion.kind == "upcoming" and self._pending:
             return f"checkin:{day}:upcoming:{self._pending['id']}"
+        if occasion.kind == "nudge" and self._pending_unclaimed:
+            return f"checkin:{day}:{self._nudge_key(self._pending_unclaimed)}"
         return f"checkin:{day}:{occasion.kind}"
