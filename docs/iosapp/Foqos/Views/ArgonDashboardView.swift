@@ -4,6 +4,12 @@ struct ArgonDashboardView: View {
   @EnvironmentObject private var bridge: ArgonBridge
   @State private var showingAddTask = false
 
+  /// Only what is still waiting on him. An answered message is history, and
+  /// history belongs in the chat, not at the top of today's list.
+  private var waitingMessages: [ArgonInboxItem] {
+    bridge.inbox.filter(\.isWaiting)
+  }
+
   private var pendingTasks: [ArgonTask] {
     bridge.tasks.filter { !$0.done }
   }
@@ -44,6 +50,24 @@ struct ArgonDashboardView: View {
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
 
+          if !waitingMessages.isEmpty {
+            Section {
+              ForEach(waitingMessages) { item in
+                ArgonMessageCard(item: item) { action in
+                  Task { await bridge.answerInbox(item, with: action) }
+                }
+                .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+              }
+            } header: {
+              Text("From Argon")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(ArgonPalette.mutedInk)
+                .textCase(nil)
+            }
+          }
+
           if pendingTasks.isEmpty, !bridge.isLoadingTasks {
             emptyState
               .listRowInsets(EdgeInsets(top: 28, leading: 16, bottom: 28, trailing: 16))
@@ -57,7 +81,11 @@ struct ArgonDashboardView: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .refreshable { await bridge.refreshTasks() }
+        .refreshable {
+          await bridge.refreshTasks()
+          await bridge.refreshInbox()
+        }
+        .task { await bridge.refreshInbox() }
         .overlay {
           if bridge.isLoadingTasks, bridge.tasks.isEmpty {
             ProgressView()
@@ -328,6 +356,123 @@ struct ArgonDashboardView: View {
 /// rather than decoration that reports its priority. Everything else is one
 /// title and one quiet line under it — a list you can run your eye down and a
 /// thumb along, which is what a checklist is for.
+/// A message Argon sent unprompted, with the buttons it offered.
+///
+/// The buttons are the point. A tap carries a verb and a task id both chosen on
+/// the server, so "starting now" cannot be misread — where a typed "yeah in a
+/// bit" has to be interpreted, and interpretation is what previously had Argon
+/// convinced he had begun work he had not begun.
+private struct ArgonMessageCard: View {
+  let item: ArgonInboxItem
+  let onAction: (ArgonInboxAction) -> Void
+
+  @EnvironmentObject private var bridge: ArgonBridge
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text(item.text)
+        .font(.subheadline)
+        .foregroundStyle(ArgonPalette.ink)
+        .fixedSize(horizontal: false, vertical: true)
+
+      if let sent = item.sentDate {
+        Text(sent.formatted(date: .omitted, time: .shortened))
+          .font(.caption2)
+          .foregroundStyle(ArgonPalette.mutedInk)
+      }
+
+      if !item.actions.isEmpty {
+        // Wraps rather than scrolls: three verbs at a readable size do not fit
+        // one line on a small phone, and a button you have to scroll to find is
+        // one you will not press.
+        FlowRow(spacing: 8) {
+          ForEach(item.actions) { action in
+            Button {
+              onAction(action)
+            } label: {
+              Text(action.label)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .frame(minHeight: 36)
+                .background(
+                  ArgonPalette.surfaceRaised,
+                  in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .foregroundStyle(ArgonPalette.iceBlue)
+            }
+            .buttonStyle(.plain)
+            .disabled(isBusy(action))
+            .opacity(isBusy(action) ? 0.5 : 1)
+          }
+        }
+      }
+    }
+    .padding(14)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      ArgonPalette.surface,
+      in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+    )
+    .overlay(
+      RoundedRectangle(cornerRadius: 14, style: .continuous)
+        .stroke(ArgonPalette.electricBlue.opacity(0.22), lineWidth: 1)
+    )
+  }
+
+  private func isBusy(_ action: ArgonInboxAction) -> Bool {
+    bridge.inboxActionIDs.contains("\(item.id):\(action.id)")
+  }
+}
+
+/// Minimal wrapping stack. SwiftUI has no first-party flow layout below iOS 16,
+/// and `Layout` is the whole feature here — a few buttons that wrap.
+private struct FlowRow: Layout {
+  var spacing: CGFloat = 8
+
+  func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    let maxWidth = proposal.width ?? .infinity
+    var x: CGFloat = 0
+    var y: CGFloat = 0
+    var rowHeight: CGFloat = 0
+
+    for subview in subviews {
+      let size = subview.sizeThatFits(.unspecified)
+      if x > 0, x + size.width > maxWidth {
+        x = 0
+        y += rowHeight + spacing
+        rowHeight = 0
+      }
+      x += size.width + spacing
+      rowHeight = max(rowHeight, size.height)
+    }
+    return CGSize(width: maxWidth == .infinity ? x : maxWidth, height: y + rowHeight)
+  }
+
+  func placeSubviews(
+    in bounds: CGRect,
+    proposal: ProposedViewSize,
+    subviews: Subviews,
+    cache: inout ()
+  ) {
+    var x = bounds.minX
+    var y = bounds.minY
+    var rowHeight: CGFloat = 0
+
+    for subview in subviews {
+      let size = subview.sizeThatFits(.unspecified)
+      if x > bounds.minX, x + size.width > bounds.maxX {
+        x = bounds.minX
+        y += rowHeight + spacing
+        rowHeight = 0
+      }
+      subview.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: .unspecified)
+      x += size.width + spacing
+      rowHeight = max(rowHeight, size.height)
+    }
+  }
+}
+
 private struct ArgonTaskRow: View {
   let task: ArgonTask
   let isMutating: Bool

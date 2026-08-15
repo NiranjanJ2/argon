@@ -130,6 +130,10 @@ final class ArgonBridge: ObservableObject {
   @Published private(set) var taskDashboardState = ArgonTaskDashboardState.empty
   @Published private(set) var isLoadingTasks = false
   @Published private(set) var taskMutationIDs: Set<String> = []
+  @Published private(set) var inbox: [ArgonInboxItem] = []
+  @Published private(set) var inboxUnanswered = 0
+  /// Buttons mid-flight, so a double tap cannot start the same task twice.
+  @Published private(set) var inboxActionIDs: Set<String> = []
 
   var apiToken: String {
     get { ArgonKeychain.read() }
@@ -323,6 +327,65 @@ final class ArgonBridge: ObservableObject {
       lastError = "Tasks could not refresh: \(error.localizedDescription)"
       return false
     }
+  }
+
+  @discardableResult
+  func refreshInbox() async -> Bool {
+    guard let request = makeRequest(path: "/v1/inbox") else { return false }
+    do {
+      let data = try await perform(request)
+      let response = try JSONDecoder().decode(ArgonInboxResponse.self, from: data)
+      inbox = response.items
+      inboxUnanswered = response.unanswered
+      return true
+    } catch {
+      // Deliberately quiet: the inbox is secondary to the task list, and a
+      // failure here should not overwrite a more useful error already showing.
+      return false
+    }
+  }
+
+  /// Act on a button Argon offered, then tell the server he answered.
+  ///
+  /// The action itself goes through the same task endpoint the checklist uses.
+  /// Reimplementing "start a task" here is how two surfaces end up disagreeing
+  /// about what is running, which is the bug buttons existed to prevent.
+  @discardableResult
+  func answerInbox(_ item: ArgonInboxItem, with action: ArgonInboxAction) async -> Bool {
+    let marker = "\(item.id):\(action.id)"
+    guard !inboxActionIDs.contains(marker) else { return false }
+    inboxActionIDs.insert(marker)
+    defer { inboxActionIDs.remove(marker) }
+
+    var result = ""
+    if let taskId = action.taskId, action.action == "start" || action.action == "complete" {
+      do {
+        let dashboard = try await performTaskRequest(
+          path: taskPath(taskId),
+          method: "PATCH",
+          body: ["action": action.action]
+        )
+        applyTaskDashboard(dashboard)
+        result = action.action == "start" ? "Started" : "Done"
+      } catch {
+        lastError = "Could not \(action.action) that: \(error.localizedDescription)"
+        return false
+      }
+    }
+
+    // Recorded even for a verb with no state change ("Not tonight"). Answering
+    // is the point — an item he has dealt with must stop reading as an open
+    // question here and in the check-in ledger alike.
+    guard var request = makeRequest(path: "/v1/inbox/\(item.id)/answer", method: "POST") else {
+      return false
+    }
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try? JSONSerialization.data(
+      withJSONObject: ["action": action.action, "result": result]
+    )
+    _ = try? await perform(request)
+    await refreshInbox()
+    return true
   }
 
   @discardableResult
