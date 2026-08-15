@@ -208,24 +208,18 @@ class AddTaskTool(Tool):
         return ToolResult(f"Added: {title}")
 
 
-#: What a started task is worth in focus minutes when it carries no estimate.
-AUTO_FOCUS_DEFAULT_MIN = 45
-#: Longest block a single task start may impose. An estimate of "one afternoon"
-#: should not shield the phone until midnight.
-AUTO_FOCUS_MAX_MIN = 180
+#: The block lasts until he says he is done, which cannot be expressed as an
+#: open-ended block — the phone refuses one, because a hard block with no expiry
+#: never lifts if Argon dies. It is a rolling window instead: renewed on every
+#: check-in while the task is still running, so it behaves as "until completion"
+#: while keeping a ceiling on a block nobody is renewing.
+#:
+#: This is also the maximum a block can outlive Argon or a phone that has gone
+#: quiet. Long enough not to interrupt real work, short enough to be a recovery.
+TASK_FOCUS_WINDOW_MIN = 120
 #: Marks a block as belonging to a task, so finishing that task can clear it and
 #: finishing any *other* task cannot.
 AUTO_FOCUS_SOURCE = "task"
-
-
-def auto_focus_minutes(task: dict[str, Any]) -> int:
-    """How long to shield the phone for a task that was just started."""
-    estimate = task.get("time_estimate_min")
-    try:
-        minutes = int(estimate) if estimate else AUTO_FOCUS_DEFAULT_MIN
-    except (TypeError, ValueError):
-        minutes = AUTO_FOCUS_DEFAULT_MIN
-    return max(5, min(AUTO_FOCUS_MAX_MIN, minutes))
 
 
 def engage_task_focus(task: dict[str, Any]) -> str | None:
@@ -238,7 +232,7 @@ def engage_task_focus(task: dict[str, Any]) -> str | None:
     try:
         ios_mode.set_mode(
             "lock_in",
-            duration_min=auto_focus_minutes(task),
+            duration_min=TASK_FOCUS_WINDOW_MIN,
             reason=f"working on {task.get('title') or 'a task'}",
             source=AUTO_FOCUS_SOURCE,
         )
@@ -247,7 +241,21 @@ def engage_task_focus(task: dict[str, Any]) -> str | None:
     except Exception as exc:  # noqa: BLE001 - never fail a start over the phone
         logger.warning("Auto-focus on task start failed: {}", exc)
         return None
-    return f"phone shielded for {auto_focus_minutes(task)}min"
+    return "phone shielded until you mark it done"
+
+
+def renew_task_focus() -> None:
+    """Keep a running task's block alive. Never raises.
+
+    Called on every status read. Estimates are deliberately not consulted: a
+    block that expires because the work took longer than guessed is worse than
+    useless, because it lifts precisely when the task is dragging and the
+    distraction is most tempting.
+    """
+    try:
+        ios_mode.renew(TASK_FOCUS_WINDOW_MIN, source=AUTO_FOCUS_SOURCE)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Renewing task focus failed: {}", exc)
 
 
 def release_task_focus(task_id: str | None = None) -> None:

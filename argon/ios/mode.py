@@ -109,6 +109,30 @@ def get_mode() -> dict[str, Any]:
     return desired
 
 
+def renew(minutes: int, *, source: str) -> dict[str, Any] | None:
+    """Push a running block's expiry out, without bumping the version.
+
+    This is how "lock until I say I'm done" is built without an open-ended hard
+    block. The phone rewrites its on-device failsafe timer from ``expires_at``
+    on every poll, not only when the version changes, so extending in place is
+    picked up within a poll — and *not* bumping the version matters, or the app
+    would re-apply the whole block every twenty seconds.
+
+    The safety property survives intact. Nothing here renews itself: if Argon
+    dies, or the phone stops checking in, the last expiry it was handed stands
+    and the block lifts on its own. An unattended block has a ceiling.
+
+    Only renews a block from *source*, so a task that is still running cannot
+    quietly extend a lock Niranjan set himself on different terms.
+    """
+    desired = _read("desired_mode.json", _DEFAULT_DESIRED)
+    if desired.get("mode") == "off" or desired.get("source") != source:
+        return None
+    desired["expires_at"] = _stamp(clock.now() + timedelta(minutes=max(1, int(minutes))))
+    _write("desired_mode.json", desired)
+    return desired
+
+
 class OverrideActive(ValueError):
     """Raised when a lock is attempted during an emergency override."""
 

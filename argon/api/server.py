@@ -286,7 +286,16 @@ def status() -> Any:
     from argon.tools.status import GetStatusTool
 
     ws = _rt.config.workspace_path if _rt.config else argon_home()
-    data = json.loads(asyncio.run(GetStatusTool(DailyState(ws), ws).execute()))
+    state = DailyState(ws)
+    # A task block lasts until he marks it done, which is a rolling window
+    # rather than an open-ended lock. Renewed here, gated on the session still
+    # being open, so putting the task down or finishing it stops the renewals
+    # and the block lapses on its own.
+    if state.get_session():
+        from argon.tools.tasks import renew_task_focus
+
+        renew_task_focus()
+    data = json.loads(asyncio.run(GetStatusTool(state, ws).execute()))
     # The app decodes `ios.desired` and `ios.actual` into non-optional structs,
     # so both must always be complete objects — see argon/ios/mode.py.
     data["ios"] = ios_mode.snapshot()
