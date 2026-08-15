@@ -1,40 +1,40 @@
 {
-  "fill" : {
-    "solid" : "display-p3:0.03500,0.04500,0.06500,1.00000"
+  "fill": {
+    "solid": "display-p3:0.00000,0.00000,0.00000,1.00000"
   },
-  "groups" : [
+  "groups": [
     {
-      "blend-mode" : "normal",
-      "blur-material" : null,
-      "layers" : [
+      "blend-mode": "normal",
+      "blur-material": null,
+      "layers": [
         {
-          "glass" : false,
-          "image-name" : "argon-flask.png",
-          "name" : "argon-flask",
-          "position" : {
-            "scale" : 1.0,
-            "translation-in-points" : [
+          "glass": false,
+          "image-name": "argon-flask.png",
+          "name": "argon-flask",
+          "position": {
+            "scale": 1.0,
+            "translation-in-points": [
               0,
               0
             ]
           }
         }
       ],
-      "lighting" : "individual",
-      "shadow" : {
-        "kind" : "layer-color",
-        "opacity" : 0.6
+      "lighting": "individual",
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0.6
       },
-      "translucency" : {
-        "enabled" : false,
-        "value" : 0.5
+      "translucency": {
+        "enabled": false,
+        "value": 0.5
       }
     }
   ],
-  "supported-platforms" : {
-    "circles" : [
+  "supported-platforms": {
+    "circles": [
       "watchOS"
     ],
-    "squares" : "shared"
+    "squares": "shared"
   }
 }
