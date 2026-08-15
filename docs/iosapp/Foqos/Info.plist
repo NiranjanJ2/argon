@@ -6,6 +6,8 @@
 	<array>
 		<string>com.foqos.backgroundprocessing</string>
 	</array>
+	<key>CFBundleDisplayName</key>
+	<string>Argon</string>
 	<key>CFBundleIconName</key>
 	<string>AppIcon</string>
 	<key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key>
