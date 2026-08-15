@@ -22,7 +22,14 @@ from argon.paths import get_runtime_subdir
 # Modes the app understands. "off" clears the shield; everything else asks for
 # one. The app maps the name to a Screen Time profile locally — the server
 # never learns a profile UUID, so adding a mode is a string on both sides.
-MODES = ("off", "school", "homework", "lock_in", "sleep")
+#
+# "weekend" is the odd one: it shields like the rest, but the phone also opens a
+# metered allowance, so tapping a blocked app offers a short break instead of a
+# wall. It is a different *kind* of block, not a stricter one.
+MODES = ("off", "school", "homework", "lock_in", "sleep", "weekend")
+
+#: Modes that carry a metered allowance when none is given explicitly.
+_DEFAULT_ALLOWANCE = {"minutes": 15, "per_hours": 1}
 
 _DEFAULT_DESIRED: dict[str, Any] = {
     "mode": "off",
@@ -31,6 +38,13 @@ _DEFAULT_DESIRED: dict[str, Any] = {
     "expires_at": None,
     "allow_early_end": True,
     "reason": "",
+    # Who asked for this block. "task" means it rode in on a start_task and may
+    # be cleared when that task finishes; anything else is Niranjan's own call
+    # and finishing a task must leave it alone.
+    "source": "",
+    # None for an ordinary hard block. {"minutes": int, "per_hours": int} means
+    # the phone should meter distracting apps rather than forbid them.
+    "allowance": None,
 }
 
 _DEFAULT_ACTUAL: dict[str, Any] = {
@@ -142,6 +156,9 @@ def set_mode(
     duration_min: int | None = None,
     allow_early_end: bool = True,
     reason: str = "",
+    source: str = "",
+    allowance_minutes: int | None = None,
+    allowance_per_hours: int | None = None,
 ) -> dict[str, Any]:
     """Publish a new desired mode and bump the version."""
     if mode not in MODES:
@@ -168,9 +185,40 @@ def set_mode(
         "expires_at": expires_at,
         "allow_early_end": bool(allow_early_end),
         "reason": reason or "",
+        "source": source or "",
+        "allowance": _allowance_for(mode, allowance_minutes, allowance_per_hours),
     }
     _write("desired_mode.json", desired)
     return desired
+
+
+#: Reset windows the phone will accept. Anything else is silently dropped there,
+#: so it is clamped here instead — the server advertising an allowance the phone
+#: never applied is the same lie as advertising a lock it never took.
+ALLOWANCE_WINDOWS_HOURS = (1, 6, 12, 24)
+ALLOWANCE_MINUTES_RANGE = (5, 60)
+
+
+def _allowance_for(
+    mode: str, minutes: int | None, per_hours: int | None
+) -> dict[str, int] | None:
+    """Clamp an allowance to what Screen Time can actually enforce."""
+    if mode == "off":
+        return None
+    if minutes is None and per_hours is None:
+        # Only weekend metering by default; every other mode is a hard block.
+        if mode != "weekend":
+            return None
+        minutes, per_hours = _DEFAULT_ALLOWANCE["minutes"], _DEFAULT_ALLOWANCE["per_hours"]
+
+    low, high = ALLOWANCE_MINUTES_RANGE
+    minutes = min(high, max(low, int(minutes or _DEFAULT_ALLOWANCE["minutes"])))
+    per_hours = int(per_hours or _DEFAULT_ALLOWANCE["per_hours"])
+    if per_hours not in ALLOWANCE_WINDOWS_HOURS:
+        # Round to the nearest window the phone supports rather than dropping
+        # the allowance entirely and turning a metered mode into a hard wall.
+        per_hours = min(ALLOWANCE_WINDOWS_HOURS, key=lambda h: abs(h - per_hours))
+    return {"minutes": minutes, "per_hours": per_hours}
 
 
 def get_actual() -> dict[str, Any]:

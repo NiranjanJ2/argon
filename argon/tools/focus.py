@@ -156,7 +156,10 @@ class SetFocusModeTool(Tool):
             "for that in advance. Only call this when he is asking to be blocked "
             "*now* — 'today I want to lock in' is a plan, not a request to lock "
             "his phone this second. If an emergency override is active this "
-            "refuses outright — that is deliberate; do not work around it."
+            "refuses outright — that is deliberate; do not work around it. "
+            "'weekend' is the metered mode: apps stay shielded, but tapping one "
+            "offers a short break instead of a wall (15 minutes an hour by "
+            "default). Use it for days he wants a lighter touch, not a lockdown."
         )
 
     @property
@@ -188,6 +191,21 @@ class SetFocusModeTool(Tool):
                     "type": "string",
                     "description": "Why — shown on the phone. Be specific.",
                 },
+                "allowance_min": {
+                    "type": "integer",
+                    "description": (
+                        "Minutes of distracting apps he may take per window, 5-60. "
+                        "Defaults to 15 for 'weekend'. Setting this on any other mode "
+                        "turns it from a hard block into a metered one."
+                    ),
+                },
+                "allowance_per_hours": {
+                    "type": "integer",
+                    "description": (
+                        "How often the allowance refills, in hours. One of 1, 6, 12, 24. "
+                        "Defaults to 1 (fifteen minutes an hour)."
+                    ),
+                },
             },
             "required": ["mode"],
         }
@@ -198,7 +216,10 @@ class SetFocusModeTool(Tool):
             return ToolResult(f"Error: mode must be one of {list(ios_mode.MODES)}.", success=False)
 
         duration = kwargs.get("duration_min")
-        if mode != "off" and not duration:
+        # 'weekend' is metered, not a wall — there is always a way through it, so
+        # leaving it open-ended traps nothing. Every other mode gets a default
+        # expiry, because an open-ended hard block with a dead server stays on.
+        if mode not in ("off", "weekend") and not duration:
             duration = self._default_minutes
 
         # "Today I want to lock in for SAT prep" is a plan, not an instruction
@@ -215,6 +236,9 @@ class SetFocusModeTool(Tool):
                 duration_min=duration,
                 allow_early_end=bool(kwargs.get("allow_early_end", True)),
                 reason=str(kwargs.get("reason") or ""),
+                source="argon",
+                allowance_minutes=kwargs.get("allowance_min"),
+                allowance_per_hours=kwargs.get("allowance_per_hours"),
             )
         except ios_mode.OverrideActive as exc:
             # Niranjan pulled the emergency release. Do not argue with it, and

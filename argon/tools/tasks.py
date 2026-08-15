@@ -6,7 +6,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from argon.google.tasks_store import GoogleTasksStore, TaskResolutionAmbiguityError
+from argon.ios import mode as ios_mode
 from argon.paths import argon_home
 from argon.productivity.habits import HabitsTracker
 from argon.productivity.log import DailyLog
@@ -205,13 +208,77 @@ class AddTaskTool(Tool):
         return ToolResult(f"Added: {title}")
 
 
+#: What a started task is worth in focus minutes when it carries no estimate.
+AUTO_FOCUS_DEFAULT_MIN = 45
+#: Longest block a single task start may impose. An estimate of "one afternoon"
+#: should not shield the phone until midnight.
+AUTO_FOCUS_MAX_MIN = 180
+#: Marks a block as belonging to a task, so finishing that task can clear it and
+#: finishing any *other* task cannot.
+AUTO_FOCUS_SOURCE = "task"
+
+
+def auto_focus_minutes(task: dict[str, Any]) -> int:
+    """How long to shield the phone for a task that was just started."""
+    estimate = task.get("time_estimate_min")
+    try:
+        minutes = int(estimate) if estimate else AUTO_FOCUS_DEFAULT_MIN
+    except (TypeError, ValueError):
+        minutes = AUTO_FOCUS_DEFAULT_MIN
+    return max(5, min(AUTO_FOCUS_MAX_MIN, minutes))
+
+
+def engage_task_focus(task: dict[str, Any]) -> str | None:
+    """Shield the phone for a task that just started. Never raises.
+
+    Best effort on purpose: an unreachable phone, an emergency override or a
+    Screen Time failure must not stop the task from being marked started. The
+    task record is the thing worth keeping — the block is a convenience on top.
+    """
+    try:
+        ios_mode.set_mode(
+            "lock_in",
+            duration_min=auto_focus_minutes(task),
+            reason=f"working on {task.get('title') or 'a task'}",
+            source=AUTO_FOCUS_SOURCE,
+        )
+    except ios_mode.OverrideActive:
+        return None  # He pulled the release. Do not argue with it.
+    except Exception as exc:  # noqa: BLE001 - never fail a start over the phone
+        logger.warning("Auto-focus on task start failed: {}", exc)
+        return None
+    return f"phone shielded for {auto_focus_minutes(task)}min"
+
+
+def release_task_focus(task_id: str | None = None) -> None:
+    """Clear a block that a task start imposed, if that is what is running.
+
+    Only clears blocks tagged ``task``. A lock Niranjan asked for himself, or a
+    weekend allowance, survives finishing a task — otherwise ticking something
+    off would quietly unlock the phone for the rest of the evening.
+    """
+    try:
+        current = ios_mode.get_mode()
+        if current.get("mode") != "off" and current.get("source") == AUTO_FOCUS_SOURCE:
+            ios_mode.set_mode("off", reason="task finished")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Releasing task focus failed: {}", exc)
+
+
 class StartTaskTool(Tool):
     """Mark a task as started."""
 
-    def __init__(self, store: GoogleTasksStore, state: DailyState, log: DailyLog) -> None:
+    def __init__(
+        self,
+        store: GoogleTasksStore,
+        state: DailyState,
+        log: DailyLog,
+        auto_focus: bool = True,
+    ) -> None:
         self._store = store
         self._state = state
         self._log = log
+        self._auto_focus = auto_focus
 
     @property
     def name(self) -> str:
@@ -234,6 +301,13 @@ class StartTaskTool(Tool):
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "Task ID or partial title match."},
+                "focus": {
+                    "type": "boolean",
+                    "description": (
+                        "Shield the phone for this task. Defaults to true. Pass false "
+                        "only when he said he needs his phone for the work itself."
+                    ),
+                },
             },
             "required": ["task_id"],
         }
@@ -252,7 +326,11 @@ class StartTaskTool(Tool):
             kind="working", task_id=task["id"], title=task["title"]
         )
         self._log.log_task_started(task["title"])
-        return ToolResult(f"Started: {task['title']}")
+
+        note = None
+        if self._auto_focus and kwargs.get("focus", True):
+            note = engage_task_focus(task)
+        return ToolResult(f"Started: {task['title']}" + (f" — {note}" if note else ""))
 
 
 class CompleteTaskTool(Tool):
@@ -338,6 +416,9 @@ class CompleteTaskTool(Tool):
         # measure zero minutes, and stay silent for the rest of the day.
         if on_this_task:
             self._state.end_session_if_task(completed.get("id") or task_id, title=title)
+            # Only the block this task raised. Finishing homework should not
+            # unlock a phone he locked himself, nor end a weekend allowance.
+            release_task_focus(completed.get("id") or task_id)
 
         return ToolResult(f"Done: {title}" + (f" ({actual_min}min)" if actual_min else ""))
 

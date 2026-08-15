@@ -90,7 +90,7 @@ async def test_start_uses_exact_id_without_title_search(tmp_path):
     store, tasks = _store(tmp_path, [{"id": "task-2", "title": "Report final"}])
     state, log = _State(), _Log()
 
-    result = await StartTaskTool(store, state, log).execute(task_id="task-2")
+    result = await StartTaskTool(store, state, log, auto_focus=False).execute(task_id="task-2")
 
     assert result == "Started: Report final"
     assert tasks.list_calls == 0
@@ -104,7 +104,9 @@ async def test_start_prefers_one_exact_normalized_title_over_substrings(tmp_path
     ])
     state, log = _State(), _Log()
 
-    result = await StartTaskTool(store, state, log).execute(task_id="quarterly-report")
+    result = await StartTaskTool(store, state, log, auto_focus=False).execute(
+        task_id="quarterly-report"
+    )
 
     assert result == "Started: Quarterly Report"
     assert state.started[0]["task_id"] == "exact"
