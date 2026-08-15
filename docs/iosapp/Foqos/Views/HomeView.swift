@@ -274,7 +274,11 @@ struct HomeView: View {
     }
     .fullScreenCover(isPresented: $showIntroScreen) {
       IntroView {
-        requestAuthorizer.requestAuthorization()
+        // Close the intro once the attempt has resolved, granted or not.
+        // Screen Time is one feature of this app; the board and the chat do
+        // not need it, and refusing to let him past this screen without it
+        // made the whole app unusable rather than one tab.
+        requestAuthorizer.requestAuthorization { showIntroScreen = false }
         argonBridge.requestRemoteNotifications()
       }.interactiveDismissDisabled()
     }
