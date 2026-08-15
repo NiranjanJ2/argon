@@ -2,6 +2,7 @@ import Foundation
 import Security
 import UIKit
 import UserNotifications
+import WidgetKit
 
 private enum ArgonKeychain {
   static let service = "com.niranjanj.argon"
@@ -70,12 +71,18 @@ struct ArgonIOSState: Decodable {
   }
 }
 
+struct ArgonAgendaEvent: Decodable {
+  let summary: String
+  let start: String
+}
+
 struct ArgonStatusResponse: Decodable {
   let mode: String
   let currentTask: String?
   let workSessionMinutes: Int?
   let lockInMinutes: Int?
   let ios: ArgonIOSState?
+  let agenda: [ArgonAgendaEvent]?
 
   enum CodingKeys: String, CodingKey {
     case mode
@@ -83,6 +90,7 @@ struct ArgonStatusResponse: Decodable {
     case workSessionMinutes = "work_session_minutes"
     case lockInMinutes = "lock_in_minutes"
     case ios
+    case agenda
   }
 
   init(from decoder: Decoder) throws {
@@ -92,6 +100,7 @@ struct ArgonStatusResponse: Decodable {
     workSessionMinutes = try? container.decode(Int.self, forKey: .workSessionMinutes)
     lockInMinutes = try? container.decode(Int.self, forKey: .lockInMinutes)
     ios = try? container.decode(ArgonIOSState.self, forKey: .ios)
+    agenda = try? container.decode([ArgonAgendaEvent].self, forKey: .agenda)
   }
 }
 
@@ -130,6 +139,7 @@ final class ArgonBridge: ObservableObject {
   @Published private(set) var taskDashboardState = ArgonTaskDashboardState.empty
   @Published private(set) var isLoadingTasks = false
   @Published private(set) var taskMutationIDs: Set<String> = []
+  private(set) var nextEvent: ArgonWidgetSnapshot.Event?
   @Published private(set) var inbox: [ArgonInboxItem] = []
   @Published private(set) var inboxUnanswered = 0
   /// Buttons mid-flight, so a double tap cannot start the same task twice.
@@ -259,6 +269,11 @@ final class ArgonBridge: ObservableObject {
       connectionState = "Connected"
       lastSync = Date()
       lastError = nil
+      nextEvent = status.agenda?.first.flatMap { event in
+        ArgonServerDate.parse(event.start).map {
+          ArgonWidgetSnapshot.Event(summary: event.summary, start: $0)
+        }
+      }
 
       if let desired = status.ios?.desired {
         desiredMode = desired.mode
@@ -276,6 +291,7 @@ final class ArgonBridge: ObservableObject {
         // that is switched off, and Argon would assume the lock had landed.
         await report(result)
       }
+      publishWidgetSnapshot()
       return true
     } catch let decodingError as DecodingError {
       connectionState = "Protocol mismatch"
@@ -337,6 +353,7 @@ final class ArgonBridge: ObservableObject {
       let response = try JSONDecoder().decode(ArgonInboxResponse.self, from: data)
       inbox = response.items
       inboxUnanswered = response.unanswered
+      publishWidgetSnapshot()
       return true
     } catch {
       // Deliberately quiet: the inbox is secondary to the task list, and a
@@ -578,12 +595,58 @@ final class ArgonBridge: ObservableObject {
     _ = try? await perform(request)
   }
 
+  /// Hand the widgets what they render, and ask WidgetKit to redraw.
+  ///
+  /// Called after every sync rather than on a timer: the widget cannot fetch
+  /// for itself (the API token lives in this app's keychain, not the shared
+  /// group), so this is the only thing keeping it current.
+  private func publishWidgetSnapshot() {
+    let calendar = Calendar.autoupdatingCurrent
+    let startOfToday = calendar.startOfDay(for: Date())
+
+    // Today and overdue only. A widget showing the full backlog is a list you
+    // stop reading, which makes it worth exactly nothing.
+    let relevant = tasks.filter { task in
+      guard !task.done else { return false }
+      guard let due = task.dueDay else { return false }
+      return due < startOfToday || calendar.isDateInToday(due)
+    }
+
+    let items = relevant.map { task -> ArgonWidgetSnapshot.Item in
+      let overdue = (task.dueDay.map { $0 < startOfToday }) ?? false
+      return ArgonWidgetSnapshot.Item(
+        id: task.id,
+        title: task.title,
+        priority: task.priority,
+        dueLabel: overdue ? "Overdue" : "Today",
+        overdue: overdue,
+        running: task.startedAt != nil
+      )
+    }
+
+    ArgonWidgetStore.write(
+      ArgonWidgetSnapshot(
+        capturedAt: Date(),
+        mode: taskDashboardState.mode,
+        currentTask: taskDashboardState.currentTask,
+        shielded: shielded,
+        items: items,
+        nextEvent: nextEvent,
+        waitingMessages: inbox.filter(\.isWaiting).count
+      )
+    )
+    WidgetCenter.shared.reloadAllTimelines()
+  }
+
   private func applyTaskDashboard(_ dashboard: ArgonTasksResponse) {
     tasks = dashboard.tasks
     taskDashboardState = dashboard.state
     if let data = try? JSONEncoder().encode(dashboard) {
       defaults.set(data, forKey: Keys.taskDashboardCache)
     }
+    // Every path that changes the task list lands here — refresh, add, tick
+    // off, reprioritise — so this is the one place the widgets need updating.
+    publishWidgetSnapshot()
   }
 
   private func performTaskRequest(

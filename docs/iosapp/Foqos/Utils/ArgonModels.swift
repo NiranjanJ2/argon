@@ -102,7 +102,7 @@ struct ArgonInboxResponse: Codable, Equatable {
   let unanswered: Int
 }
 
-private enum ArgonServerDate {
+enum ArgonServerDate {
   static func parse(_ value: String) -> Date? {
     let fractional = ISO8601DateFormatter()
     fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
