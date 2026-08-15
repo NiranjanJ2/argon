@@ -385,16 +385,19 @@ class ReminderService:
 
         if occasion.kind == "daily_brief":
             # This is the brief: he is home from school and the evening is the
-            # part of the day the whole tool exists for. Classroom and the
-            # overdue list are fetched and stated here rather than left to a
-            # tool call the model kept skipping.
+            # part of the day the whole tool exists for. The whole board is
+            # stated here rather than left to a tool call the model kept
+            # skipping — and it is the *whole* board, both origins. Stating only
+            # Classroom work plus overdue items left a manual task due tonight
+            # ("Chemistry reading & notes") reachable only through an optional
+            # `list_tasks`, and the model does not reliably make optional calls.
             overdue = self._overdue_lines()
             return (
                 "THIS IS THE AFTER-SCHOOL BRIEF. He is home and the evening is "
                 "his. Tell him what is actually on his plate tonight, the way a "
                 "person would say it out loud — group what belongs together, "
                 "lead with whatever is tightest, and let the rest be brief.\n\n"
-                "Due from Google Classroom:\n{}\n\n{}"
+                "His board, verified just now:\n{}\n\n{}"
                 "Put overdue items or real conflicts first; otherwise use "
                 "deadline order. Two or three items is usually right.\n\n"
             ).format(
@@ -426,20 +429,22 @@ class ReminderService:
         if not health.ok:
             return f"- (Google Classroom unavailable: {health.error})"
 
-        work = [c for c in board.commitments if c.origin == "classroom"]
         lines = [
             "- {}{} — due {}{}".format(
                 c.title,
                 f" ({c.subject})" if c.subject else "",
-                c.official_due_when or c.official_due or "no date",
-                f", he plans to do it {c.work_by_when}" if c.work_by_when else "",
+                c.official_due_when or c.official_due or c.due_when or c.due or "no date",
+                f", he planned to do it {c.work_by_when}"
+                if c.work_by_when and c.official_due else "",
             )
-            for c in work[:6]
+            for c in board.commitments[:8]
         ]
         if not lines:
-            lines = ["- nothing due from Classroom"]
+            lines = ["- nothing on the board"]
         # A partial read is not a clear plate; say which courses went unread.
         lines.extend(f"- ({warning})" for warning in health.warnings[:3])
+        if not board.source("tasks").ok:
+            lines.append("- (his task list is unavailable, so this may be incomplete)")
         return "\n".join(lines)
 
     def _overdue_lines(self) -> str:

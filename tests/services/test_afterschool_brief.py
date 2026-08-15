@@ -75,13 +75,29 @@ class TestTheBriefCarriesClassroom:
         ])
         prompt = service.build_prompt(OCCASIONS["daily_brief"])
 
-        assert "Due from Google Classroom" in prompt
+        assert "His board, verified just now" in prompt
         assert "Racism Reflection" in prompt and "APUSH PM" in prompt
 
-    def test_an_empty_classroom_says_so(self, service, monkeypatch):
+    def test_an_empty_board_says_so(self, service, monkeypatch):
         _sources(monkeypatch)
-        assert "nothing due from Classroom" in service.build_prompt(
-            OCCASIONS["daily_brief"])
+        assert "nothing on the board" in service.build_prompt(OCCASIONS["daily_brief"])
+
+    def test_a_manual_task_due_today_is_stated_not_left_to_an_optional_lookup(
+        self, service, monkeypatch
+    ):
+        """The gap a dry run caught: the brief stated Classroom work and overdue
+        items only, so "Chemistry reading & notes" — due tonight, manual, not
+        overdue — was reachable only through an optional `list_tasks`. The model
+        does not reliably make optional calls; that is why the board is stated.
+        """
+        _sources(monkeypatch, tasks=[{
+            "id": "t1", "title": "Chemistry reading & notes", "source": "manual",
+            "due": "2026-08-12", "due_when": "Wed 08/12",
+        }])
+
+        prompt = service.build_prompt(OCCASIONS["daily_brief"])
+
+        assert "Chemistry reading & notes" in prompt
 
     def test_school_auth_failing_never_reads_as_nothing_due(self, service, monkeypatch):
         """The bug: an outage and a clear plate produced the same sentence."""
