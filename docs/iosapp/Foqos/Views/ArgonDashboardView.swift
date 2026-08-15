@@ -171,12 +171,16 @@ struct ArgonDashboardView: View {
     if !tasks.isEmpty {
       Section {
         ForEach(tasks) { task in
-          ArgonTaskRow(task: task, isMutating: bridge.taskMutationIDs.contains(task.id))
-            .contentShape(Rectangle())
-            .onTapGesture {
-              guard !task.isStarted else { return }
-              Task { await bridge.startTask(task) }
-            }
+          ArgonTaskRow(
+            task: task,
+            isMutating: bridge.taskMutationIDs.contains(task.id),
+            onToggle: { Task { await bridge.completeTask(task) } }
+          )
+          .contentShape(Rectangle())
+          .onTapGesture {
+            guard !task.isStarted else { return }
+            Task { await bridge.startTask(task) }
+          }
             // Swipe left to tick it off, swipe right to push it to tomorrow.
             // His call on which way round: the muscle memory that matters is
             // his, not a usability argument. Completing stays first on the
@@ -222,7 +226,7 @@ struct ArgonDashboardView: View {
                 Task { await bridge.completeTask(task) }
               }
             }
-            .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+            .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
         }
@@ -317,77 +321,105 @@ struct ArgonDashboardView: View {
   }()
 }
 
+/// One line of the checklist.
+///
+/// Built like a to-do list rather than a dashboard card: the circle on the left
+/// is the whole point, and it is a real tap target that completes the item
+/// rather than decoration that reports its priority. Everything else is one
+/// title and one quiet line under it — a list you can run your eye down and a
+/// thumb along, which is what a checklist is for.
 private struct ArgonTaskRow: View {
   let task: ArgonTask
   let isMutating: Bool
+  /// Ticking the circle. Separate from tapping the row, which starts the task.
+  var onToggle: () -> Void = {}
 
   var body: some View {
-    HStack(spacing: 13) {
-      ZStack {
-        Circle()
-          .stroke(priorityColor.opacity(0.58), lineWidth: 1.5)
-          .frame(width: 28, height: 28)
+    HStack(alignment: .top, spacing: 12) {
+      Button(action: onToggle) {
+        ZStack {
+          Circle()
+            .stroke(circleColor, lineWidth: 1.6)
+            .frame(width: 24, height: 24)
 
-        if task.isStarted {
-          Image(systemName: "play.fill")
-            .font(.system(size: 9, weight: .bold))
-            .foregroundStyle(ArgonPalette.iceBlue)
+          if task.isStarted {
+            Circle()
+              .fill(ArgonPalette.iceBlue)
+              .frame(width: 10, height: 10)
+          }
         }
+        // A 24pt circle is too small to hit reliably; the padding gives it a
+        // 44pt target without moving anything visually.
+        .padding(10)
+        .contentShape(Rectangle())
       }
-      .shadow(color: task.isStarted ? ArgonPalette.electricBlue.opacity(0.55) : .clear, radius: 7)
+      .buttonStyle(.plain)
+      .disabled(isMutating)
+      .accessibilityLabel(task.isStarted ? "Complete \(task.title)" : "Complete \(task.title)")
 
-      VStack(alignment: .leading, spacing: 5) {
+      VStack(alignment: .leading, spacing: 3) {
         Text(task.title)
-          .font(.system(size: 16, weight: .medium, design: .serif))
+          .font(.system(size: 16, weight: .regular))
           .foregroundStyle(ArgonPalette.ink)
           .lineLimit(2)
 
-        HStack(spacing: 7) {
+        HStack(spacing: 6) {
+          if task.isStarted {
+            Label("In progress", systemImage: "play.fill")
+              .foregroundStyle(ArgonPalette.iceBlue)
+          }
           if let subject = task.subject, !subject.isEmpty {
-            Text(subject)
-              .lineLimit(1)
+            Text(subject).lineLimit(1)
           }
           if let due = task.dueDay {
-            Label(due.formatted(date: .abbreviated, time: .omitted), systemImage: "calendar")
+            Text(dueLabel(due))
+              .foregroundStyle(isOverdue(due) ? .orange : ArgonPalette.mutedInk)
           }
           if let estimate = task.timeEstimateMinutes {
-            Label("\(estimate)m", systemImage: "hourglass")
+            Text("\(estimate)m")
           }
         }
-        .font(.caption2.weight(.medium))
+        .font(.system(size: 12))
         .foregroundStyle(ArgonPalette.mutedInk)
       }
+      .padding(.top, 11)
 
-      Spacer(minLength: 8)
+      Spacer(minLength: 4)
 
       if isMutating {
         ProgressView()
           .tint(ArgonPalette.iceBlue)
-      } else {
-        Text(task.priority.uppercased())
-          .font(.system(size: 8, weight: .bold))
-          .tracking(0.9)
-          .foregroundStyle(priorityColor)
-          .padding(.horizontal, 7)
-          .padding(.vertical, 5)
-          .background(priorityColor.opacity(0.10), in: Capsule())
+          .padding(.top, 11)
+      } else if task.priority == "high" {
+        // Importance reads as one mark, the way a starred item does, instead of
+        // a label on every row repeating what "medium" means.
+        Image(systemName: "star.fill")
+          .font(.system(size: 12))
+          .foregroundStyle(.orange)
+          .padding(.top, 13)
       }
     }
-    .padding(.horizontal, 15)
-    .padding(.vertical, 14)
-    .background(ArgonPalette.surface.opacity(0.82), in: RoundedRectangle(cornerRadius: 20))
-    .overlay {
-      RoundedRectangle(cornerRadius: 20)
-        .stroke(Color.white.opacity(0.07), lineWidth: 1)
-    }
+    .padding(.trailing, 14)
+    .background(ArgonPalette.surface.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
   }
 
-  private var priorityColor: Color {
-    switch task.priority {
-    case "high": return .orange
-    case "low": return ArgonPalette.mutedInk
-    default: return ArgonPalette.iceBlue
-    }
+  private var circleColor: Color {
+    if task.isStarted { return ArgonPalette.iceBlue }
+    return task.priority == "high" ? .orange.opacity(0.75) : ArgonPalette.mutedInk.opacity(0.55)
+  }
+
+  private func isOverdue(_ day: Date) -> Bool {
+    Calendar.autoupdatingCurrent.startOfDay(for: day)
+      < Calendar.autoupdatingCurrent.startOfDay(for: Date())
+  }
+
+  /// "Today" and "Tomorrow" rather than a date he has to convert in his head.
+  private func dueLabel(_ day: Date) -> String {
+    let cal = Calendar.autoupdatingCurrent
+    if cal.isDateInToday(day) { return "Today" }
+    if cal.isDateInTomorrow(day) { return "Tomorrow" }
+    if cal.isDateInYesterday(day) { return "Yesterday" }
+    return day.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
   }
 }
 
