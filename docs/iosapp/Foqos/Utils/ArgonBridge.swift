@@ -4,7 +4,7 @@ import UIKit
 import UserNotifications
 
 private enum ArgonKeychain {
-  static let service = "dev.ambitionsoftware.foqos.argon"
+  static let service = "com.niranjanj.argon"
   static let account = "api-token"
 
   static func read() -> String {
@@ -155,9 +155,12 @@ final class ArgonBridge: ObservableObject {
   private var pollingTimer: Timer?
 
   private init() {
+    // The public HTTPS endpoint, not the old SSH tunnel to 127.0.0.1:3995.
+    // A TestFlight build runs on a phone that is not tethered to the Mac, so a
+    // loopback default meant the app installed and could reach nothing at all.
     serverURL =
       defaults.string(forKey: Keys.serverURL)
-      ?? "http://127.0.0.1:3995"
+      ?? "https://argon.agentneon.dev"
     profileName =
       defaults.string(forKey: Keys.profileName)
       ?? "Argon Lockdown"

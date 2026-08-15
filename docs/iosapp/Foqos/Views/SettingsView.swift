@@ -30,7 +30,7 @@ struct SettingsView: View {
       Form {
         Section {
           LabeledContent {
-            TextField("http://argon.local:3995", text: $argonBridge.serverURL)
+            TextField("https://argon.agentneon.dev", text: $argonBridge.serverURL)
               .keyboardType(.URL)
               .textInputAutocapitalization(.never)
               .autocorrectionDisabled()

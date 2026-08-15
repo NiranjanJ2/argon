@@ -3,11 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>aps-environment</key>
-	<string>development</string>
-	<key>com.apple.developer.associated-domains</key>
-	<array>
-		<string>applinks:foqos.app</string>
-	</array>
+	<string>production</string>
 	<key>com.apple.developer.family-controls</key>
 	<true/>
 	<key>com.apple.developer.nfc.readersession.formats</key>
@@ -18,7 +14,7 @@
 	<true/>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.dev.ambitionsoftware.foqos</string>
+		<string>group.com.niranjanj.argon</string>
 	</array>
 	<key>com.apple.security.files.user-selected.read-only</key>
 	<true/>

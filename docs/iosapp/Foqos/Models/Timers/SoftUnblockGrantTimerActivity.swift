@@ -2,7 +2,7 @@ import DeviceActivity
 import OSLog
 
 private let log = Logger(
-  subsystem: "dev.ambitionsoftware.foqos",
+  subsystem: "com.niranjanj.argon",
   category: SoftUnblockGrantTimerActivity.id
 )
 

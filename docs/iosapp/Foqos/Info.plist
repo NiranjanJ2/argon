@@ -14,13 +14,6 @@
 	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
-	</dict>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Argon connects to your private Argon server to synchronize focus state and assistant commands.</string>
 	<key>Supported</key>
 	<false/>
 	<key>UIBackgroundModes</key>
