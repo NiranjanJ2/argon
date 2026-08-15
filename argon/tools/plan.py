@@ -3,17 +3,77 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import re
+from typing import Any, Iterable
+
+from loguru import logger
 
 from argon.productivity.plan import DayPlan, normalize_time
 from argon.tools.base import Tool
 
 
+def _words(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", str(text or "").lower()))
+
+
+def retire_reminders(cron: Any, dropped: Iterable[str]) -> list[str]:
+    """Cancel pending one-shot reminders for work no longer on the plan.
+
+    Replacing the plan and cancelling its reminders were separate operations,
+    and only the first one happened. Niranjan said there would be no reflection
+    that evening; the plan was rewritten without it, the cron job survived, and
+    the next day Argon told him the Racism Reflection was starting now. Two
+    stale jobs once fired together and each started a different task.
+
+    Deliberately conservative: only future one-shot jobs, and only where the
+    dropped block's wording actually appears in the job. A reminder wrongly
+    cancelled is as bad as one wrongly kept, so anything ambiguous is left
+    alone — and whatever is cancelled is named in the tool's answer rather than
+    disappearing quietly.
+    """
+    if cron is None:
+        return []
+    targets = [_words(d) for d in dropped]
+    targets = [t for t in targets if len(t) >= 4]
+    if not targets:
+        return []
+
+    # Cron's own clock, not the wall clock: these are cron job times, and the
+    # two must agree about what "already passed" means.
+    from argon.services import cron as cron_mod
+
+    now_ms = cron_mod._now_ms()
+    retired: list[str] = []
+    try:
+        jobs = cron.list_jobs()
+    except Exception:  # noqa: BLE001 — a plan edit must not fail on cron
+        logger.exception("Could not read cron jobs while retiring a plan change")
+        return []
+
+    for job in jobs:
+        schedule = getattr(job, "schedule", None)
+        if getattr(schedule, "kind", None) != "at":
+            continue
+        due = getattr(schedule, "at_ms", None)
+        if not due or due <= now_ms:
+            continue
+        message = _words(getattr(getattr(job, "payload", None), "message", ""))
+        if not any(t in message for t in targets):
+            continue
+        try:
+            if cron.remove_job(job.id):
+                retired.append(job.name)
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not cancel cron job {} for a dropped block", job.id)
+    return retired
+
+
 class SetDayPlanTool(Tool):
     """Record how Niranjan says his day is laid out."""
 
-    def __init__(self, plan: DayPlan) -> None:
+    def __init__(self, plan: DayPlan, cron: Any = None) -> None:
         self._plan = plan
+        self._cron = cron
 
     @property
     def name(self) -> str:
@@ -99,7 +159,11 @@ class SetDayPlanTool(Tool):
         before = {b.what for b in self._plan.blocks()}
         stored = self._plan.set_blocks(blocks)
         if not blocks:
-            return "Plan cleared."
+            retired = retire_reminders(self._cron, before)
+            return "Plan cleared." + (
+                " Cancelled the reminders for it: {}.".format(", ".join(retired))
+                if retired else ""
+            )
         after = {b.what for b in stored}
         dropped = sorted(before - after)
         if not stored:
@@ -116,7 +180,15 @@ class SetDayPlanTool(Tool):
         # than none at all — he would believe Argon had it.
         note = " ({} block(s) had no usable time and were skipped)".format(unusable) if unusable else ""
         lost = "  REMOVED from his plan: {}".format(", ".join(dropped)) if dropped else ""
-        return "Plan set: {}{}{}".format(lines, note, lost)
+        # Work taken off the plan must not keep its reminders. This is the
+        # "no reflection tonight" case: the plan was rewritten, the job was not,
+        # and it fired the next day.
+        retired = retire_reminders(self._cron, dropped)
+        cancelled = (
+            "  Cancelled the reminder(s) for it: {}.".format(", ".join(retired))
+            if retired else ""
+        )
+        return "Plan set: {}{}{}{}".format(lines, note, lost, cancelled)
 
 
 class UpdatePlanBlockTool(Tool):
@@ -129,8 +201,9 @@ class UpdatePlanBlockTool(Tool):
     their timing and their status.
     """
 
-    def __init__(self, plan: DayPlan) -> None:
+    def __init__(self, plan: DayPlan, cron: Any = None) -> None:
         self._plan = plan
+        self._cron = cron
 
     @property
     def name(self) -> str:
@@ -199,6 +272,10 @@ class UpdatePlanBlockTool(Tool):
 
         if action == "remove":
             block = self._plan.remove_block(block_id)
+            if block is not None and (retired := retire_reminders(self._cron, [block.what])):
+                return "Removed {} from the plan, and cancelled its reminder(s): {}. {}".format(
+                    _describe(block), ", ".join(retired), self._rest()
+                )
             if block is None:
                 return _missing(block_id)
             return "Removed {} from the plan. {}".format(_describe(block), self._rest())

@@ -305,8 +305,12 @@ class AgentLoop:
         from argon.tools.plan import GetDayPlanTool, SetDayPlanTool, UpdatePlanBlockTool
 
         day_plan = DayPlan(self.workspace)
-        self.tools.register(SetDayPlanTool(day_plan))
-        self.tools.register(UpdatePlanBlockTool(day_plan))
+        # The plan tools hold the cron service so that taking work off the plan
+        # also retires its reminders. Those were separate operations, and only
+        # the first one happened: a cancelled block kept its job and announced
+        # itself the next day.
+        self.tools.register(SetDayPlanTool(day_plan, self.cron_service))
+        self.tools.register(UpdatePlanBlockTool(day_plan, self.cron_service))
         self.tools.register(GetDayPlanTool(day_plan))
 
         # Always available — handles missing Google auth gracefully

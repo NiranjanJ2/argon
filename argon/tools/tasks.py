@@ -193,6 +193,14 @@ class AddTaskTool(Tool):
         )
         if kwargs.get("time_estimate_min"):
             self._store.set_time_estimate(task["id"], int(kwargs["time_estimate_min"]))
+        # Say so rather than reporting a second copy as a new task. Two rows for
+        # one piece of work get counted, reminded on and reported separately,
+        # and he is the one who has to notice.
+        if task.get("already_existed"):
+            when = task.get("due_when") or task.get("due") or "no date"
+            return ToolResult(
+                f"Already on the list: {task['title']} (due {when}) — not added again."
+            )
         self._log.append(f"Task added: {title}", tag="task")
         return ToolResult(f"Added: {title}")
 

@@ -6,6 +6,15 @@ This file is about *building* Argon. The prompts Argon itself runs on are
 `argon/prompts/SOUL.md` (who it is) and `argon/prompts/AGENTS.md` (how it uses
 its tools); editing those changes the assistant's behaviour, not the build.
 
+**Those three files under `argon/prompts/` are the only prompts that exist.**
+There used to be a second `SOUL.md` at the repo root, left over from an earlier
+generation and loaded by nothing, which told the model to address Niranjan by
+name — the opposite of what the live prompt says. Reading the repository, you
+could not tell which one was real. Copies under `~/.argon` are *installed
+output*, seeded and updated from `argon/prompts/` by
+`sync_workspace_templates`, which keeps a manifest so a file he has edited
+himself is never overwritten. Edit the bundled prompt, not the installed copy.
+
 ## What this is
 
 A personal assistant for one person, Niranjan, reachable over Discord and a

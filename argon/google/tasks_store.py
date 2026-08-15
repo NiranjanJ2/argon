@@ -354,14 +354,55 @@ class GoogleTasksStore:
             try:
                 due_dt = datetime.fromisoformat(due)
                 body["due"] = _due_stamp(due_dt)
-                if source == "manual" and "T" in due:
+                # Google Tasks stores a date and throws the time away, so the
+                # time is kept in our own metadata or it is simply lost. It used
+                # to be kept only for `manual` tasks, which is how "stored for
+                # Thursday 8 PM" became a bare date on anything Classroom-shaped
+                # — Argon claiming a precision the record did not hold.
+                if "T" in due:
                     meta["wb"] = due_dt.isoformat()
                     body["notes"] = _encode_meta(meta, notes)
             except ValueError:
                 logger.warning(f"add_task: unparseable due date {due!r}, task created without one")
 
+        # Adding the same thing twice is not a new commitment, it is a second
+        # copy of an existing one — and each copy is then counted, reminded on
+        # and reported independently. "Chemistry reading & notes" was added
+        # twice in one conversation because this path had no idempotency at all,
+        # while the bulk Classroom import (which does dedupe) is never used
+        # conversationally.
+        if existing := self._existing_match(title, classroom_key, classroom_id):
+            logger.info("add_task: {!r} already exists; returning it", title)
+            return {**existing, "already_existed": True}
+
         created = self._svc().tasks().insert(tasklist=self._tl(), body=body).execute()
         return _to_task(created)
+
+    def _existing_match(
+        self,
+        title: str,
+        classroom_key: str | None = None,
+        classroom_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """An open task that is already this thing, or None.
+
+        Durable Classroom identity first; otherwise the normalised title, which
+        is how a person notices they have written the same thing down twice.
+        """
+        wanted = _normalized_task_title(title)
+        try:
+            pending = self.get_all()
+        except Exception:  # noqa: BLE001 — never block an add on a read failure
+            logger.warning("add_task: could not check for duplicates; adding anyway")
+            return None
+        for task in pending:
+            if classroom_key and task.get("classroom_key") == classroom_key:
+                return task
+            if classroom_id and task.get("classroom_id") == classroom_id:
+                return task
+            if wanted and _normalized_task_title(task.get("title", "")) == wanted:
+                return task
+        return None
 
     def set_time_estimate(self, task_id: str, minutes: int) -> bool:
         svc = self._svc()
