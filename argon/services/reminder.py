@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,43 +28,19 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 from argon import clock
+from argon.core import store
 from argon.productivity.plan import DayPlan
 from argon.productivity.state import DailyState
 
 # How often the gate is evaluated. Cheap — it is local state only, no LLM.
 TICK_MINUTES = 10
 
-# Minimum minutes an active work session must run before it is worth remarking on.
-SESSION_FLOOR_MINUTES = 25
+#: After this hour, a same-day secretary brief is stale rather than useful.
+DAILY_BRIEF_UNTIL_HOUR = 20
 
-#: How long between asking for a plan and asking again. He asked to be pestered
-#: until he names something; this is what "pestered" is allowed to mean.
-PLAN_ASK_COOLDOWN_MIN = 100
-
-#: Stop asking what the day looks like after this hour. It asked at 9:12 PM,
-#: which is not a question about the day any more — by then the evening wrap-up
-#: is the honest occasion, and "what are you up to today?" reads as an assistant
-#: that has not noticed what time it is.
-PLAN_ASK_UNTIL_HOUR = 20
-
-#: How many times in one day Argon may ask what the plan is before letting it
-#: go. He did say to keep asking until he names something — but nine identical
-#: questions between 8 AM and 9:30 PM, three days running, all unanswered, is
-#: not persistence. If he has ignored it this many times, he has answered.
-MAX_PLAN_ASKS_PER_DAY = 3
-
-#: Moments he chose himself, each tied to one block or event. Two rules follow.
-#:
-#: The daily cap does not apply: eight discretionary "want to use this hour?"
-#: offers used to exhaust the budget by five and silently swallow the 7 PM block
-#: he had actually asked to be reminded about — the cap suppressing exactly the
-#: messages it exists to make room for. He can still bound these: plan less.
-#:
-#: Nor does the reword filter, because the ledger already dedupes them by id.
-#: Running both silenced every single block_end: "How did the All Project Sync
-#: go?" necessarily shares its subject with "All Project Sync starts now", and
-#: the block's name is the whole point of the message.
-HIS_OWN_SCHEDULE = frozenset({"block_start", "block_end", "upcoming"})
+#: A concrete event or a block Niranjan placed on his plan is deduped by id,
+#: not wording.  The daily cap and sixty-minute gap still bind it.
+HIS_OWN_SCHEDULE = frozenset({"block_start", "upcoming"})
 
 #: How the model declines to say anything.
 SKIP_TOKEN = "SKIP"
@@ -99,57 +76,85 @@ OCCASIONS: dict[str, Occasion] = {
     o.kind: o
     for o in (
         Occasion("upcoming", "something on his calendar starts shortly", 0),
-        # The plan drives the day. `plan_request` runs until there is one;
-        # after that the blocks he named are the schedule.
-        Occasion("plan_request", "he is home from school and the evening is his",
-                 PLAN_ASK_COOLDOWN_MIN),
+        Occasion("daily_brief", "the after-school secretary brief is due", 0),
         Occasion("block_start", "a block of his plan starts about now", 0),
-        Occasion("block_end", "a block of his plan just finished", 0),
-        Occasion("open_stretch", "he left this stretch of the day unclaimed", 0),
-        Occasion("evening", "the day is winding down", 0),
     )
 }
 
 
+#: How long a failed attempt holds an occasion back before it may be retried.
+#: Short on purpose: a provider hiccup should cost minutes, not the whole day.
+ATTEMPT_BACKOFF_MINUTES = 15
+
+#: The document holding today's check-in ledger. See argon/core/store.py.
+LEDGER_DOC = "checkin_ledger"
+
+
 class CheckInLedger:
-    """What fired and what was actually said, today. Survives a restart.
+    """What was attempted, what was delivered, and what was actually said today.
 
     Cooldowns lived in memory before, so every gateway restart reset them and a
-    crash loop could produce a burst of messages.
+    crash loop could produce a burst of messages. They then lived in a JSON file
+    rewritten in place, which a concurrent turn could lose and a torn write could
+    empty. They now live in one transactional document.
+
+    The important distinction here is *attempted* versus *fired*. The old code
+    recorded a once-per-day occasion as fired before generating anything, so a
+    provider outage at 4 PM permanently consumed that day's brief — the failure
+    looked exactly like a day with nothing to say. An attempt now only holds the
+    occasion back for :data:`ATTEMPT_BACKOFF_MINUTES`; only an acknowledged
+    delivery consumes it.
     """
 
     def __init__(self, workspace: Path) -> None:
-        self._path = workspace / "daily" / "checkins.json"
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._workspace = workspace
+
+    @staticmethod
+    def _blank(today: str) -> dict[str, Any]:
+        return {"date": today, "fired": {}, "said": [], "announced": [], "attempts": {}}
 
     def _load(self, today: str) -> dict[str, Any]:
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            data = {}
+        data = store.get_doc(LEDGER_DOC)
         if not isinstance(data, dict) or data.get("date") != today:
-            return {"date": today, "fired": {}, "said": [], "announced": []}
-        data.setdefault("fired", {})
-        data.setdefault("said", [])
-        data.setdefault("announced", [])
+            return self._blank(today)
+        for key, empty in (("fired", {}), ("said", []), ("announced", []), ("attempts", {})):
+            data.setdefault(key, empty)
         return data
 
-    def _save(self, data: dict[str, Any]) -> None:
-        self._path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    @contextmanager
+    def _edit(self) -> Any:
+        """Read-modify-write today's ledger as one transaction."""
+        today = clock.today_key()
+        with store.edit_doc(LEDGER_DOC, self._blank(today)) as data:
+            if data.get("date") != today:
+                data.clear()
+                data.update(self._blank(today))
+            for key, empty in (("fired", {}), ("said", []), ("announced", []), ("attempts", {})):
+                data.setdefault(key, empty)
+            yield data
+
+    def record_attempt(self, kind: str, now: datetime) -> None:
+        """We are about to try. Holds the occasion back briefly if this fails."""
+        with self._edit() as data:
+            data["attempts"][kind] = now.isoformat()
 
     def record_fired(self, kind: str, now: datetime) -> None:
-        """A check-in ran. Starts the cooldown whether or not it spoke."""
-        data = self._load(clock.today_key())
-        data["fired"][kind] = now.isoformat()
-        self._save(data)
+        """This occasion has been delivered. Starts its real cooldown."""
+        with self._edit() as data:
+            data["fired"][kind] = now.isoformat()
 
     def record_said(self, kind: str, text: str, now: datetime) -> None:
-        data = self._load(clock.today_key())
-        data["said"].append({"at": now.isoformat(), "occasion": kind, "text": text[:400]})
-        self._save(data)
+        with self._edit() as data:
+            data["said"].append({"at": now.isoformat(), "occasion": kind, "text": text[:400]})
 
     def minutes_since_fired(self, kind: str, now: datetime) -> float | None:
         stamp = self._load(clock.today_key())["fired"].get(kind)
+        if not stamp:
+            return None
+        return (now - datetime.fromisoformat(stamp)).total_seconds() / 60
+
+    def minutes_since_attempt(self, kind: str, now: datetime) -> float | None:
+        stamp = self._load(clock.today_key())["attempts"].get(kind)
         if not stamp:
             return None
         return (now - datetime.fromisoformat(stamp)).total_seconds() / 60
@@ -174,33 +179,12 @@ class CheckInLedger:
         return event_id in self._load(clock.today_key()).get("announced", [])
 
     def record_announced(self, event_id: str) -> None:
-        data = self._load(clock.today_key())
-        announced = data.setdefault("announced", [])
-        if event_id not in announced:
-            announced.append(event_id)
-        self._save(data)
+        with self._edit() as data:
+            if event_id not in data["announced"]:
+                data["announced"].append(event_id)
 
     def spoken_count(self) -> int:
         return len(self._load(clock.today_key())["said"])
-
-
-def _evenings_until(now: datetime, deadline: datetime) -> int:
-    """How many evenings he actually has before a deadline.
-
-    Counts tonight if the deadline is not today. Crude on purpose: the point is
-    "two evenings, six hours of work", not a scheduling solver.
-    """
-    days = (deadline.date() - now.date()).days
-    return max(0, days)
-
-
-def _gap_key(gap: Any) -> str:
-    """Identify a free stretch by where it ends — the next thing he committed to.
-
-    Keying on when it was noticed made one stretch of free time produce a
-    message at 12:30 and another at 13:00.
-    """
-    return "gap:{}".format("{:%H:%M}".format(gap.end) if gap.end else "open")
 
 
 def _snooze_file(workspace: Path) -> Path:
@@ -276,10 +260,10 @@ class ReminderService:
         timezone: str,
         on_check_in: Callable[[str], Awaitable[Any]],
         *,
-        on_day_rollover: Callable[[], Awaitable[Any]] | None = None,
+        on_deliver: Callable[..., Awaitable[Any]] | None = None,
         enabled: bool = True,
-        max_per_day: int = 8,
-        min_gap_minutes: int = 25,
+        max_per_day: int = 3,
+        min_gap_minutes: int = 60,
         quiet_start_hour: int = 23,
         quiet_end_hour: int = 7,
         unprompted_from_hour: int = 16,
@@ -288,7 +272,7 @@ class ReminderService:
         # Explicit tz wins (tests); otherwise the process-wide clock.
         self.tz = ZoneInfo(timezone) if timezone else clock.tz()
         self.on_check_in = on_check_in
-        self.on_day_rollover = on_day_rollover
+        self.on_deliver = on_deliver
         self.enabled = enabled
         self.max_per_day = max_per_day
         self.min_gap_minutes = min_gap_minutes
@@ -302,7 +286,6 @@ class ReminderService:
         self._pending: dict[str, Any] | None = None
         #: Same, for the plan-driven occasions.
         self._pending_block: Any = None
-        self._pending_gap: Any = None
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -321,12 +304,21 @@ class ReminderService:
         return now.hour >= start or now.hour < end
 
     def _ready(self, kind: str, now: datetime) -> bool:
-        """Has this occasion's own cooldown elapsed?"""
+        """Has this occasion's own cooldown elapsed?
+
+        A delivered occasion is bound by its real cooldown. An *attempt* that
+        did not reach him only holds it back briefly: a provider outage at 4 PM
+        used to consume the day's brief outright, and a day Argon failed to
+        speak was indistinguishable from a day it had nothing to say.
+        """
         elapsed = self.ledger.minutes_since_fired(kind, now)
-        if elapsed is None:
-            return True
-        cooldown = OCCASIONS[kind].cooldown_min
-        return False if cooldown == 0 else elapsed >= cooldown
+        if elapsed is not None:
+            cooldown = OCCASIONS[kind].cooldown_min
+            return False if cooldown == 0 else elapsed >= cooldown
+        attempted = self.ledger.minutes_since_attempt(kind, now)
+        if attempted is not None and attempted < ATTEMPT_BACKOFF_MINUTES:
+            return False
+        return True
 
     def pending_task_count(self) -> int:
         """Open tasks with no time set aside yet. -1 when it cannot be determined.
@@ -339,11 +331,19 @@ class ReminderService:
         rather than a prompt asking the model not to say the obvious thing.
         """
         try:
-            from argon.google.tasks_store import GoogleTasksStore
+            from argon.commitments import load_board
             from argon.services import agenda
             from argon.tools.tasks import mark_scheduled, unscheduled
 
-            tasks = GoogleTasksStore(self.workspace).get_all()
+            board = load_board(self.workspace)
+            if not board.source("tasks").ok:
+                # Absence of evidence. A task list that did not answer is not a
+                # task list with nothing in it, and guessing zero here is how a
+                # brief reports a clear evening on a night with work due.
+                return -1
+            # A Classroom outage does not mute the brief — what Tasks returned
+            # is still real material, and `_overdue_lines` states the outage.
+            tasks = board.as_dicts()
         except Exception:  # noqa: BLE001 — offline must not become a guess
             return -1
         try:
@@ -369,53 +369,25 @@ class ReminderService:
                 .format(_agenda.describe(self._pending))
             )
 
-        if occasion.kind == "plan_request":
-            asked = self._plan.times_asked()
-            again = ""
-            if asked:
-                # It asked nine times in one day, each a reword of the last,
-                # because it was shown "(sent)" as its own history and could
-                # not see it had already asked. The history is real now; say
-                # plainly that a second ask must not be the same question.
-                again = (
-                    "You have already asked {} time(s) today and he has not "
-                    "answered. Do not ask the same question again — either put "
-                    "it a different way with something concrete from his list, "
-                    "or reply {} and leave it.\n"
-                ).format(asked, SKIP_TOKEN)
-            known = (
-                "He already has these fixed today, so ask what goes around "
-                "them rather than starting from a blank day.\n"
-                if self._plan.exists() else ""
-            )
+        if occasion.kind == "daily_brief":
             # This is the brief: he is home from school and the evening is the
             # part of the day the whole tool exists for. Classroom and the
             # overdue list are fetched and stated here rather than left to a
             # tool call the model kept skipping.
             overdue = self._overdue_lines()
-            pressure = self._pressure_lines()
-            habits = self._habits_line()
-            patterns = self._pattern_lines()
             return (
                 "THIS IS THE AFTER-SCHOOL BRIEF — he is home and the evening is "
-                "his. It is the one message of the day that has to be good.\n\n"
-                "Due from Google Classroom:\n{}\n\n{}{}{}{}"
-                "Lead with what is live: at most two or three things, hardest or "
-                "nearest first. Then ask one plain question — what is he doing "
-                "with the evening. No lists of everything you know, no menu of "
-                "options. Whatever he answers, record it with set_day_plan; "
-                "those blocks become when you check in, so this is the message "
-                "that makes the rest of the day work.\n"
-                "{}{}"
-                "If he says he doesn't want to plan, call set_day_plan with "
-                "planning: false and leave him alone about it.\n\n"
+                "his. This is a one-way secretary brief, not coaching and not a "
+                "planning conversation. No reply is needed.\n\n"
+                "Due from Google Classroom:\n{}\n\n{}"
+                "Report only verified exceptions and commitments he already has. "
+                "Put overdue items or real conflicts first; otherwise use time or "
+                "deadline order. Keep it to two or three short items. Do not rank "
+                "work by difficulty, propose priorities, invent a plan, ask a "
+                "question, call a mutation tool, or imply that he should respond.\n\n"
             ).format(
                 self._schoolwork_lines(),
                 "Past due and still open:\n{}\n\n".format(overdue) if overdue else "",
-                "Tight on time:\n{}\n\n".format(pressure) if pressure else "",
-                patterns,
-                habits,
-                known, again,
             )
 
         if occasion.kind == "block_start" and self._pending_block:
@@ -427,169 +399,69 @@ class ReminderService:
                 .format(self._pending_block.what, self._pending_block.start)
             )
 
-        if occasion.kind == "block_end" and self._pending_block:
-            return (
-                "HIS PLAN SAYS: {} was meant to end about now ({}). Ask how it "
-                "went in one line. When he answers, record it with "
-                "update_plan_block so you stop asking.\n\n"
-                .format(self._pending_block.what, self._pending_block.end)
-            )
-
-        if occasion.kind == "open_stretch" and self._pending_gap:
-            until = (
-                "until {:%-I:%M %p}".format(self._pending_gap.end)
-                if self._pending_gap.end else "for a while"
-            )
-            return (
-                "HE HAS NOTHING PLANNED {} ({} minutes). Offer it back to him: "
-                "does he want to use it on something, or is it downtime? Both "
-                "answers are fine and you must not push — the point is that he "
-                "chooses, not that he works.\n\n"
-                .format(until.upper(), self._pending_gap.minutes)
-            )
         return ""
 
-    def _seed_plan(self) -> None:
-        """Adopt today's commitments as the plan, if he has not stated one."""
-        if self._plan.exists() or self._plan.declined():
-            return
-        try:
-            from argon.services import agenda
-
-            self._plan.seed_from(agenda.upcoming(self.workspace))
-        except Exception:  # noqa: BLE001 — a calendar outage must not mute the gate
-            logger.warning("Could not seed the day plan from commitments")
-
-    def _pattern_lines(self) -> str:
-        """Shapes his weeks keep taking, learned from plans he actually made.
-
-        This is what lets "I have robotics" be a complete sentence: he names
-        the thing, and his own history supplies the time. Stated as observation
-        rather than instruction — a wrong guess about his schedule is worse
-        than no guess, because he has to notice it and correct it.
-        """
-        try:
-            from argon.productivity.history import PlanHistory
-
-            found = PlanHistory(self.workspace).summary()
-        except Exception:  # noqa: BLE001 — never let this cost the brief
-            return ""
-        if not found:
-            return ""
-        return (
-            "What his weeks usually look like, from plans he has made before:\n"
-            "{}\n"
-            "If he names one of these without a time, use the time it usually "
-            "happens rather than asking — but say which you assumed.\n\n"
-        ).format(found)
-
-    def _habits_line(self) -> str:
-        """What his own record says, when there is enough of it to mean anything.
-
-        HabitsTracker has recorded every work start and completion for months
-        into a file nothing ever opened — the read methods existed and had no
-        callers. A week of evidence about how he actually works is worth more
-        than any amount of asking him how it is going.
-        """
-        try:
-            from argon.productivity.habits import HabitsTracker
-
-            summary = HabitsTracker(self.workspace).get_summary() or {}
-        except Exception:  # noqa: BLE001 — never let this cost the brief
-            return ""
-        bits = []
-        rate = summary.get("completion_rate")
-        if isinstance(rate, (int, float)):
-            bits.append("he finishes about {:.0%} of what he plans".format(rate))
-        start = summary.get("typical_work_start")
-        if start:
-            bits.append("usually starts around {}".format(start))
-        if not bits:
-            return ""
-        return (
-            "For context, from his own record: {}. Use it to be realistic, not "
-            "to lecture him with it.\n\n".format(", and ".join(bits))
-        )
-
     def _schoolwork_lines(self) -> str:
-        """Classroom assignments due soon, as prompt lines. Never raises."""
-        from argon.services import agenda
+        """Classroom assignments due soon, as prompt lines. Never raises.
 
-        try:
-            work = agenda.schoolwork(self.workspace)
-        except Exception:  # noqa: BLE001 — school auth must not mute the brief
-            return "- (Google Classroom unavailable)"
-        if not work:
-            return "- nothing due from Classroom"
-        return "\n".join("- " + agenda.describe_assignment(a) for a in work[:6])
-
-    def _pressure_lines(self) -> str:
-        """Hours of work against hours of runway, for anything with both.
-
-        Argon has had the estimate and the deadline side by side the whole
-        time and never once multiplied them. "That is six hours of work and
-        you have four evenings" is the sentence a to-do list cannot say, and
-        the arithmetic is trivial — what was missing was anyone doing it.
+        Reads the canonical board. This used to call ``agenda.schoolwork``,
+        which swallows its own failure and returns an empty list — so the one
+        branch here that said "Classroom unavailable" was unreachable, and a
+        stale-token outage printed "nothing due from Classroom" into the 4 PM
+        brief. That is an assertion Argon had no basis for, in the message it
+        exists to send. It also means the brief no longer crawls Classroom
+        twice through two caches with two different windows.
         """
-        from argon.services import agenda
-
         try:
-            from argon.google.tasks_store import GoogleTasksStore
+            from argon.commitments import load_board
 
-            tasks = GoogleTasksStore(self.workspace).get_all()
-        except Exception:  # noqa: BLE001 — offline must not blank the brief
-            tasks = []
-        try:
-            work = agenda.schoolwork(self.workspace)
-        except Exception:  # noqa: BLE001
-            work = []
+            board = load_board(self.workspace)
+        except Exception:  # noqa: BLE001 — never let this break the brief
+            return "- (Google Classroom unavailable)"
 
-        now = self._now()
-        lines: list[str] = []
+        health = board.source("classroom")
+        if not health.ok:
+            return f"- (Google Classroom unavailable: {health.error})"
 
-        for task in tasks:
-            estimate = task.get("time_estimate_min")
-            due = task.get("due")
-            if not estimate or not due:
-                continue
-            try:
-                deadline = datetime.fromisoformat(str(due).replace("Z", "+00:00"))
-            except (TypeError, ValueError):
-                continue
-            evenings = _evenings_until(now, deadline.astimezone(now.tzinfo))
-            hours = estimate / 60
-            if evenings <= 0:
-                lines.append("- {}: {:.0f}h of work, due today".format(task["title"], hours))
-            elif hours > evenings * 2:  # more than two workable hours an evening
-                lines.append(
-                    "- {}: {:.0f}h of work and {} evening(s) before it is due".format(
-                        task["title"], hours, evenings)
-                )
-
-        for item in work:
-            days = item.get("days_left")
-            if days is not None and days <= 1:
-                lines.append("- {} is due {}".format(
-                    item["title"], "today" if days <= 0 else "tomorrow"))
-
-        return "\n".join(lines[:4])
+        work = [c for c in board.commitments if c.origin == "classroom"]
+        lines = [
+            "- {}{} — due {}{}".format(
+                c.title,
+                f" ({c.subject})" if c.subject else "",
+                c.official_due_when or c.official_due or "no date",
+                f", he plans to do it {c.work_by_when}" if c.work_by_when else "",
+            )
+            for c in work[:6]
+        ]
+        if not lines:
+            lines = ["- nothing due from Classroom"]
+        # A partial read is not a clear plate; say which courses went unread.
+        lines.extend(f"- ({warning})" for warning in health.warnings[:3])
+        return "\n".join(lines)
 
     def _overdue_lines(self) -> str:
-        """Open tasks that are past due, with how far past. Never raises."""
-        try:
-            from argon.google.tasks_store import GoogleTasksStore
+        """Commitments past due, with how far past. Never raises.
 
-            tasks = GoogleTasksStore(self.workspace).get_all()
+        Reads the reconciled board, not raw Google Tasks. Reading the raw list
+        here is how an assignment he had already turned in — correctly hidden
+        from the board — was still announced as overdue in the 4 PM brief.
+        """
+        try:
+            from argon.commitments import load_board
+
+            board = load_board(self.workspace)
         except Exception:  # noqa: BLE001 — offline must not blank the brief
             return ""
-        late = [t for t in tasks if (t.get("days_overdue") or 0) > 0]
-        late.sort(key=lambda t: -(t.get("days_overdue") or 0))
-        if not late:
-            return ""
-        return "\n".join(
-            "- {} — {} days past due, still open".format(t["title"], t["days_overdue"])
-            for t in late[:4]
-        )
+        late = [c for c in board.as_dicts() if (c.get("days_overdue") or 0) > 0]
+        late.sort(key=lambda c: -(c.get("days_overdue") or 0))
+        lines = [
+            "- {} — {} days past due, still open".format(c["title"], c["days_overdue"])
+            for c in late[:4]
+        ]
+        # An incomplete board must say so here too, or the brief silently
+        # under-reports and reads as though everything is accounted for.
+        lines.extend(board.health_lines())
+        return "\n".join(lines)
 
     def _agenda_lines(self) -> str:
         """Today's remaining events and reminders as prompt lines. Never raises."""
@@ -611,7 +483,7 @@ class ReminderService:
         return event if event and event.get("id") else None
 
     def has_material(self) -> bool:
-        """Is there anything real to talk about?
+        """Is there verified work or a commitment for the daily brief?
 
         This is the guard that was missing. With no tasks and no session, an
         "idle" nudge has no legitimate content — and a prompt that orders the
@@ -624,9 +496,19 @@ class ReminderService:
         No material, no wake-up. Silence is the correct output, and it costs
         nothing to be sure of it before spending a model call.
         """
-        if self._state.get_work_session_duration_minutes():
+        if self._plan.exists() or self.pending_task_count() > 0:
             return True
-        return self.pending_task_count() > 0
+        from argon.services import agenda
+
+        try:
+            if agenda.upcoming(self.workspace):
+                return True
+        except Exception:  # noqa: BLE001 — an outage is absence of evidence
+            pass
+        try:
+            return bool(agenda.schoolwork(self.workspace))
+        except Exception:  # noqa: BLE001 — never invent material on failure
+            return False
 
     def pick_occasion(self) -> Occasion | None:
         """The reason to reach out right now, or None. No model call involved."""
@@ -639,15 +521,12 @@ class ReminderService:
         if (until := snooze_until(self.workspace)) is not None:
             logger.debug("Check-ins snoozed until {}", until)
             return None
-        at_cap = self.ledger.spoken_count() >= self.max_per_day
+        # All automatic messages share one budget. A planned block or imminent
+        # event is useful, but it is still an unsolicited interruption.
+        if self.ledger.spoken_count() >= self.max_per_day:
+            return None
         quiet_for = self.ledger.minutes_since_said(now)
-        # A floor between messages, so two occasions coming due together do not
-        # read as a double-text. His own scheduled moments get a much shorter
-        # one: a 7 PM block he asked to be reminded about was being dropped
-        # entirely because a discretionary offer had landed at 6:55, and the
-        # 20-minute grace window closed before the floor lifted. Silence is the
-        # wrong way to space out messages he specifically asked for.
-        if quiet_for < TICK_MINUTES:
+        if quiet_for < self.min_gap_minutes:
             return None
 
         # An event about to start outranks everything, the mid-flow guard
@@ -657,14 +536,6 @@ class ReminderService:
             self._pending = event
             return OCCASIONS["upcoming"]
 
-        # A block boundary is a moment he chose, so it outranks the mid-flow
-        # guard: "that's your two hours" is the point of having named an end.
-        if (block := self._plan.just_ended(now)) is not None and not self.ledger.announced(
-            "end:" + block.id
-        ):
-            self._pending_block = block
-            return OCCASIONS["block_end"]
-
         if mode in ("working", "lock_in"):
             # Mid-flow, nothing else earns an interruption. There used to be a
             # `session` occasion here that fired every 45 minutes while he
@@ -672,7 +543,7 @@ class ReminderService:
             # were suppressed as rewords of each other, because "you're on
             # APUSH, want to switch to Math?" is all there is to say and he did
             # not ask. Every moment worth interrupting for is already covered:
-            # a block starting, a block ending, an event about to begin. Being
+            # a block starting or an event about to begin. Being
             # mid-work is not an occasion.
             return None
 
@@ -680,64 +551,23 @@ class ReminderService:
             return None
 
         if (block := self._plan.starting_now(now)) is not None and not self.ledger.announced(
-            "start:" + block.id
+            self._block_key(block)
         ):
             self._pending_block = block
             return OCCASIONS["block_start"]
 
-        # Everything below is discretionary: the full floor, the cap, and the
-        # hour before which Argon does not start conversations. A block he
-        # scheduled for 10 AM still lands — a secretary would not chat before
-        # four, but would certainly tell you about your ten o'clock.
-        if at_cap or quiet_for < self.min_gap_minutes:
-            return None
+        # The after-school brief is the only ambient check-in. A block he
+        # planned can still start before four; this invitation cannot.
         if now.hour < self.unprompted_from_hour:
             return None
 
-        # Before concluding the day has no shape, adopt what he has already
-        # committed to. He had a 3 PM and a 7 PM reminder and had said so in
-        # chat twice; asking him to describe that day would have been the exact
-        # message this design exists to stop.
-        self._seed_plan()
+        if (
+            now.hour < DAILY_BRIEF_UNTIL_HOUR
+            and self._ready("daily_brief", now)
+            and self.has_material()
+        ):
+            return OCCASIONS["daily_brief"]
 
-        # No plan means one job: get one. This is the only nag by design — he
-        # asked to be pestered until he says what he wants out of the day.
-        #
-        # A seeded plan does not count as an answer. One recurring calendar
-        # entry ("All Project Sync", 7-8pm) was enough to make the day look
-        # planned, so Argon never asked what he was actually doing and said two
-        # things all day, one of them about a meeting he had not mentioned. The
-        # seed gives the day its known fixtures; it is not him telling you his
-        # plan. The prompt shows the seeded blocks so the question can be
-        # "you've got X at 7 — what else?" rather than starting from nothing.
-        if not self._plan.answered() and not self._plan.declined():
-            asked_enough = self._plan.times_asked() >= MAX_PLAN_ASKS_PER_DAY
-            if (
-                now.hour < PLAN_ASK_UNTIL_HOUR
-                and not asked_enough
-                and self._ready("plan_request", now)
-            ):
-                return OCCASIONS["plan_request"]
-            return None
-
-        # He has a plan and is between blocks. Offer the free time back to him
-        # rather than assuming it is work time; that assumption is what made
-        # the old `idle` nudge feel like nagging.
-        #
-        # A gap only means something relative to a plan. With no blocks at all
-        # the whole day reads as one long gap, which is the old ambient nudge
-        # wearing a different hat — and it fired even after he had said he was
-        # not planning today, which is the one thing that answer must prevent.
-        if not self._plan.exists():
-            return None
-        gap = self._plan.open_stretch(now)
-        if gap is not None and not self.ledger.announced(_gap_key(gap)):
-            self._pending_gap = gap
-            return OCCASIONS["open_stretch"]
-
-        hour = now.hour + now.minute / 60
-        if 20 <= hour < 22.5 and self._ready("evening", now):
-            return OCCASIONS["evening"]
         return None
 
     def build_prompt(self, occasion: Occasion) -> str:
@@ -780,9 +610,9 @@ class ReminderService:
             "sentences, unprompted, in your own voice, the way a friend texts.\n\n"
             "Reply with the message itself and nothing else — no preamble, no "
             "explanation, no quotes around it.\n\n"
-            "If a task is days past due and still open, it has usually stopped "
-            "being real — finished and never ticked off, or quietly dropped. "
-            "Asking which is more useful than repeating it back to him.\n\n"
+            "If a task is days past due and still open, flag once that the "
+            "record may be stale. Do not turn an unsolicited brief into a "
+            "request for him to reconcile your records.\n\n"
             "If a task shows scheduled_for, he has already decided when to do "
             "it. Mentioning it is fine — telling him to start it now is not. "
             "Never argue with a plan he has already made.\n\n"
@@ -827,14 +657,6 @@ class ReminderService:
                 await asyncio.sleep(TICK_MINUTES * 60)
                 if not self._running:
                     break
-                # Yesterday's journal gets folded into long-term memory on the
-                # first tick of a new day; it rides this loop rather than
-                # spawning a second one for a once-daily job.
-                if self.on_day_rollover is not None:
-                    try:
-                        await self.on_day_rollover()
-                    except Exception:
-                        logger.exception("Day rollover failed")
                 await self.tick()
             except asyncio.CancelledError:
                 break
@@ -849,41 +671,87 @@ class ReminderService:
             return ""
 
         now = self._now()
-        # Record the attempt before running: a silent turn should still start
-        # this occasion's cooldown, or it retries every tick and burns calls.
-        self.ledger.record_fired(occasion.kind, now)
-        # Same reasoning per event: if the model declines to mention the 7 PM
-        # meeting, it must not be re-offered every ten minutes until 7.
-        if occasion.kind == "upcoming" and self._pending:
-            self.ledger.record_announced(self._pending["id"])
-        # And per block, per gap — each moment of the plan is worth one word,
-        # not one every tick until the grace window closes.
-        if occasion.kind == "block_start" and self._pending_block:
-            self.ledger.record_announced("start:" + self._pending_block.id)
-        if occasion.kind == "block_end" and self._pending_block:
-            self.ledger.record_announced("end:" + self._pending_block.id)
-        if occasion.kind == "open_stretch" and self._pending_gap:
-            self.ledger.record_announced(_gap_key(self._pending_gap))
-        if occasion.kind == "plan_request":
-            self._plan.record_asked()
+        # An attempt, not a consumption. A silent turn still holds this occasion
+        # back — otherwise it retries every tick and burns model calls — but a
+        # failure costs ATTEMPT_BACKOFF_MINUTES rather than the whole day.
+        self.ledger.record_attempt(occasion.kind, now)
         logger.info("Check-in: {}", occasion.kind)
 
         said = await self.on_check_in(self.build_prompt(occasion))
         text = (said or "").strip() if isinstance(said, str) else ""
         if is_silence(text):
+            # The model genuinely had nothing to say. That is a real outcome for
+            # a discretionary check-in, so it consumes the occasion.
+            self.ledger.record_fired(occasion.kind, now)
+            self._consume_pending(occasion)
             logger.debug("Check-in ({}): nothing to say", occasion.kind)
             return ""
-        # The reword filter is for occasions that could repeat themselves. The
-        # ones keyed to a specific block or event cannot: each fires once, by
-        # id. Running it on them silenced every single block_end, because
-        # "How did the All Project Sync go?" necessarily shares its subject
-        # with "All Project Sync starts now." — the block name is the point.
+        # The reword filter is for the after-school brief. Planned starts and
+        # imminent events are already deduped by their concrete ids.
         if occasion.kind not in HIS_OWN_SCHEDULE and is_near_duplicate(
             text, self.ledger.said_today()
         ):
+            self.ledger.record_fired(occasion.kind, now)
+            self._consume_pending(occasion)
             logger.info("Check-in ({}) suppressed as a reword: {}", occasion.kind, text[:60])
             return ""
-        if text:
-            self.ledger.record_said(occasion.kind, text, now)
-            logger.info("Check-in spoke ({}): {}", occasion.kind, text[:80])
-        return text
+
+        # Only an acknowledged delivery counts. `notify` returns False when
+        # there is no reachable channel or the send failed outright; recording
+        # "said" regardless is how two days of check-ins were logged as spoken
+        # while nothing left the machine.
+        delivered, arrived = True, text
+        if self.on_deliver is not None:
+            key = self._delivery_key(occasion, now)
+            result = await self.on_deliver(text, key=key) if key else await self.on_deliver(text)
+            delivered = result is not False and getattr(result, "ok", True)
+            # What he actually received. When this key was already delivered —
+            # an earlier attempt whose acknowledgement arrived late — the text
+            # generated just now never went out, and recording it would show
+            # the model a message it never sent as its own history.
+            arrived = getattr(result, "content", "") or text
+        if not delivered:
+            logger.warning(
+                "Check-in ({}) was not delivered; leaving it available to retry", occasion.kind
+            )
+            return ""
+
+        self.ledger.record_fired(occasion.kind, now)
+        self._consume_pending(occasion)
+        self.ledger.record_said(occasion.kind, arrived, now)
+        logger.info("Check-in spoke ({}): {}", occasion.kind, arrived[:80])
+        return arrived
+
+    def _consume_pending(self, occasion: Occasion) -> None:
+        """Mark the concrete thing this occasion was about as dealt with.
+
+        Deferred until the outcome is known: announcing a 7 PM meeting before
+        generating the message meant a provider error permanently swallowed it,
+        and it was never mentioned at all.
+        """
+        if occasion.kind == "upcoming" and self._pending:
+            self.ledger.record_announced(self._pending["id"])
+        if occasion.kind == "block_start" and self._pending_block:
+            self.ledger.record_announced(self._block_key(self._pending_block))
+
+    @staticmethod
+    def _block_key(block: Any) -> str:
+        """Dedupe key for a planned block: stable identity plus its start time.
+
+        Positional ids ("b0", "b1") were used here, so inserting an earlier
+        block shifted every id: an already-announced key then suppressed a
+        different block, and the moved block was announced a second time.
+        """
+        reminder_key = getattr(block, "reminder_key", None)
+        if callable(reminder_key):
+            return reminder_key()
+        return "start:{}:{}".format(getattr(block, "id", ""), getattr(block, "start", ""))
+
+    def _delivery_key(self, occasion: Occasion, now: datetime) -> str | None:
+        """Idempotency key so a retry cannot deliver the same brief twice."""
+        day = clock.today_key()
+        if occasion.kind == "upcoming" and self._pending:
+            return f"checkin:{day}:upcoming:{self._pending['id']}"
+        if occasion.kind == "block_start" and self._pending_block:
+            return f"checkin:{day}:{self._block_key(self._pending_block)}"
+        return f"checkin:{day}:{occasion.kind}"

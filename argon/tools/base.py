@@ -4,6 +4,15 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 
+class ToolResult(str):
+    """Tool text with an explicit statement about whether a mutation applied."""
+
+    def __new__(cls, content: str, *, success: bool = True):
+        value = super().__new__(cls, content)
+        value.success = success
+        return value
+
+
 class Tool(ABC):
     """
     Abstract base class for agent tools.
@@ -57,6 +66,11 @@ class Tool(ABC):
     def read_only(self) -> bool:
         """Whether this tool is side-effect free and safe to parallelize."""
         return False
+
+    @property
+    def background_allowed(self) -> bool:
+        """Whether an autonomous turn may expose and execute this tool."""
+        return self.read_only
 
     @property
     def concurrency_safe(self) -> bool:

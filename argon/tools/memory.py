@@ -12,12 +12,22 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from argon.core.journal import Journal
+from argon.core.journal import Journal, has_relative_day_reference
 from argon.tools.base import Tool
 
 
 class RememberTool(Tool):
-    """Write something to today's journal, or straight to long-term memory."""
+    """Write a durable fact to long-term memory.
+
+    It used to default to a day note unless the model passed ``lasting=true``,
+    which made "remember this" a coin flip: the ones that landed as day notes
+    were handed to the nightly consolidation, and whatever it declined to carry
+    forward was gone by morning. Nothing else in the system asks him twice.
+
+    Day-scoped capture already has two owners that need no decision from the
+    model — automatic journalling of tool calls, and ``log_note`` — so the only
+    thing left for an *explicit* remember to mean is "this outlives today".
+    """
 
     def __init__(self, workspace: Path) -> None:
         self._journal = Journal(workspace)
@@ -29,16 +39,17 @@ class RememberTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Write down something Niranjan told you, so you still know it later. "
-            "Call this whenever he mentions a plan, a commitment, a deadline, a "
-            "preference, or anything about his life — 'today is my last day of "
-            "the internship', 'tomorrow is a rest day', 'I hate being asked "
-            "twice'. Saying you'll remember does nothing; this is what stores it. "
-            "Today's notes are reviewed at the end of the day and the ones that "
-            "still matter are kept. Set lasting=true for facts true for months. "
-            "Set standing=true for anything about how his weeks are shaped — "
-            "school hours, when he is free, recurring commitments; those are the "
-            "ones you will need most and they never expire."
+            "Store a durable fact — this always outlives today. Record operational "
+            "facts Niranjan explicitly states that will matter later: commitments, "
+            "constraints, preferences, and corrections. Do not store incidental "
+            "conversation, tentative ideas, hypotheses, or your own inference; "
+            "today's journal already preserves the conversation, and anything that "
+            "only matters this evening belongs in log_note instead. Saying you'll "
+            "remember does nothing; this is what stores it. A one-off needs an "
+            "absolute YYYY-MM-DD date in the sentence, and an until date for when "
+            "it stops mattering. Set standing=true only for a recurring shape of "
+            "his life such as school hours, when he is free, or a standing "
+            "commitment."
         )
 
     @property
@@ -57,20 +68,16 @@ class RememberTool(Tool):
                         "make sense months from now."
                     ),
                 },
-                "lasting": {
-                    "type": "boolean",
-                    "description": "True to store permanently instead of in today's notes.",
-                },
                 "until": {
                     "type": "string",
-                    "description": "YYYY-MM-DD after which it stops mattering. Only with lasting.",
+                    "description": "YYYY-MM-DD after which it stops mattering.",
                 },
                 "standing": {
                     "type": "boolean",
                     "description": (
                         "True for a recurring shape of his schedule or life — "
                         "'school days end at 3:40', 'free after 4pm', 'practice "
-                        "Tuesdays'. Never expires. Implies lasting."
+                        "Tuesdays'. Never expires."
                     ),
                 },
             },
@@ -82,16 +89,18 @@ class RememberTool(Tool):
         if not fact:
             return "Error: fact required."
         standing = bool(kwargs.get("standing"))
-        if standing or kwargs.get("lasting"):
-            stored = self._journal.add_fact(
-                fact,
-                until=None if standing else (kwargs.get("until") or None),
-                standing=standing,
-            )
-            kind = "Stored as a standing fact" if standing else "Stored long-term"
-            return f"{kind}: {stored.text}"
-        self._journal.note(fact, kind="said")
-        return "Noted for today."
+        # Relative wording is the one thing that cannot be stored durably: read
+        # back in a week, "tomorrow" is a different day. log_note is where it
+        # belongs, and the day page is already keeping the conversation.
+        if has_relative_day_reference(fact):
+            return "Error: durable memories must use an absolute YYYY-MM-DD date."
+        stored = self._journal.add_fact(
+            fact,
+            until=None if standing else (kwargs.get("until") or None),
+            standing=standing,
+        )
+        kind = "Stored as a standing fact" if standing else "Stored long-term"
+        return f"{kind}: {stored.text}"
 
 
 class RecallTool(Tool):

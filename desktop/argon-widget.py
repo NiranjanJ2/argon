@@ -294,7 +294,7 @@ def due_bucket(stamp):
 # View model — the single source of what the readout says
 # ---------------------------------------------------------------------------
 
-def build_view(d):
+def build_view(d, minutes_now=None):
     """Turn raw server state into everything both renderers display."""
     if d.get("error"):
         return {"ok": False, "error": d["error"], "updated": now().strftime("%-I:%M:%S %p")}
@@ -358,7 +358,7 @@ def build_view(d):
         },
         "groups": group_tasks(d.get("tasks") or []),
         "now": now_panel(d),
-        "plan": plan_panel(d),
+        "plan": plan_panel(d, minutes_now),
         "due": [
             {"title": a.get("title") or "?", "course": a.get("course") or "",
              "when": a.get("due_when") or "", "days": a.get("days_left"),
@@ -452,8 +452,13 @@ BLOCK_MARK = {
 }
 
 
-def plan_panel(d):
+def plan_panel(d, minutes_now=None):
     """Today's blocks, and which one he is in.
+
+    *minutes_now* exists so the selftest can pin the clock. It used to read the
+    real one, and the fixture hard-coded a 14:00–23:30 block with a comment
+    claiming that always contains "now" — so running the selftest in the morning
+    failed on code nobody had touched.
 
     The plan is what decides when Argon speaks, so a readout that does not show
     it is describing a different day from the one Argon is running.
@@ -463,12 +468,12 @@ def plan_panel(d):
     if not blocks:
         return {
             "state": "none",
-            "text": ("Not planned yet" if not plan.get("declined")
-                     else "No plan today — he said so"),
+            "text": "No explicit plan",
             "blocks": [],
         }
 
-    minutes_now = now().hour * 60 + now().minute
+    if minutes_now is None:
+        minutes_now = now().hour * 60 + now().minute
     out, current = [], None
     for block in blocks:
         start = hhmm_minutes(block.get("start"))
@@ -853,6 +858,11 @@ def action_params(*args):
 
 # ---------------------------------------------------------------------------
 
+#: The minute the selftest pretends it is. Pinned, so the plan assertions do
+#: not depend on the hour the suite happens to run at.
+SELFTEST_MINUTE = 15 * 60      # 3:00 PM
+
+
 def selftest():
     """Smallest thing that fails if the view logic breaks. No network."""
     from datetime import timedelta
@@ -899,7 +909,7 @@ def selftest():
              "running": True, "running_minutes": 12},
         ],
         "agenda": [{"id": "e1", "summary": "All Project Sync", "when": "in 12 min"}],
-        "plan": {"answered": True, "declined": False, "blocks": [
+        "plan": {"blocks": [
             {"id": "b0", "start": "09:00", "end": "10:00", "what": "Gym", "status": "done"},
             {"id": "b1", "start": "14:00", "end": "23:30", "what": "SAT prep", "status": "pending"},
             {"id": "b2", "start": "23:45", "end": None, "what": "Reading", "status": "pending"},
@@ -910,7 +920,7 @@ def selftest():
             {"title": "Chem lab", "course": "AP Chem",
              "due_when": "Wed 08/13", "days_left": 1},
         ],
-    })
+    }, minutes_now=SELFTEST_MINUTE)
 
     assert view["hero"]["eyebrow"] == "LOCKED IN" and view["hero"]["icon"] == "lock.fill"
     assert [m["value"] for m in view["metrics"]] == ["0m", "61m", "3"]
@@ -959,7 +969,7 @@ def selftest():
     assert plain["now"]["over"] is False
 
     # -- the plan ----------------------------------------------------------
-    # Blocks decide when Argon speaks, so the readout has to agree with it.
+    # Explicit blocks may produce start reminders, so the readout must agree.
     assert span_label("14:00", "16:00") == "2–4 PM"
     assert span_label("09:00", "12:30") == "9 AM – 12:30 PM"
     assert span_label("19:00", None) == "7 PM"
@@ -968,13 +978,15 @@ def selftest():
     blocks = view["plan"]["blocks"]
     assert [b["what"] for b in blocks] == ["Gym", "SAT prep", "Reading"]
     assert blocks[0]["label"] == "done" and blocks[0]["ahead"] is False
-    # The 14:00-23:30 block contains the selftest clock whenever it is run.
+    # 3 PM falls inside the 14:00–23:30 block. Pinned rather than read off the
+    # wall clock: this assertion used to fail before 2 PM on unchanged code.
     assert blocks[1]["live"] is True and blocks[1]["label"] == "now"
+    assert blocks[2]["ahead"] is True and blocks[2]["live"] is False
     assert view["plan"]["current"] == "SAT prep"
 
-    # A day with no plan says which kind of nothing it is.
+    # No explicit plan is a normal state, not an unanswered request.
     assert build_view({"tasks": []})["plan"]["state"] == "none"
-    assert build_view({"tasks": [], "plan": {"declined": True}})["plan"]["text"].startswith("No plan")
+    assert build_view({"tasks": []})["plan"]["text"] == "No explicit plan"
 
     # Coursework: nearest first, and tomorrow reads as urgent.
     due = view["due"]

@@ -212,11 +212,6 @@ def test_retain_never_drives_the_marker_negative():
     assert session.last_consolidated == 0
 
 
-@pytest.mark.xfail(
-    reason="argon/core/session.py:79 only ever extends the window backwards, so a run "
-           "with no user message in its tail is never trimmed at all — the unbounded "
-           "growth max_session_messages exists to stop",
-)
 def test_retain_bounds_an_autonomous_run_with_no_user_messages():
     session = Session(key="cron:daily")
     session.messages = [user("start")]

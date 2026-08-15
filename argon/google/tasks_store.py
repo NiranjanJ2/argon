@@ -15,6 +15,9 @@ Metadata keys (short to minimize notes token cost):
     e   — estimated minutes
     act — actual minutes (written on completion)
     cid — Google Classroom assignment ID (dedup key)
+    ck  — composite Classroom course:coursework identity
+    od  — exact Classroom official due timestamp, when known
+    wb  — exact personal work-by timestamp retained outside Google Tasks' date-only field
     sat — legacy start stamp; session state now lives in DailyState, and any
           surviving `sat` is stripped on completion
 """
@@ -22,7 +25,8 @@ Metadata keys (short to minimize notes token cost):
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+import re
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +43,29 @@ _PRIORITY_ENCODE = {"high": "h", "medium": "m", "low": "l"}
 _PRIORITY_DECODE = {"h": "high", "m": "medium", "l": "low"}
 _SOURCE_ENCODE = {"classroom": "cl", "manual": "ma", "ucla": "uc", "club": "cb"}
 _SOURCE_DECODE = {"cl": "classroom", "ma": "manual", "uc": "ucla", "cb": "club"}
+
+
+def _normalized_task_title(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(re.findall(r"[a-z0-9]+", value.lower()))
+
+
+class TaskResolutionAmbiguityError(ValueError):
+    """A title query names multiple pending tasks and cannot safely mutate one."""
+
+    def __init__(self, query: str, candidates: list[dict[str, Any]]) -> None:
+        self.query = query
+        self.candidates = candidates
+        shown = ", ".join(
+            f"{str(task.get('title') or '(untitled)')[:50]} ({task.get('id', '?')})"
+            for task in candidates[:4]
+        )
+        if len(candidates) > 4:
+            shown += f", +{len(candidates) - 4} more"
+        super().__init__(
+            f"Ambiguous task '{query}': {shown}. Use an exact task ID."
+        )
 
 
 def _now() -> datetime:
@@ -99,17 +126,33 @@ def _age_days(value: Any) -> int | None:
 
 
 def _overdue_days(due: Any) -> int | None:
-    """Whole days past a due date, or None if it is not past."""
-    stamp = _parse_stamp(due)
-    if stamp is None:
+    """Whole local days past a Google Tasks due *date*.
+
+    Google Tasks represents a due date as midnight UTC but explicitly stores no
+    time-of-day. Converting that sentinel to local time moves it to the prior
+    evening in America/Los_Angeles, so compare the calendar date instead.
+    """
+    work_by = _work_by_date(due)
+    if work_by is None:
         return None
-    days = (_now().date() - stamp.date()).days
+    days = (_now().date() - work_by).days
     return days if days > 0 else None
+
+
+def _work_by_date(due: Any) -> date | None:
+    """Extract a Google Tasks date-only due value without timezone conversion."""
+    if not isinstance(due, str):
+        return None
+    try:
+        return date.fromisoformat(due[:10])
+    except ValueError:
+        return None
 
 
 def _to_task(gt: dict[str, Any]) -> dict[str, Any]:
     """Convert a Google Tasks API item to an Argon task dict."""
     meta, notes = _decode_meta(gt.get("notes"))
+    work_by = _work_by_date(gt.get("due"))
     return {
         "id": gt["id"],
         "title": gt.get("title", ""),
@@ -120,8 +163,10 @@ def _to_task(gt: dict[str, Any]) -> dict[str, Any]:
         "subject": meta.get("sub"),
         "notes": notes or None,
         "due": gt.get("due"),
+        "work_by": work_by.isoformat() if work_by else None,
+        "work_by_at": meta.get("wb"),
         # Weekday spelled out; the model invents them otherwise.
-        "due_when": _when(gt.get("due")),
+        "due_when": _when(work_by),
         # How long this has been sitting there, stated rather than left to be
         # worked out from a timestamp. "UCLA work" and "Math homework" both
         # carried a due date six days past while Argon went on listing them as
@@ -131,6 +176,8 @@ def _to_task(gt: dict[str, Any]) -> dict[str, Any]:
         "days_open": _age_days(gt.get("updated") or gt.get("id")),
         "days_overdue": _overdue_days(gt.get("due")),
         "classroom_id": meta.get("cid"),
+        "classroom_key": meta.get("ck"),
+        "official_due": meta.get("od"),
         "time_estimate_min": meta.get("e"),
         "time_actual_min": meta.get("act"),
         "started_at": meta.get("sat"),
@@ -198,7 +245,7 @@ class GoogleTasksStore:
         return self._tl_id
 
     def _resolve(self, svc, task_id: str) -> dict[str, Any] | None:
-        """Find a task by exact Google Tasks ID or by title substring match."""
+        """Resolve exact ID, then one exact title, then one substring safely."""
         from googleapiclient.errors import HttpError
 
         tl = self._tl()
@@ -206,13 +253,35 @@ class GoogleTasksStore:
             return svc.tasks().get(tasklist=tl, task=task_id).execute()
         except HttpError:
             pass  # not an ID — fall through to a title search
-        items = svc.tasks().list(
-            tasklist=tl, showCompleted=False, maxResults=100
-        ).execute().get("items", [])
-        needle = task_id.lower()
-        for t in items:
-            if needle in t.get("title", "").lower():
-                return t
+        items: list[dict[str, Any]] = []
+        page_token: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {
+                "tasklist": tl,
+                "showCompleted": False,
+                "maxResults": 100,
+            }
+            if page_token:
+                kwargs["pageToken"] = page_token
+            page = svc.tasks().list(**kwargs).execute()
+            items.extend(page.get("items", []))
+            page_token = page.get("nextPageToken")
+            if not page_token:
+                break
+
+        needle = _normalized_task_title(task_id)
+        if not needle:
+            return None
+        exact = [t for t in items if _normalized_task_title(t.get("title")) == needle]
+        if len(exact) == 1:
+            return exact[0]
+        if len(exact) > 1:
+            raise TaskResolutionAmbiguityError(task_id, exact)
+        partial = [t for t in items if needle in _normalized_task_title(t.get("title"))]
+        if len(partial) == 1:
+            return partial[0]
+        if len(partial) > 1:
+            raise TaskResolutionAmbiguityError(task_id, partial)
         return None
 
     # ------------------------------------------------------------------
@@ -221,10 +290,22 @@ class GoogleTasksStore:
 
     def get_all(self, *, include_done: bool = False) -> list[dict[str, Any]]:
         """Return tasks sorted by priority then due date (pending only by default)."""
-        items = self._svc().tasks().list(
-            tasklist=self._tl(), showCompleted=include_done,
-            showHidden=include_done, maxResults=100,
-        ).execute().get("items", [])
+        items: list[dict[str, Any]] = []
+        page_token: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {
+                "tasklist": self._tl(),
+                "showCompleted": include_done,
+                "showHidden": include_done,
+                "maxResults": 100,
+            }
+            if page_token:
+                kwargs["pageToken"] = page_token
+            page = self._svc().tasks().list(**kwargs).execute()
+            items.extend(page.get("items", []))
+            page_token = page.get("nextPageToken")
+            if not page_token:
+                break
         tasks = [_to_task(t) for t in items]
         _p = {"high": 0, "medium": 1, "low": 2}
         tasks.sort(key=lambda t: (_p.get(t["priority"], 1), t["due"] or "9999"))
@@ -248,6 +329,8 @@ class GoogleTasksStore:
         notes: str | None = None,
         carry_over: bool = False,
         classroom_id: str | None = None,
+        classroom_key: str | None = None,
+        official_due: str | None = None,
     ) -> dict[str, Any]:
         meta: dict[str, Any] = {}
         if priority != "medium":
@@ -258,6 +341,10 @@ class GoogleTasksStore:
             meta["sub"] = subject
         if classroom_id:
             meta["cid"] = classroom_id
+        if classroom_key:
+            meta["ck"] = classroom_key
+        if official_due:
+            meta["od"] = official_due
 
         body: dict[str, Any] = {"title": title}
         encoded = _encode_meta(meta, notes)
@@ -265,7 +352,11 @@ class GoogleTasksStore:
             body["notes"] = encoded
         if due:
             try:
-                body["due"] = _due_stamp(datetime.fromisoformat(due))
+                due_dt = datetime.fromisoformat(due)
+                body["due"] = _due_stamp(due_dt)
+                if source == "manual" and "T" in due:
+                    meta["wb"] = due_dt.isoformat()
+                    body["notes"] = _encode_meta(meta, notes)
             except ValueError:
                 logger.warning(f"add_task: unparseable due date {due!r}, task created without one")
 
@@ -344,7 +435,7 @@ class GoogleTasksStore:
 
     def carry_over_task(self, task_id: str) -> bool:
         """Push due date to tomorrow."""
-        return self.update_due(task_id, (_now() + timedelta(days=1)).isoformat())
+        return self.update_due(task_id, (_now().date() + timedelta(days=1)).isoformat())
 
     def update_due(self, task_id: str, due_iso: str) -> bool:
         """Set an arbitrary due date (ISO 8601 string)."""
@@ -357,34 +448,48 @@ class GoogleTasksStore:
         target = self._resolve(svc, task_id)
         if not target:
             return False
+        meta, notes = _decode_meta(target.get("notes"))
+        if "T" in due_iso:
+            meta["wb"] = due_dt.isoformat()
+        else:
+            meta.pop("wb", None)
         svc.tasks().patch(
-            tasklist=self._tl(), task=target["id"], body={"due": _due_stamp(due_dt)},
+            tasklist=self._tl(), task=target["id"],
+            body={"due": _due_stamp(due_dt), "notes": _encode_meta(meta, notes)},
         ).execute()
         return True
 
     def bulk_add_from_classroom(self, assignments: list[dict[str, Any]]) -> int:
         """Add Classroom assignments as tasks, skipping duplicates by classroom_id."""
         # Completed tasks count as duplicates too, or finished work reappears.
-        existing_cids = {
-            t["classroom_id"]
-            for t in self.get_all(include_done=True)
-            if t.get("classroom_id")
+        existing = self.get_all(include_done=True)
+        existing_keys = {t["classroom_key"] for t in existing if t.get("classroom_key")}
+        legacy_identities = {
+            (t.get("classroom_id"), t.get("subject"))
+            for t in existing
+            if not t.get("classroom_key") and t.get("classroom_id") and t.get("subject")
         }
         added = 0
         for a in assignments:
             cid = a.get("id")
-            if cid and cid in existing_cids:
+            course_id = a.get("course_id") or a.get("courseId")
+            if not cid or not course_id:
+                continue
+            key = f"{course_id}:{cid}"
+            if key in existing_keys or (cid, a.get("course_name")) in legacy_identities:
                 continue
             due = classroom_due(a)
+            has_official_time = a.get("dueTime") is not None
             self.add_task(
                 title=a.get("title", "Untitled"),
                 source="classroom",
-                due=due.isoformat() if due else None,
+                due=(due.isoformat() if has_official_time else due.date().isoformat()) if due else None,
                 subject=a.get("course_name"),
                 classroom_id=cid,
+                classroom_key=key,
+                official_due=due.isoformat() if due and has_official_time else None,
                 priority=_infer_priority(a),
             )
-            if cid:
-                existing_cids.add(cid)
+            existing_keys.add(key)
             added += 1
         return added

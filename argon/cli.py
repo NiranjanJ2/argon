@@ -389,6 +389,27 @@ def doctor(
     ]
     console.print(f"{ok if enabled else warn} channels  {', '.join(enabled) or 'none enabled'}")
 
+    # The operational store and anything Argon promised but never delivered.
+    # Without this, a failed reminder was a row in a table nobody read.
+    from argon.core import store as _store
+
+    health = _store.health()
+    if not health["ok"]:
+        console.print(f"{bad} store     {health.get('error') or health.get('integrity')}")
+    else:
+        console.print(f"{ok} store     {health['path']} ({health['docs']} documents)")
+        unsent = health["outbox_unsent"]
+        pending = health["outbox_pending"]
+        if unsent:
+            console.print(
+                f"{bad} delivery  {unsent} message(s) Argon could not deliver "
+                f"— run `argon outbox` to see them"
+            )
+        elif pending:
+            console.print(f"{warn} delivery  {pending} still owed")
+        else:
+            console.print(f"{ok} delivery  nothing outstanding")
+
     if cfg.google.enabled:
         auth = GoogleAuth(cfg.workspace_path)
         for account in ACCOUNT_SCOPES:
@@ -422,6 +443,49 @@ def doctor(
         mark = warn if mb > 5 else ok
         console.print(f"{mark} sessions  {len(sessions)} files, largest {big.name} {mb:.1f}MB")
     console.print()
+
+
+# ---------------------------------------------------------------------------
+# outbox
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def outbox(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Show what Argon promised to deliver and could not.
+
+    A reminder that failed used to leave no trace a person could find. It is
+    recorded either way now, and this is where it can be read.
+    """
+    from datetime import datetime
+
+    from argon import clock
+    from argon.core import store as _store
+
+    _load(config)
+    health = _store.health()
+    if not health["ok"]:
+        console.print(f"[red]The operational store is unreadable:[/red] {health.get('error')}")
+        raise typer.Exit(1)
+
+    rows = _store.connect().execute(
+        "SELECT * FROM outbox ORDER BY due_at DESC LIMIT 40"
+    ).fetchall()
+    if not rows:
+        console.print("Nothing has been queued for delivery yet.")
+        return
+
+    marks = {"sent": "[green]sent[/green]", "pending": "[yellow]owed[/yellow]",
+             "failed": "[red]failed[/red]", "missed": "[red]missed[/red]"}
+    for row in rows:
+        when = datetime.fromtimestamp(row["due_at"], clock.tz())
+        console.print(
+            f"{marks.get(row['state'], row['state'])}  {when:%a %d %b %-I:%M %p}  "
+            f"{row['channel']}  {row['content'][:60]!r}"
+            + (f"  [red]{row['last_error']}[/red]" if row["last_error"] else "")
+        )
 
 
 # ---------------------------------------------------------------------------

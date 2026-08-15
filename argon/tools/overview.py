@@ -1,4 +1,4 @@
-"""Daily overview tool — fetches calendar, tasks, and assignments in one call."""
+"""Daily overview tool — the reconciled commitment board plus today's calendar."""
 
 from __future__ import annotations
 
@@ -10,12 +10,13 @@ from typing import Any, Callable
 
 from loguru import logger
 
+from argon.commitments import Board, load_board
 from argon.google.service import LOCAL_TZ
 from argon.tools.base import Tool
 
 
 class GetDailyOverviewTool(Tool):
-    """Fetch today's calendar events, pending tasks, and upcoming assignments."""
+    """Fetch today's calendar events and the one reconciled commitment board."""
 
     def __init__(self, workspace: Path) -> None:
         self._workspace = workspace
@@ -28,12 +29,14 @@ class GetDailyOverviewTool(Tool):
     def description(self) -> str:
         return (
             "Get today's full picture in one call: "
-            "calendar events for today, all pending tasks (sorted by priority), "
-            "and classroom assignments due in the next 7 days. "
-            "Use this at the start of a session or when Niranjan asks what's going on. "
+            "calendar events for today, and the single reconciled commitment "
+            "board — Google Tasks and Classroom assignments due in the next 7 "
+            "days joined into one list, with anything turned in or ignored "
+            "already removed. "
             "The `board` field is the answer to \"what's due\" already written out — "
             "relay every line of `board.text` rather than summarising it, and check "
-            "your reply against `board.counts`."
+            "your reply against `board.counts`. If `complete` is false, say which "
+            "source is missing; a short board may be an outage, not a free evening."
         )
 
     @property
@@ -52,50 +55,78 @@ class GetDailyOverviewTool(Tool):
         from argon.google.auth import GoogleAuth
 
         auth = GoogleAuth(self._workspace)
-        payload = {
-            "calendar_today": self._section(auth, "work", self._calendar_today),
-            "tasks": self._section(auth, "work", self._tasks),
-            "assignments_next_7d": self._section(auth, "school", self._assignments),
-        }
+        events = self._section(auth, "work", self._calendar_today)
+        board = load_board(self._workspace, days_ahead=7)
         # Asked "what's due", the model read all twelve assignments and wrote
         # three of them into prose as though that were the board — including
         # dropping a whole course. Nothing was truncated; it simply lost items
         # while transcribing JSON into a sentence. So the list it should relay
         # is built here, exactly once, and the counts make a short answer
         # visibly wrong instead of quietly wrong.
-        payload["board"] = self._board(payload)
-        return json.dumps(payload, indent=2)
+        return json.dumps(
+            {
+                "calendar_today": events,
+                "commitments": board.as_dicts(),
+                "sources": board.health_as_dicts(),
+                "complete": board.complete,
+                "board": self._board(board, events),
+            },
+            indent=2,
+        )
 
     @staticmethod
-    def _board(payload: dict[str, Any]) -> dict[str, Any]:
+    def _board(board: Board, events: Any) -> dict[str, Any]:
         """The list to read back verbatim, plus what it should add up to."""
-        assignments = payload.get("assignments_next_7d")
-        tasks = payload.get("tasks")
-        events = payload.get("calendar_today")
+        lines = list(board.health_lines())
+        if isinstance(events, dict) and events.get("error"):
+            lines.append("Unavailable: Calendar — {}".format(events["error"]))
 
-        lines: list[str] = []
-        if isinstance(assignments, list) and assignments:
+        assignments = [c for c in board.commitments if c.origin == "classroom"]
+        tasks = [c for c in board.commitments if c.origin != "classroom"]
+
+        if assignments:
             lines.append("Due from Classroom:")
-            for a in assignments:
-                course = f" ({a['course']})" if a.get("course") else ""
-                lines.append(f"  - {a.get('title', '?')}{course} — {a.get('due_when') or a.get('due')}")
-        if isinstance(tasks, list) and tasks:
+            for c in assignments:
+                course = f" ({c.subject})" if c.subject else ""
+                # His own earlier date and the school's deadline are different
+                # facts; showing only one of them is how a board stops matching
+                # what he actually planned.
+                work_by = (
+                    f" (personal work-by {c.work_by_when or c.work_by})"
+                    if c.work_by else ""
+                )
+                warning = (
+                    f" (submission status unavailable: {c.submission_error})"
+                    if c.submission_error else ""
+                )
+                lines.append(
+                    f"  - {c.title}{course} — "
+                    f"{c.official_due_when or c.official_due}{work_by}{warning}"
+                )
+        if tasks:
             lines.append("Tasks:")
-            for t in tasks:
-                when = f" — {t['due_when']}" if t.get("due_when") else ""
-                lines.append(f"  - {t.get('title', '?')}{when}")
+            for c in tasks:
+                when = f" — {c.due_when}" if c.due_when else ""
+                lines.append(f"  - {c.title}{when}")
         if isinstance(events, list) and events:
             lines.append("On the calendar today:")
             for e in events:
                 lines.append(f"  - {e.get('summary', '?')} — {e.get('when') or ''}")
 
+        errors = len(board.health_lines()) + (
+            1 if isinstance(events, dict) and events.get("error") else 0
+        )
         counts = {
-            "assignments": len(assignments) if isinstance(assignments, list) else 0,
-            "tasks": len(tasks) if isinstance(tasks, list) else 0,
+            "assignments": len(assignments),
+            "tasks": len(tasks),
             "events": len(events) if isinstance(events, list) else 0,
+            "errors": errors,
         }
         return {
             "counts": counts,
+            "complete": board.complete and not (
+                isinstance(events, dict) and events.get("error")
+            ),
             "text": "\n".join(lines) or "Nothing due and nothing scheduled.",
             "how_to_use": (
                 "When he asks what is due or what the board looks like, relay "
@@ -150,25 +181,4 @@ class GetDailyOverviewTool(Tool):
                 "location": e.get("location"),
             }
             for e in items
-        ]
-
-    def _tasks(self) -> list[dict]:
-        from argon.google.tasks_store import GoogleTasksStore
-
-        return GoogleTasksStore(self._workspace).get_all()
-
-    def _assignments(self) -> list[dict]:
-        from argon.google.classroom import upcoming_assignments
-        from argon.google.service import build_google_service
-
-        svc = build_google_service(self._workspace, "classroom", "v1", "school")
-        assignments, unreadable = upcoming_assignments(svc, days_ahead=7)
-        if unreadable:
-            logger.warning(f"get_daily_overview: unreadable courses {unreadable}")
-        from argon.utils.helpers import when_label
-
-        return [
-            {"title": a["title"], "course": a.get("course_name"), "due": a["due"],
-             "due_when": when_label(a["due"])}
-            for a in assignments
         ]

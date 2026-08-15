@@ -25,11 +25,42 @@ class _Probe(Tool):
         return "probe"
 
     @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
     def parameters(self) -> dict:
         return {"type": "object", "properties": {}, "required": []}
 
     async def execute(self, **kwargs) -> str:
         return "ran"
+
+
+class _Mutation(Tool):
+    @property
+    def name(self) -> str:
+        return "mutate"
+
+    @property
+    def description(self) -> str:
+        return "changes state"
+
+    @property
+    def parameters(self) -> dict:
+        return {"type": "object", "properties": {}, "required": []}
+
+    async def execute(self, **kwargs) -> str:
+        return "changed"
+
+
+class _Delivery(_Mutation):
+    @property
+    def name(self) -> str:
+        return "message"
+
+    @property
+    def background_allowed(self) -> bool:
+        return True
 
 
 def _registry() -> ToolRegistry:
@@ -72,3 +103,25 @@ def test_the_provider_cleans_the_name_before_anyone_sees_it():
     assert _clean_tool_name("list_tasks<|channel|>commentary") == "list_tasks"
     assert _clean_tool_name("get_status") == "get_status"
     assert _clean_tool_name(None) == ""
+
+
+def test_background_turns_cannot_access_the_real_delivery_tool():
+    from argon.tools.message import MessageTool
+
+    registry = ToolRegistry()
+    registry.register(_Probe())
+    registry.register(_Mutation())
+    registry.register(MessageTool())
+
+    names = [schema["function"]["name"] for schema in registry.get_definitions(background=True)]
+
+    assert names == ["list_tasks"]
+
+
+async def test_background_turn_cannot_execute_a_hidden_mutation_directly():
+    registry = ToolRegistry()
+    registry.register(_Mutation())
+
+    result = await registry.execute("mutate", {}, background=True)
+
+    assert result.startswith("Error: Tool 'mutate' is unavailable to background automation")

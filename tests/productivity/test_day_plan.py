@@ -67,10 +67,22 @@ class TestSettingThePlan:
         plan.set_blocks([{"start": "3pm", "what": "Gym"}])
         assert [b.what for b in plan.blocks()] == ["Gym"]
 
-    def test_a_new_plan_clears_a_refusal(self, plan):
-        plan.decline()
+    def test_saving_strips_legacy_planner_loop_state(self, plan, tmp_path):
+        from argon.core import store
+        from argon.productivity.plan import PLAN_DOC
+
+        store.put_doc(PLAN_DOC, {
+            "date": "2026-07-30",
+            "blocks": [],
+            "asked_count": 9,
+            "declined": True,
+            "seeded": True,
+            "stated": False,
+        })
+
         plan.set_blocks([{"start": "2pm", "what": "SAT prep"}])
-        assert plan.declined() is False
+
+        assert set(store.get_doc(PLAN_DOC)) == {"date", "blocks"}
 
 
 class TestTheDayBoundary:
@@ -79,9 +91,26 @@ class TestTheDayBoundary:
         monkeypatch.setattr(plan_mod.clock, "today_key", lambda *a, **k: "2026-07-31")
         assert plan.blocks() == [] and plan.exists() is False
 
-    def test_a_corrupt_file_reads_as_no_plan(self, plan, tmp_path):
-        (tmp_path / "daily" / "plan.json").write_text("{not json")
-        assert plan.exists() is False
+    def test_a_corrupt_plan_surfaces_instead_of_reading_as_no_plan(self, plan, tmp_path):
+        """"No plan today" and "I cannot read your plan" are different sentences.
+
+        The old code caught `JSONDecodeError` and returned an empty plan, so a
+        torn write meant Argon calmly reported that he had nothing scheduled.
+        """
+        import pytest
+
+        from argon.core import store
+        from argon.productivity.plan import PLAN_DOC
+
+        with store.txn() as conn:
+            conn.execute(
+                "INSERT INTO docs (key, value, version, updated_at) VALUES (?, ?, 1, 0) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (PLAN_DOC, "{not json"),
+            )
+
+        with pytest.raises(store.StoreCorrupt):
+            plan.exists()
 
 
 class TestTheMomentsItSpeaks:
@@ -94,47 +123,10 @@ class TestTheMomentsItSpeaks:
         plan.set_blocks([{"start": "2pm", "end": "4pm", "what": "SAT prep"}])
         assert plan.starting_now(_at(14, BLOCK_GRACE_MINUTES + 5)) is None
 
-    def test_a_block_that_just_ended(self, plan):
-        plan.set_blocks([{"start": "2pm", "end": "4pm", "what": "SAT prep"}])
-        assert plan.just_ended(_at(16, 5)).what == "SAT prep"
-
-    def test_an_open_ended_block_never_ends(self, plan):
-        plan.set_blocks([{"start": "2pm", "what": "Reading"}])
-        assert plan.just_ended(_at(16, 5)) is None
-
     def test_a_finished_block_is_left_alone(self, plan):
-        plan.set_blocks([{"start": "2pm", "end": "4pm", "what": "SAT prep"}])
-        plan.mark("b0", "done")
+        stored = plan.set_blocks([{"start": "2pm", "end": "4pm", "what": "SAT prep"}])
+        plan.mark(stored[0].id, "done")
         assert plan.starting_now(_at(14, 2)) is None
-        assert plan.just_ended(_at(16, 5)) is None
-
-
-class TestFreeTime:
-    def test_a_long_unclaimed_stretch_is_offered(self, plan):
-        plan.set_blocks([{"start": "5pm", "end": "6pm", "what": "Gym"}])
-        gap = plan.open_stretch(_at(13))
-        assert gap is not None and gap.minutes == 240
-
-    def test_a_short_one_is_not_worth_asking_about(self, plan):
-        plan.set_blocks([{"start": "2pm", "end": "4pm", "what": "SAT prep"}])
-        assert plan.open_stretch(_at(13, 30)) is None
-
-    def test_inside_a_block_is_not_free_time(self, plan):
-        plan.set_blocks([{"start": "2pm", "end": "6pm", "what": "SAT prep"}])
-        assert plan.open_stretch(_at(15)) is None
-
-    def test_an_open_ended_block_claims_the_rest_of_the_day(self, plan):
-        plan.set_blocks([{"start": "2pm", "what": "Reading"}])
-        assert plan.open_stretch(_at(15)) is None
-
-    def test_after_the_last_block_the_evening_is_still_his(self, plan):
-        plan.set_blocks([{"start": "9am", "end": "10am", "what": "Gym"}])
-        gap = plan.open_stretch(_at(13))
-        assert gap is not None and gap.end.hour == 21
-
-    def test_late_at_night_there_is_nothing_left_to_offer(self, plan):
-        plan.set_blocks([{"start": "9am", "end": "10am", "what": "Gym"}])
-        assert plan.open_stretch(_at(22)) is None
 
 
 class TestScheduledWorkIsNotOutstanding:
@@ -151,8 +143,8 @@ class TestScheduledWorkIsNotOutstanding:
     def test_a_finished_block_stops_shielding_the_task(self, plan):
         from argon.tools.tasks import mark_scheduled, unscheduled
 
-        plan.set_blocks([{"start": "2pm", "what": "SAT prep"}])
-        plan.mark("b0", "done")
+        stored = plan.set_blocks([{"start": "2pm", "what": "SAT prep"}])
+        plan.mark(stored[0].id, "done")
         tasks = mark_scheduled([{"id": "a", "title": "SAT prep"}], plan.as_entries())
         assert len(unscheduled(tasks)) == 1
 
@@ -169,47 +161,135 @@ class TestTheSummaryHeReadsBack:
         assert lines[1] == "- 2:00 PM-4:00 PM SAT prep (now)"
 
     def test_no_plan_says_so_plainly(self, plan):
-        assert plan.summary(_at(12)) == "- no plan yet today"
+        assert plan.summary(_at(12)) == "- no explicit plan"
 
 
-class TestAdoptingWhatHeAlreadySaid:
-    """A day with commitments is not shapeless.
+class TestIdentitySurvivesAnEdit:
+    """Ids used to be positions, handed out fresh on every write, after sorting.
 
-    He had a 3 PM reminder and a 7 PM reminder and had said so in chat twice —
-    "we scheduled those already", "I told you I'll start the math homework at
-    3". Asking him to describe that day would have been exactly the message
-    this whole design exists to stop.
+    Two failures followed and both happened. Every edit had to resend the whole
+    plan, so one block the model forgot to repeat vanished from his day with
+    nothing saying so. And inserting an earlier block renumbered everything
+    after it — a reminder already announced for `b1` then suppressed a
+    *different* block, while the block that had been announced came back as `b2`
+    and was announced a second time.
     """
 
-    def test_commitments_become_the_plan(self, plan):
-        plan.seed_from([
-            {"summary": "Start Math homework", "start": _at(15)},
-            {"summary": "Start UCLA work", "start": _at(19)},
+    def test_inserting_an_earlier_block_does_not_disturb_an_announced_one(self, plan):
+        [sat] = plan.set_blocks([{"start": "5pm", "what": "SAT prep"}])
+        announced = sat.reminder_key()
+
+        gym = plan.add_block("3pm", "Gym")
+
+        after = {b.what: b for b in plan.blocks()}
+        assert after["SAT prep"].id == sat.id, "identity survives the insert"
+        assert after["SAT prep"].reminder_key() == announced, "so its reminder stays quiet"
+        assert gym.reminder_key() != announced, "and the new block is its own thing"
+        assert [b.what for b in plan.blocks()] == ["Gym", "SAT prep"]
+
+    def test_a_delta_edit_does_not_require_resending_the_rest_of_the_day(self, plan):
+        stored = plan.set_blocks([
+            {"start": "9am", "what": "Gym"},
+            {"start": "5pm", "what": "SAT prep"},
         ])
-        assert [b.what for b in plan.blocks()] == ["Start Math homework", "Start UCLA work"]
-        assert plan.exists() is True
-        assert plan.seeded() is True
+        plan.mark(stored[0].id, "done")
 
-    def test_an_end_time_is_kept_when_there_is_one(self, plan):
-        plan.seed_from([{"summary": "Standup", "start": _at(9), "end": _at(9, 30)}])
-        assert plan.blocks()[0].end == "09:30"
+        plan.update_block(stored[1].id, start="6pm")
 
-    def test_it_never_overwrites_a_plan_he_stated(self, plan):
-        plan.set_blocks([{"start": "2pm", "what": "SAT prep"}])
-        plan.seed_from([{"summary": "Something else", "start": _at(19)}])
+        blocks = plan.blocks()
+        assert [b.what for b in blocks] == ["Gym", "SAT prep"], "nothing was dropped"
+        assert blocks[0].status == "done", "and nothing was reset"
+        assert blocks[1].start == "18:00"
+
+    def test_moving_a_block_keeps_its_id_and_status_but_re_arms_its_reminder(self, plan):
+        [sat] = plan.set_blocks([{"start": "2pm", "what": "SAT prep"}])
+        before = sat.reminder_key()
+
+        moved = plan.update_block(sat.id, start="5pm")
+
+        assert moved.id == sat.id
+        assert moved.reminder_key() != before, "he moved it; the new start is worth marking"
+
+    def test_a_move_preserves_a_status_he_already_set(self, plan):
+        [block] = plan.set_blocks([{"start": "2pm", "what": "SAT prep"}])
+        plan.mark(block.id, "skipped")
+
+        moved = plan.update_block(block.id, start="7pm")
+
+        assert moved.status == "skipped"
+
+    def test_removing_one_block_leaves_the_others_untouched(self, plan):
+        stored = plan.set_blocks([
+            {"start": "9am", "what": "Gym"},
+            {"start": "5pm", "what": "SAT prep"},
+        ])
+
+        gone = plan.remove_block(stored[0].id)
+
+        assert gone.what == "Gym"
+        assert [(b.id, b.what) for b in plan.blocks()] == [(stored[1].id, "SAT prep")]
+
+    def test_an_unknown_id_changes_nothing(self, plan):
+        plan.set_blocks([{"start": "5pm", "what": "SAT prep"}])
+
+        assert plan.update_block("nosuchid", start="6pm") is None
+        assert plan.remove_block("nosuchid") is None
+        assert plan.mark("nosuchid", "done") is False
         assert [b.what for b in plan.blocks()] == ["SAT prep"]
 
-    def test_it_respects_a_refusal_to_plan(self, plan):
-        plan.decline()
-        plan.seed_from([{"summary": "Start Math homework", "start": _at(15)}])
-        assert plan.exists() is False
+    def test_two_blocks_at_the_same_minute_keep_separate_reminder_keys(self, plan):
+        stored = plan.set_blocks([
+            {"start": "5pm", "what": "SAT prep"},
+            {"start": "5pm", "what": "Call Ravi"},
+        ])
 
-    def test_stating_a_plan_replaces_a_seeded_one(self, plan):
-        plan.seed_from([{"summary": "Start Math homework", "start": _at(15)}])
-        plan.set_blocks([{"start": "2pm", "what": "SAT prep"}])
-        assert [b.what for b in plan.blocks()] == ["SAT prep"]
-        assert plan.seeded() is False
+        assert stored[0].reminder_key() != stored[1].reminder_key()
 
-    def test_nothing_to_adopt_leaves_the_day_open(self, plan):
-        assert plan.seed_from([]) == []
-        assert plan.exists() is False
+
+class TestLegacyPlansStillLoad:
+    def test_positional_ids_are_upgraded_without_losing_status(self, plan):
+        from argon.core import store
+        from argon.productivity.plan import PLAN_DOC
+
+        store.put_doc(PLAN_DOC, {
+            "date": "2026-07-30",
+            "blocks": [
+                {"id": "b0", "start": "09:00", "end": None, "what": "Gym",
+                 "status": "done"},
+                {"id": "b1", "start": "17:00", "end": None, "what": "SAT prep",
+                 "status": "pending"},
+            ],
+        })
+
+        blocks = plan.blocks()
+
+        assert [b.what for b in blocks] == ["Gym", "SAT prep"]
+        assert [b.status for b in blocks] == ["done", "pending"]
+        assert not any(b.id.startswith("b") and b.id[1:].isdigit() for b in blocks)
+
+    def test_the_upgrade_is_stable_so_reminders_do_not_all_re_fire(self, plan):
+        from argon.core import store
+        from argon.productivity.plan import PLAN_DOC
+
+        document = {
+            "date": "2026-07-30",
+            "blocks": [{"id": "b0", "start": "17:00", "end": None,
+                        "what": "SAT prep", "status": "pending"}],
+        }
+        store.put_doc(PLAN_DOC, document)
+        first = plan.blocks()[0].reminder_key()
+
+        store.put_doc(PLAN_DOC, document)
+        assert plan.blocks()[0].reminder_key() == first
+
+    def test_a_fresh_id_is_never_mistaken_for_a_positional_one(self):
+        """One uuid4 prefix in ~270 is "b" followed by seven digits.
+
+        `_POSITIONAL_ID` matched those, so the next read "upgraded" a perfectly
+        good id into a different one: identity changed underneath a block
+        nobody had touched, and its reminder fired again under the new key.
+        Caught as a ~20% flake in this file before it could be one in his day.
+        """
+        from argon.productivity.plan import _POSITIONAL_ID, _fresh_id
+
+        assert not any(_POSITIONAL_ID.match(_fresh_id()) for _ in range(20_000))

@@ -189,19 +189,37 @@ def _cached_tasks(store: Any, *, fresh: bool = False) -> tuple[list[Any], dict[s
 
 
 def _task_dashboard(store: Any, state: Any, *, fresh: bool = False) -> dict[str, Any]:
-    """Shape the shared task store for the native iOS dashboard.
+    """Shape the reconciled commitment board for the native iOS dashboard.
+
+    This used to serve raw Google Tasks, which is how an assignment he had
+    turned in stayed on his phone all evening while the board Argon read from
+    had already dropped it. The widget now sees exactly what every other
+    consumer sees — including which sources answered, so a short list caused by
+    a Classroom outage cannot read as a clear evening.
 
     ``state`` is read live even on a cache hit: it is local, and the work-session
     minute counter is one of the things the readouts are for.
     """
+    from argon.commitments import SourceSnapshot, build_board, classroom_snapshot
     from argon.tools.tasks import mark_running
 
     tasks, meta = _cached_tasks(store, fresh=fresh)
+    ws = _rt.config.workspace_path if _rt.config else argon_home()
+    # `fresh` means "he just changed a task", which tells us nothing about
+    # Classroom. Passing it through made every start/complete tap re-crawl every
+    # course and one submission lookup per assignment, synchronously, on the
+    # Flask request thread.
+    board = build_board(
+        classroom_snapshot(ws),
+        SourceSnapshot("tasks", tuple(tasks), meta.get("error"), ()),
+    )
     current = state.get()
     return {
         # The readouts show which task is in flight; that fact belongs to the
         # session, so it is stamped on here rather than read off the task.
-        "tasks": mark_running(tasks, state.get_session()),
+        "tasks": mark_running(board.as_dicts(), state.get_session()),
+        "sources": board.health_as_dicts(),
+        "complete": board.complete,
         **meta,
         "state": {
             "mode": current.get("mode", "idle"),
@@ -280,8 +298,6 @@ def status() -> Any:
     plan = DayPlan(ws)
     data["plan"] = {
         "blocks": [b.as_dict() for b in plan.blocks()],
-        "answered": plan.answered(),
-        "declined": plan.declined(),
     }
     data["schoolwork"] = [
         {"title": a["title"], "course": a["course"], "due": a["due"],
@@ -389,7 +405,8 @@ def tasks_update(task_id: str) -> Any:
             # Putting a task down is not finishing it. Without this the only
             # way out of a session from a readout was to mark work done that
             # was not, which corrupts the completion record to fix the mode.
-            state.end_session()
+            if state.end_session_if_task(task_id) is None:
+                return jsonify({"error": "task is not running"}), 409
         elif action == "complete":
             result = asyncio.run(
                 CompleteTaskTool(store, state, log, habits).execute(task_id=task_id)
@@ -414,10 +431,8 @@ def tasks_update(task_id: str) -> Any:
 def plan_update(block_id: str) -> Any:
     """Mark a block of today's plan done or skipped.
 
-    The plan decides when Argon speaks, so a block he finished at his desk has
-    to be tickable from there — otherwise the readout says one thing, the
-    check-in gate believes another, and he gets asked how a block went that he
-    closed an hour ago.
+    A block he finished at his desk has to be tickable from there so the
+    explicit plan remains consistent across the readout and reminder service.
     """
     from argon.productivity.plan import DayPlan
 

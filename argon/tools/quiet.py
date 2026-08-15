@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from argon.services.reminder import clear_snooze, snooze, snooze_until
-from argon.tools.base import Tool
+from argon.tools.base import Tool, ToolResult
 
 
 class SnoozeCheckInsTool(Tool):
@@ -58,12 +58,12 @@ class SnoozeCheckInsTool(Tool):
     async def execute(self, **kwargs: Any) -> str:
         if kwargs.get("resume"):
             clear_snooze(self._workspace)
-            return "Check-ins resumed."
+            return ToolResult("Check-ins resumed.")
 
         hours = float(kwargs.get("hours") or 12)
         reason = str(kwargs.get("reason") or "")
         until = snooze(self._workspace, hours, reason)
-        return f"Staying quiet until {until:%a %-I:%M %p}. I won't message first before then."
+        return ToolResult(f"Staying quiet until {until:%a %-I:%M %p}. I won't message first before then.")
 
 
 class CheckInStatusTool(Tool):

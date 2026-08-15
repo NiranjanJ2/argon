@@ -92,6 +92,28 @@ _FACT_RE = re.compile(
     r"(?:\s*\(until\s+(?P<until>\d{4}-\d{2}-\d{2})\))?\s*$"
 )
 
+_NON_TEMPORAL_DAY_NAMES_RE = re.compile(
+    r"\b(?:the\s+)?(?:Today|Tonight)\s+Show\b|\bTomorrow\.io\b"
+)
+
+_RELATIVE_DAY_RE = re.compile(
+    r"\b(?:today|tomorrow|yesterday|tonight)\b"
+    r"|\b(?:this|next|last|coming)\s+(?:"
+    r"morning|afternoon|evening|night|week|weekend|month|year|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    r"|\bin\s+(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
+    r"(?:day|days|week|weeks|month|months|year|years)\b"
+    r"|\b(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
+    r"(?:day|days|week|weeks|month|months|year|years)\s+(?:ago|from\s+now)\b",
+    re.IGNORECASE,
+)
+
+
+def has_relative_day_reference(text: str) -> bool:
+    """Whether durable prose would change meaning after the day rolls over."""
+    prose = _NON_TEMPORAL_DAY_NAMES_RE.sub("", text or "")
+    return bool(_RELATIVE_DAY_RE.search(prose))
+
 
 @dataclass(frozen=True)
 class Fact:
@@ -278,6 +300,8 @@ class Journal:
         self, text: str, *, until: str | None = None, standing: bool = False
     ) -> Fact:
         """Record a durable fact immediately, without waiting for nightfall."""
+        if has_relative_day_reference(text):
+            raise ValueError("durable memories must use an absolute YYYY-MM-DD date")
         fact = Fact(learned=clock.today_key(), text=" ".join(text.split())[:MAX_FACT_CHARS],
                     until=None if standing else until, standing=standing)
         self.write_facts(prune([*self.facts(), fact], clock.today_key()))
@@ -449,9 +473,9 @@ _CONSOLIDATE_TOOL = [
                     "threads": {
                         "type": "array",
                         "description": (
-                            "Ongoing things today touched — a project, a class, "
-                            "a person, a commitment that will come up again. "
-                            "One entry each, saying what happened today."
+                            "Ongoing operational matters explicitly active today "
+                            "and likely to need future follow-up. Exclude incidental "
+                            "people, ordinary classes, and one-off topics."
                         ),
                         "items": {
                             "type": "object",
@@ -519,19 +543,23 @@ Mark a fact `standing` when it is a recurring shape of his life rather than a
 single event — "school days end at 3:40", "practice on Tuesdays", "he is free
 after 4pm". Those are the facts worth most and they never expire. Everything
 else is a one-off: write it as a plain sentence and set `until` to the day it
-stops mattering. "He is starting math homework at 3pm today" is one-off and
-should expire tonight, not in a week.
+stops mattering. "He is starting math homework at 3pm on 2026-08-13" is one-off
+and should expire that night, not in a week. Never use today, tomorrow,
+yesterday, tonight, next Friday, this weekend, in two days, or similar relative
+wording in a durable fact; write the literal date. Timeless preferences and
+recurring standing facts need no date.
 
 Drop an existing fact only when today's entries show it is finished or wrong.
 Keeping nothing and dropping nothing is a perfectly good answer.
 
-**threads** — anything ongoing that today touched: a project, a class, a
-person, a commitment that will come up again. One entry each saying what
-happened today, in past tense. Include the ones that already exist; adding to
-them is the point. Give a summary and aliases the first time you meet
-something, because the aliases are how you will recognise it when he mentions
-it in three weeks. A one-off errand is not a thread; something he will still be
-doing next month is.
+**threads** — only an ongoing operational matter that is explicitly active and
+likely to need future follow-up: an active project, recurring commitment, or
+another matter he is managing over time. An incidental person, ordinary class
+mention, hypothetical project, routine conversation topic, or one-off errand
+is not a thread. For a qualifying matter, write one past-tense entry only when
+something materially changed today. Include an existing thread only when today
+added real news; do not touch it merely because its name appeared. Give a new
+thread a summary and aliases that Niranjan actually used.
 
 **digest** — two or three sentences on how the day actually went. Written for
 Argon to read back over the next few days, so it can pick up a conversation
@@ -584,6 +612,9 @@ async def consolidate_day(
         text = str(item.get("fact") or "").strip() if isinstance(item, dict) else str(item).strip()
         if not text:
             continue
+        if has_relative_day_reference(text):
+            logger.warning("Skipping relative-day durable fact from {}: {}", day, text[:80])
+            continue
         until = item.get("until") if isinstance(item, dict) else None
         standing = bool(item.get("standing")) if isinstance(item, dict) else False
         added.append(Fact(learned=day, text=text[:MAX_FACT_CHARS],
@@ -616,12 +647,23 @@ def _absorb_threads(journal: "Journal", entries: list[Any], day: str) -> None:
         if not name:
             continue
         try:
+            aliases = [str(a) for a in (raw.get("aliases") or [])]
+            existing = store.get(name)
+            if existing is None:
+                for alias in aliases:
+                    existing = store.get(alias)
+                    if existing is not None:
+                        break
+            target = existing.name if existing is not None else name
+            if existing is not None and name.lower() != existing.name.lower():
+                aliases.append(name)
             store.note(
-                name,
+                target,
                 entry=str(raw.get("entry") or ""),
                 summary=raw.get("summary"),
                 status=raw.get("status"),
-                aliases=[str(a) for a in (raw.get("aliases") or [])],
+                aliases=aliases,
+                day=day,
             )
         except Exception:  # noqa: BLE001 — one bad entry must not lose the rest
             logger.warning("Could not record thread {!r} from {}", name, day)

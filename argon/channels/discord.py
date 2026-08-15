@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from loguru import logger
 from pydantic import Field
 
-from argon.channels.base import BaseChannel
+from argon.channels.base import BaseChannel, ChannelSendError
 from argon.config import Base
 from argon.core.bus import MessageBus, OutboundMessage
 from argon.core.commands import build_help_text
@@ -151,10 +151,10 @@ if DISCORD_AVAILABLE:
         async def send_outbound(self, msg: OutboundMessage) -> None:
             """Send an outbound message using Discord transport rules."""
             # Discord ids are snowflakes. A non-numeric chat_id means something
-            # upstream routed badly; drop it rather than raise inside the send.
+            # upstream routed badly — which is a failure to deliver, and has to
+            # be reported as one rather than logged and forgotten.
             if not str(msg.chat_id).isdigit():
-                logger.error("Discord: refusing to send to non-numeric chat_id {!r}", msg.chat_id)
-                return
+                raise ChannelSendError(f"non-numeric Discord chat_id {msg.chat_id!r}")
             channel_id = int(msg.chat_id)
 
             channel = self.get_channel(channel_id)
@@ -162,8 +162,9 @@ if DISCORD_AVAILABLE:
                 try:
                     channel = await self.fetch_channel(channel_id)
                 except Exception as e:
-                    logger.warning("Discord channel {} unavailable: {}", msg.chat_id, e)
-                    return
+                    raise ChannelSendError(
+                        f"Discord channel {msg.chat_id} unavailable: {e}"
+                    ) from e
 
             reference, mention_settings = self._build_reply_context(channel, msg.reply_to)
             sent_media = False
@@ -313,18 +314,24 @@ class DiscordChannel(BaseChannel):
         await self._reset_runtime_state(close_client=True)
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through Discord using discord.py."""
+        """Send a message through Discord using discord.py.
+
+        Raises :class:`ChannelSendError` when the message did not go out. The
+        caller retries and, for a tracked promise, records the outcome — so a
+        failure swallowed here becomes a reminder Argon reports as delivered.
+        """
         client = self._client
         if client is None or not client.is_ready():
-            logger.warning("Discord client not ready; dropping outbound message")
-            return
+            raise ChannelSendError("Discord client is not connected")
 
         is_progress = bool((msg.metadata or {}).get("_progress"))
 
         try:
             await client.send_outbound(msg)
+        except ChannelSendError:
+            raise
         except Exception as e:
-            logger.error("Error sending Discord message: {}", e)
+            raise ChannelSendError(f"Discord send failed: {e}") from e
         finally:
             if not is_progress:
                 await self._stop_typing(msg.chat_id)

@@ -1,6 +1,7 @@
 """Utility functions for argon."""
 
 import base64
+import hashlib
 import json
 import re
 import shutil
@@ -418,8 +419,16 @@ def build_status_content(
     ])
 
 
-def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]:
-    """Sync bundled templates to workspace. Only creates missing files."""
+def sync_workspace_templates(
+    workspace: Path, silent: bool = False, *, force: bool = False
+) -> list[str]:
+    """Seed prompts and update copies the user has not edited.
+
+    The manifest remembers the exact bundled content last installed. A later
+    package update may replace that untouched copy, while a locally edited
+    prompt is retained. ``force`` is reserved for an explicit deployment where
+    the existing files are already known to be old bundled copies.
+    """
     from importlib.resources import files as pkg_files
     try:
         tpl = pkg_files("argon") / "prompts"
@@ -428,14 +437,44 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     if not tpl.is_dir():
         return []
 
-    added: list[str] = []
+    changed: list[str] = []
+    manifest_path = workspace / ".prompt-templates.json"
+    try:
+        loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = loaded if isinstance(loaded, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        manifest = {}
+
+    def _digest(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def _write(src, dest: Path):
-        if dest.exists():
+        content = src.read_text(encoding="utf-8") if src else ""
+        relative = str(dest.relative_to(workspace))
+        bundled_hash = _digest(content) if src else None
+        current = dest.read_text(encoding="utf-8") if dest.exists() else None
+        current_hash = _digest(current) if current is not None else None
+        installed_hash = manifest.get(relative)
+        may_replace = current is None or (
+            src is not None
+            and (
+                force
+                or (installed_hash is not None and current_hash == installed_hash)
+            )
+        )
+
+        if not may_replace:
+            # An existing install predates the manifest. If it already equals
+            # this bundle, begin tracking it without rewriting anything.
+            if bundled_hash is not None and current_hash == bundled_hash:
+                manifest[relative] = bundled_hash
             return
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(src.read_text(encoding="utf-8") if src else "", encoding="utf-8")
-        added.append(str(dest.relative_to(workspace)))
+        if current != content:
+            _write_text_atomic(dest, content)
+            changed.append(relative)
+        if bundled_hash is not None:
+            manifest[relative] = bundled_hash
 
     for item in tpl.iterdir():
         if item.name.endswith(".md") and not item.name.startswith("."):
@@ -444,11 +483,17 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     _write(None, workspace / "memory" / "HISTORY.md")
     (workspace / "skills").mkdir(exist_ok=True)
 
-    if added and not silent:
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_text_atomic(
+        manifest_path,
+        json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+
+    if changed and not silent:
         from rich.console import Console
-        for name in added:
-            Console().print(f"  [dim]Created {name}[/dim]")
-    return added
+        for name in changed:
+            Console().print(f"  [dim]Updated {name}[/dim]")
+    return changed
 
 
 def when_label(value: Any, tz: Any = None) -> str | None:

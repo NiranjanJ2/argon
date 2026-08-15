@@ -2,20 +2,45 @@
 
 from __future__ import annotations
 
-import json
-from datetime import datetime
-from pathlib import Path
+import re
+from datetime import datetime, timedelta
 from typing import Any
 
 from argon import clock
+from argon.core import store, turn
 from argon.ios import mode as ios_mode
-from argon.paths import get_runtime_subdir
 from argon.productivity.state import DailyState
-from argon.tools.base import Tool
+from argon.tools.base import Tool, ToolResult
 
 #: Outside these hours a block needs explicit confirmation.
 NIGHT_START_HOUR = 23
 NIGHT_END_HOUR = 7
+
+#: How long a request for consent stays answerable. Long enough to reply to,
+#: short enough that "yes" an hour later is not read as consent to something he
+#: has forgotten he was asked.
+CONSENT_TTL_MINUTES = 10
+
+#: Where the outstanding request lives. See argon/core/store.py.
+CONSENT_DOC = "pending_confirmation"
+
+#: What counts as "yes" — the whole message, not a substring. "no, don't",
+#: "why would you do that" and "ok but not now" must all fail this.
+_AFFIRMATIVE = frozenset({
+    "y", "yes", "yeah", "yep", "yup", "yes please", "please do", "do it",
+    "go ahead", "goahead", "confirm", "confirmed", "affirmative", "sure",
+    "ok", "okay", "k", "lock it", "block it", "lock my phone", "yes do it",
+})
+
+
+def is_affirmative(text: str) -> bool:
+    """Is this message, in its entirety, an unambiguous yes?
+
+    Deliberately strict and deliberately not a model call. Anything that is not
+    plainly a yes is not consent to blocking his phone at 2 AM.
+    """
+    normalized = " ".join(re.findall(r"[a-z']+", (text or "").lower()))
+    return normalized in _AFFIRMATIVE
 
 
 class SetFocusModeTool(Tool):
@@ -26,54 +51,95 @@ class SetFocusModeTool(Tool):
     ) -> None:
         self._default_minutes = default_lock_minutes
         self._state = state
-        self._refused_this_turn = False
 
-    def start_turn(self) -> None:
-        """Called by the loop before each turn. See ``_night_block_refused``."""
-        self._refused_this_turn = False
+    @staticmethod
+    def _fingerprint(mode: str, duration: Any, allow_early_end: bool) -> str:
+        """The exact action being consented to, not merely "a block"."""
+        return f"set_focus_mode|{mode}|{duration}|{bool(allow_early_end)}"
 
-    def _night_block_refused(self) -> str | None:
-        """Refuse a night-time block until Niranjan has actually been asked.
+    def _night_block_refused(
+        self, mode: str, duration: Any, allow_early_end: bool
+    ) -> str | None:
+        """Refuse a night-time block until Niranjan has actually said yes to *this*.
 
-        A ``confirmed`` parameter is worthless here: faced with the first
-        version of this guard the model simply set ``confirmed: true`` itself
-        and locked the phone at 1:47 AM anyway. A flag the model controls is
-        not a guard, so consent is inferred from the shape of the conversation
-        instead. The first attempt is always refused and the refusal is
-        recorded; retrying inside the same turn is refused again, which leaves
-        the model no option but to end its turn and ask. Only once Niranjan has
-        replied — a new turn — does the recorded refusal let it through.
+        A ``confirmed`` parameter was worthless: faced with the first version of
+        this guard the model set ``confirmed: true`` itself and locked the phone
+        at 1:47 AM. The second version inferred consent from the shape of the
+        conversation — a recorded refusal plus *any* later message inside thirty
+        minutes. That is not consent either. It meant "actually never mind",
+        "what time is it?", or a message about something else entirely all
+        unlocked the block, and with a tool instance shared across sessions the
+        later message did not even have to come from the same conversation.
+
+        Consent is now bound to four things at once: the exact action and its
+        parameters, the session it was asked in, an explicit yes in the message
+        now being processed, and an expiry. Change the duration and it must be
+        asked again, because that is a different thing to agree to.
         """
         hour = clock.now().hour
         if not (hour >= NIGHT_START_HOUR or hour < NIGHT_END_HOUR):
             return None
 
-        if not self._refused_this_turn and self._asked_recently():
-            return None  # refused in an earlier turn, and he has since replied
+        ctx = turn.current()
+        fingerprint = self._fingerprint(mode, duration, allow_early_end)
+        if ctx is None or ctx.automated:
+            # Nothing Argon started can consent on his behalf.
+            return (
+                f"Not applied: it is {clock.now():%-I:%M %p} and this turn was not "
+                "started by Niranjan. Only he can authorise a night-time block."
+            )
 
-        self._refused_this_turn = True
-        self._record_refusal()
+        if self._consumed(ctx, fingerprint):
+            return None
+
+        self._request(ctx, fingerprint)
         return (
             f"Not applied: it is {clock.now():%-I:%M %p}. Ask Niranjan whether he "
-            "really wants his phone blocked right now, and only do it if he says "
-            "yes in his next message."
+            "really wants his phone blocked right now, and say what for and for "
+            "how long. Only apply it if his next message is an explicit yes to "
+            "exactly this."
         )
 
-    def _refusal_file(self) -> Path:
-        return get_runtime_subdir("ios") / "night_prompt.json"
+    def _request(self, ctx: turn.TurnContext, fingerprint: str) -> None:
+        now = clock.now()
+        store.put_doc(CONSENT_DOC, {
+            "session_key": ctx.session_key,
+            "action": fingerprint,
+            # The turn that asked. Consent must arrive in a *later* one.
+            "asked_in_turn": ctx.turn_id,
+            "asked_at": now.isoformat(),
+            "expires_at": (now + timedelta(minutes=CONSENT_TTL_MINUTES)).isoformat(),
+        })
 
-    def _record_refusal(self) -> None:
-        self._refusal_file().write_text(
-            json.dumps({"at": clock.now().isoformat()}), encoding="utf-8"
-        )
+    def _consumed(self, ctx: turn.TurnContext, fingerprint: str) -> bool:
+        """Is the message being processed right now a yes to exactly this?
 
-    def _asked_recently(self, minutes: int = 30) -> bool:
-        try:
-            stamp = json.loads(self._refusal_file().read_text(encoding="utf-8"))["at"]
-            asked = datetime.fromisoformat(stamp)
-        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        The turn check is what stops the model consenting on his behalf. A turn
+        gets many tool calls and ``user_text`` is the same for all of them, so
+        without it the model could call this twice in one turn — refused, then
+        allowed — with his only message being an "ok" about something else.
+        That is the 1:47 AM phone lock, reachable again by a different route.
+        """
+        record = store.get_doc(CONSENT_DOC)
+        if not isinstance(record, dict):
             return False
-        return (clock.now() - asked).total_seconds() < minutes * 60
+        if record.get("action") != fingerprint:
+            return False
+        if record.get("session_key") != ctx.session_key:
+            return False
+        if record.get("asked_in_turn") == ctx.turn_id:
+            return False
+        try:
+            expires = datetime.fromisoformat(str(record.get("expires_at")))
+        except (TypeError, ValueError):
+            return False
+        if clock.now() >= expires:
+            return False
+        if not is_affirmative(ctx.user_text):
+            return False
+        # One yes authorises one block.
+        store.put_doc(CONSENT_DOC, {})
+        return True
 
     @property
     def name(self) -> str:
@@ -129,7 +195,7 @@ class SetFocusModeTool(Tool):
     async def execute(self, **kwargs: Any) -> str:
         mode = kwargs.get("mode")
         if mode not in ios_mode.MODES:
-            return f"Error: mode must be one of {list(ios_mode.MODES)}."
+            return ToolResult(f"Error: mode must be one of {list(ios_mode.MODES)}.", success=False)
 
         duration = kwargs.get("duration_min")
         if mode != "off" and not duration:
@@ -138,8 +204,10 @@ class SetFocusModeTool(Tool):
         # "Today I want to lock in for SAT prep" is a plan, not an instruction
         # to lock the phone now — and it was said at 1:37 AM, which is when
         # Argon locked it.
-        if mode != "off" and (refusal := self._night_block_refused()):
-            return refusal
+        if mode != "off" and (refusal := self._night_block_refused(
+            mode, duration, bool(kwargs.get("allow_early_end", True))
+        )):
+            return ToolResult(refusal, success=False)
 
         try:
             desired = ios_mode.set_mode(
@@ -151,7 +219,7 @@ class SetFocusModeTool(Tool):
         except ios_mode.OverrideActive as exc:
             # Niranjan pulled the emergency release. Do not argue with it, and
             # do not pretend the block was applied.
-            return f"Not applied: {exc}. Leave it alone until then."
+            return ToolResult(f"Not applied: {exc}. Leave it alone until then.", success=False)
 
         # Blocking his phone and tracking what he is doing are the same event
         # seen from two sides. Left independent they contradicted each other:
@@ -165,7 +233,7 @@ class SetFocusModeTool(Tool):
                 self._state.set_mode("lock_in")
 
         if mode == "off":
-            return "Screen Time block released."
+            return ToolResult("Screen Time block released.")
 
         # The phone applies this when it next reconciles, so promise intent, not
         # completion — saying "locked" when the phone is in a drawer is a lie.
@@ -174,8 +242,8 @@ class SetFocusModeTool(Tool):
 
         state, detail = ios_mode.convergence()
         if state == "never_seen":
-            return f"{requested} The phone has never checked in — it may not be paired yet."
+            return ToolResult(f"{requested} The phone has never checked in — it may not be paired yet.")
         if state in ("stale", "diverged", "failed"):
             # Worth saying plainly: the previous request never landed either.
-            return f"{requested} But {detail}. Do not assume it is locked."
-        return f"{requested} Waiting for the phone to pick it up."
+            return ToolResult(f"{requested} But {detail}. Do not assume it is locked.")
+        return ToolResult(f"{requested} Waiting for the phone to pick it up.")

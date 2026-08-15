@@ -7,8 +7,9 @@ is why `argon gateway` is now a dozen lines instead of three hundred.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -16,17 +17,23 @@ from argon import clock
 from argon.channels.manager import ChannelManager
 from argon.config import Config
 from argon.core import target
-from argon.core.bus import MessageBus, OutboundMessage
+from argon.core.bus import MessageBus
 from argon.core.loop import AgentLoop
+from argon.core.outbox import Outbox
 from argon.core.session import SessionManager
 from argon.paths import get_cron_store
 from argon.providers.base import GenerationSettings, LLMProvider
 from argon.providers.openai_compat import OpenAICompatProvider
 from argon.providers.registry import find_by_name
-from argon.services.cron import CronJob, CronService
+from argon.services.cron import CronJob, CronService, JobResult
 from argon.services.heartbeat import HeartbeatService
-from argon.services.reminder import ReminderService, is_silence
+from argon.services.maintenance import MaintenanceService
+from argon.services.reminder import ReminderService
 from argon.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def build_provider(config: Config, *, provider_name: str | None = None,
@@ -77,6 +84,8 @@ class Runtime:
     channels: ChannelManager
     heartbeat: HeartbeatService
     reminder: ReminderService
+    maintenance: MaintenanceService
+    outbox: Outbox
     # Resolves the channel/chat to use for messages Niranjan did not initiate.
     pick_target: Callable[[], tuple[str, str]]
 
@@ -87,6 +96,9 @@ def build_runtime(config: Config) -> Runtime:
     sessions = SessionManager(config.workspace_path)
     provider = build_provider(config)
     cron = CronService(get_cron_store())
+    # Every promise Argon makes to deliver something goes through here, and only
+    # a real channel acknowledgement closes one. See argon/core/outbox.py.
+    outbox = Outbox(bus.publish_outbound)
 
     agent = AgentLoop(config, bus, provider, cron_service=cron, session_manager=sessions)
 
@@ -116,8 +128,9 @@ def build_runtime(config: Config) -> Runtime:
     heartbeat_agent = AgentLoop(
         config, bus, hb_provider, model=hb_model, session_manager=sessions
     )
+    background_turn_lock = asyncio.Lock()
 
-    channels = ChannelManager(config, bus)
+    channels = ChannelManager(config, bus, outbox=outbox)
 
     def pick_target() -> tuple[str, str]:
         """Where to deliver a message Niranjan did not ask for."""
@@ -140,49 +153,74 @@ def build_runtime(config: Config) -> Runtime:
                 return channel, chat_id
         return "cli", "direct"
 
-    async def on_cron_job(job: CronJob) -> str | None:
-        from argon.tools.cron import CronTool
-        from argon.tools.message import MessageTool
-        from argon.utils.evaluator import evaluate_response
+    async def on_cron_job(job: CronJob) -> JobResult:
+        """Run one due job. Success means Niranjan actually received it.
+
+        A reminder he asked for takes the deterministic path: his own words,
+        delivered verbatim, with no model call and no evaluator entitled to
+        veto it. An LLM once decided a scheduled reminder was not worth sending
+        and cron recorded that as a successful run.
+        """
+        due_ms = job.schedule.at_ms or job.state.next_run_at_ms or _now_ms()
+        key = f"cron:{job.id}:{int(due_ms)}"
+
+        if job.payload.kind == "reminder":
+            result = await outbox.deliver(
+                key=key,
+                channel=job.payload.channel or "",
+                chat_id=job.payload.to or "",
+                content=job.payload.message,
+                due_at=due_ms / 1000,
+                kind="reminder",
+            )
+            return JobResult(
+                status="ok" if result.ok else "error",
+                error=result.error,
+                delivered=result.ok,
+            )
 
         note = (
             "[Scheduled Task] Timer finished.\n\n"
             f"Task '{job.name}' has been triggered.\n"
             f"Scheduled instruction: {job.payload.message}"
         )
-        cron_tool = agent.tools.get("cron")
-        token = cron_tool.set_cron_context(True) if isinstance(cron_tool, CronTool) else None
-        try:
-            resp = await agent.process_direct(
+        async with background_turn_lock:
+            resp = await heartbeat_agent.process_direct(
                 note,
                 session_key=f"cron:{job.id}",
                 channel=job.payload.channel or "cli",
                 chat_id=job.payload.to or "direct",
+                origin="cron",
+                background=True,
             )
-        finally:
-            if isinstance(cron_tool, CronTool) and token is not None:
-                cron_tool.reset_cron_context(token)
 
         response = resp.content if resp else ""
-        if response == EMPTY_FINAL_RESPONSE_MESSAGE:
-            return None  # model chose silence; don't leak the placeholder
+        if not response or response == EMPTY_FINAL_RESPONSE_MESSAGE:
+            # The model produced nothing. That is not a completed job, and
+            # calling it one is how a job that never says anything looks healthy
+            # forever.
+            return JobResult(status="skipped", error="no output from the model")
 
-        message_tool = agent.tools.get("message")
-        if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
-            return response
+        if not (job.payload.deliver and job.payload.to):
+            return JobResult(status="ok")
 
-        if job.payload.deliver and job.payload.to and response:
-            if await evaluate_response(response, job.payload.message, provider, agent.model):
-                await bus.publish_outbound(OutboundMessage(
-                    channel=job.payload.channel or "cli",
-                    chat_id=job.payload.to,
-                    content=response,
-                ))
-        return response
+        result = await outbox.deliver(
+            key=key,
+            channel=job.payload.channel or "",
+            chat_id=job.payload.to,
+            content=response,
+            due_at=due_ms / 1000,
+            kind="job",
+        )
+        return JobResult(
+            status="ok" if result.ok else "error",
+            error=result.error,
+            delivered=result.ok,
+        )
 
     cron.on_job = on_cron_job
 
-    async def run_background_turn(prompt: str) -> str:
+    async def _run_background_turn(prompt: str) -> str:
         """Run a turn that the user did not initiate, on the cheap model."""
         channel, chat_id = pick_target()
 
@@ -192,24 +230,34 @@ def build_runtime(config: Config) -> Runtime:
         resp = await heartbeat_agent.process_direct(
             prompt, session_key="heartbeat", channel=channel, chat_id=chat_id,
             on_progress=_silent,
+            origin="checkin", background=True,
         )
         session = heartbeat_agent.sessions.get_or_create("heartbeat")
         session.retain_recent_legal_suffix(hb_cfg.keep_recent_messages)
         heartbeat_agent.sessions.save(session)
         return resp.content if resp else ""
 
-    async def notify(response: str) -> None:
+    async def run_background_turn(prompt: str) -> str:
+        """Serialize background work through its shared AgentLoop and tools."""
+        async with background_turn_lock:
+            return await _run_background_turn(prompt)
+
+    async def notify(response: str, *, key: str | None = None) -> Any:
+        """Deliver something Niranjan did not ask for. Returns whether it landed.
+
+        This used to return None whether it sent, dropped, or failed — and the
+        check-in ledger recorded "said" regardless. Two days of check-ins died
+        here in silence while the log said "Check-in spoke".
+        """
         channel, chat_id = pick_target()
         if channel == "cli":
-            # Two days of check-ins died here in silence while the log above
-            # still said "Check-in spoke". A message Argon meant to send and
-            # could not is worth a warning, every time.
             logger.warning(
                 "No reachable channel — dropping an unprompted message: {}", response[:80]
             )
-            return
-        await bus.publish_outbound(
-            OutboundMessage(channel=channel, chat_id=chat_id, content=response)
+            return False
+        return await outbox.deliver(
+            key=key or f"notify:{int(_now_ms())}",
+            channel=channel, chat_id=chat_id, content=response, kind="unprompted",
         )
 
     heartbeat = HeartbeatService(
@@ -223,54 +271,32 @@ def build_runtime(config: Config) -> Runtime:
         timezone=config.agents.defaults.timezone,
     )
 
-    async def consolidate_yesterday() -> None:
-        """Fold the last finished day into long-term memory, once."""
-        from argon.core.journal import Journal, consolidate_day
+    async def fold_day_into_memory(journal, day: str) -> None:
+        """The one part of memory upkeep that needs a model.
 
-        journal = Journal(config.workspace_path)
-        day = journal.pending_day()
-        if day is None:
-            return
-        try:
-            await consolidate_day(journal, hb_provider, hb_model, day)
-            journal.sweep_old_days()
-        except Exception:
-            logger.exception("End-of-day consolidation failed for {}", day)
+        Which day, and whether one is due, belongs to MaintenanceService — and
+        that service runs whether or not check-ins do. Consolidation used to
+        ride the check-in loop, so turning off unsolicited messages also turned
+        off remembering, silently.
+        """
+        from argon.core.journal import consolidate_day
+
+        await consolidate_day(journal, hb_provider, hb_model, day)
+
+    maintenance = MaintenanceService(config.workspace_path, fold_day_into_memory)
 
     async def on_check_in(prompt: str) -> str:
-        """Run a check-in turn. Returns what actually reached Niranjan."""
-        from argon.tools.message import MessageTool
-
-        response = await run_background_turn(prompt)
-
-        # A check-in tells the model to use the message tool, so the usual case
-        # is that delivery already happened. Notifying again would send it twice
-        # — on_cron_job guards this; this path did not.
-        tool = heartbeat_agent.tools.get("message")
-        if isinstance(tool, MessageTool) and tool.sent_in_turn:
-            # The text itself, never a placeholder. "(sent)" went into the
-            # ledger as what was said, so the next check-in was shown "(sent)"
-            # as its own history and could not tell it had already asked —
-            # nine near-identical "what's your plan today?" messages in a day.
-            # It also defeated the reword filter, which then suppressed the
-            # *ledger entry* while the message had already gone out, so the
-            # daily cap under-counted and never engaged.
-            return tool.last_sent or response or "(sent)"
-
-        # Filter before delivering, not after: a model that answers the
-        # decision rather than writing a message ("No.") would otherwise be
-        # sent to Niranjan verbatim as its check-in.
-        if response and response != EMPTY_FINAL_RESPONSE_MESSAGE and not is_silence(response):
-            await notify(response)
-            return response
-        return ""
+        """Generate a check-in candidate; ReminderService owns delivery policy."""
+        async with background_turn_lock:
+            response = await _run_background_turn(prompt)
+            return "" if response == EMPTY_FINAL_RESPONSE_MESSAGE else response
 
     checkin_cfg = config.gateway.checkins
     reminder = ReminderService(
         workspace=config.workspace_path,
         timezone=config.agents.defaults.timezone,
         on_check_in=on_check_in,
-        on_day_rollover=consolidate_yesterday,
+        on_deliver=notify,
         enabled=checkin_cfg.enabled,
         max_per_day=checkin_cfg.max_per_day,
         min_gap_minutes=checkin_cfg.min_gap_minutes,
@@ -282,23 +308,33 @@ def build_runtime(config: Config) -> Runtime:
     return Runtime(
         config=config, bus=bus, agent=agent, heartbeat_agent=heartbeat_agent,
         cron=cron, channels=channels, heartbeat=heartbeat, reminder=reminder,
-        pick_target=pick_target,
+        maintenance=maintenance, outbox=outbox, pick_target=pick_target,
     )
 
 
 async def run(rt: Runtime) -> None:
     """Run the gateway until interrupted."""
     try:
+        await rt.outbox.start()
         await rt.cron.start()
         await rt.heartbeat.start()
         await rt.reminder.start()
+        # Deliberately outside the check-in switch: remembering is not part of
+        # the unsolicited-message policy.
+        await rt.maintenance.start()
         await asyncio.gather(rt.agent.run(), rt.channels.start_all())
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Shutting down")
     finally:
-        await rt.agent.close_mcp()
+        rt.maintenance.stop()
         rt.reminder.stop()
         rt.heartbeat.stop()
         rt.cron.stop()
+        rt.outbox.stop()
+        closed_agents: set[int] = set()
+        for agent in (rt.agent, rt.heartbeat_agent):
+            if id(agent) not in closed_agents:
+                closed_agents.add(id(agent))
+                await agent.close_mcp()
         rt.agent.stop()
         await rt.channels.stop_all()

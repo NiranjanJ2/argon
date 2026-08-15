@@ -8,8 +8,6 @@ drifts that actually happened.
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from argon.productivity.state import DailyState
@@ -68,6 +66,22 @@ class TestEndingWork:
         assert state.end_session() is None
         assert state.get_mode() == "idle"
 
+    def test_ending_by_task_id_leaves_a_replacement_session_running(self, state):
+        state.start_session(task_id="old", title="Old task")
+        state.start_session(task_id="new", title="New task")
+
+        assert state.end_session_if_task("old") is None
+        assert state.get_session()["task_id"] == "new"
+        assert state.end_session_if_task("new")["task_id"] == "new"
+
+    def test_ending_by_task_id_keeps_legacy_title_only_sessions_working(self, state):
+        state.start_session(task_id=None, title="SAT prep")
+
+        ended = state.end_session_if_task("task-1", title="SAT prep")
+
+        assert ended is not None
+        assert ended["title"] == "SAT prep"
+
 
 class TestModeAndSessionStayTogether:
     def test_a_resting_mode_ends_the_session(self, state):
@@ -107,20 +121,44 @@ class TestTheDayBoundary:
         "SAT prep", started 1:42 AM on 2026-08-02, still read as running on the
         evening of the 4th because the durable task store has no 4 AM reset.
         """
+        from argon.core import store
+        from argon.productivity.state import STATE_DOC
+
         state.start_session(task_id="abc", title="SAT prep")
 
-        stored = json.loads((tmp_path / "daily" / "state.json").read_text())
+        stored = store.get_doc(STATE_DOC)
         stored["date"] = "1999-01-01"
-        (tmp_path / "daily" / "state.json").write_text(json.dumps(stored))
+        store.put_doc(STATE_DOC, stored)
 
         assert state.get_session() is None
         assert state.get_mode() == "idle"
         assert state.get_current_task() is None
 
-    def test_a_corrupt_state_file_reads_as_a_fresh_day(self, state, tmp_path):
-        (tmp_path / "daily" / "state.json").write_text("{not json")
-        assert state.get_mode() == "idle"
-        assert state.get_session() is None
+    def test_corrupt_state_surfaces_instead_of_becoming_an_empty_day(self, state, tmp_path):
+        """This used to read as "idle, nothing going on", which is a lie.
+
+        Every reader caught `JSONDecodeError` and returned defaults, so a torn
+        write did not look like a fault — it looked like a day on which nothing
+        had happened. Argon then behaved as though the plan and the session had
+        never existed, which from the outside is indistinguishable from having
+        forgotten them. Unreadable state must say it is unreadable.
+        """
+        from argon.core import store
+        from argon.productivity.state import STATE_DOC
+
+        # A row that survives sqlite but is not valid JSON: exactly the torn
+        # write the old file-based code swallowed.
+        with store.txn() as conn:
+            conn.execute(
+                "INSERT INTO docs (key, value, version, updated_at) VALUES (?, ?, 1, 0) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (STATE_DOC, "{not json"),
+            )
+
+        with pytest.raises(store.StoreCorrupt):
+            state.get_mode()
+
+        assert store.health()["ok"] is True, "the database itself is fine; the document is not"
 
 
 class TestMarkRunning:

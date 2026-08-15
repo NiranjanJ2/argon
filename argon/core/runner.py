@@ -11,6 +11,7 @@ from loguru import logger
 
 from argon.core.hook import AgentHook, AgentHookContext
 from argon.providers.base import LLMProvider, ToolCallRequest
+from argon.tools.base import ToolResult
 from argon.tools.registry import ToolRegistry
 from argon.utils.helpers import (
     build_assistant_message,
@@ -58,6 +59,7 @@ class AgentRunSpec:
     provider_retry_mode: str = "standard"
     progress_callback: Any | None = None
     checkpoint_callback: Any | None = None
+    background: bool = False
 
 
 def _already_delivered(spec: AgentRunSpec) -> bool:
@@ -321,7 +323,7 @@ class AgentRunner:
         kwargs = self._build_request_kwargs(
             spec,
             messages,
-            tools=spec.tools.get_definitions(),
+            tools=spec.tools.get_definitions(background=spec.background),
         )
         if hook.wants_streaming():
             async def _stream(delta: str) -> None:
@@ -420,7 +422,9 @@ class AgentRunner:
         tool, params, prep_error = None, tool_call.arguments, None
         if callable(prepare_call):
             try:
-                prepared = prepare_call(tool_call.name, tool_call.arguments)
+                prepared = prepare_call(
+                    tool_call.name, tool_call.arguments, background=spec.background
+                )
                 if isinstance(prepared, tuple) and len(prepared) == 3:
                     tool, params, prep_error = prepared
             except Exception:
@@ -436,7 +440,9 @@ class AgentRunner:
             if tool is not None:
                 result = await tool.execute(**params)
             else:
-                result = await spec.tools.execute(tool_call.name, params)
+                result = await spec.tools.execute(
+                    tool_call.name, params, background=spec.background
+                )
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
@@ -448,6 +454,16 @@ class AgentRunner:
             if spec.fail_on_tool_error:
                 return f"Error: {type(exc).__name__}: {exc}", event, exc
             return f"Error: {type(exc).__name__}: {exc}", event, None
+
+        if isinstance(result, ToolResult) and not result.success:
+            event = {
+                "name": tool_call.name,
+                "status": "error",
+                "detail": result.replace("\n", " ").strip()[:120],
+            }
+            if spec.fail_on_tool_error:
+                return result + _HINT, event, RuntimeError(result)
+            return result + _HINT, event, None
 
         if isinstance(result, str) and result.startswith("Error"):
             event = {
@@ -623,4 +639,3 @@ class AgentRunner:
         if current:
             batches.append(current)
         return batches
-

@@ -71,6 +71,38 @@ class TestRememberingAThing:
         store.note("Petoi robot", "Ordered the kit")
         assert len(store.get("Petoi robot").log) == 1
 
+    def test_a_backdated_entry_does_not_regress_newer_thread_state(self, store):
+        store.note(
+            "Petoi robot", "Finished calibration", day="2026-08-11",
+            summary="Calibrated robot.", status="done",
+        )
+
+        store.note(
+            "Petoi robot", "Ordered the kit", day="2026-08-01",
+            summary="Early project description.", status="active",
+        )
+
+        thread = store.get("Petoi robot")
+        assert thread.first_seen == "2026-08-01"
+        assert thread.last_touched == "2026-08-11"
+        assert thread.summary == "Calibrated robot."
+        assert thread.status == "done"
+        assert thread.log == [
+            "- 2026-08-01 — Ordered the kit",
+            "- 2026-08-11 — Finished calibration",
+        ]
+
+    def test_replaying_a_backdated_entry_is_idempotent(self, store):
+        store.note("Petoi robot", "Ordered the kit", day="2026-08-01")
+        store.note("Petoi robot", "Finished calibration", day="2026-08-11")
+
+        store.note("Petoi robot", "Ordered the kit", day="2026-08-01")
+
+        assert store.get("Petoi robot").log == [
+            "- 2026-08-01 — Ordered the kit",
+            "- 2026-08-11 — Finished calibration",
+        ]
+
 
 class TestBringingItUpLater:
     def test_an_alias_finds_it(self, store):

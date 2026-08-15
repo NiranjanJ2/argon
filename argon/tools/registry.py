@@ -31,9 +31,13 @@ class ToolRegistry:
         """Check if a tool is registered."""
         return name in self._tools
 
-    def get_definitions(self) -> list[dict[str, Any]]:
+    def get_definitions(self, *, background: bool = False) -> list[dict[str, Any]]:
         """Get all tool definitions in OpenAI format."""
-        return [tool.to_schema() for tool in self._tools.values()]
+        return [
+            tool.to_schema()
+            for tool in self._tools.values()
+            if not background or tool.background_allowed
+        ]
 
     def resolve(self, name: str) -> tuple[str, Tool | None]:
         """Look up a tool, tolerating a name the model dirtied.
@@ -54,6 +58,8 @@ class ToolRegistry:
         self,
         name: str,
         params: dict[str, Any],
+        *,
+        background: bool = False,
     ) -> tuple[Tool | None, dict[str, Any], str | None]:
         """Resolve, cast, and validate one tool call."""
         name, tool = self.resolve(name)
@@ -61,6 +67,8 @@ class ToolRegistry:
             return None, params, (
                 f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
             )
+        if background and not tool.background_allowed:
+            return tool, params, f"Error: Tool '{name}' is unavailable to background automation"
 
         cast_params = tool.cast_params(params)
         errors = tool.validate_params(cast_params)
@@ -70,10 +78,10 @@ class ToolRegistry:
             )
         return tool, cast_params, None
 
-    async def execute(self, name: str, params: dict[str, Any]) -> Any:
+    async def execute(self, name: str, params: dict[str, Any], *, background: bool = False) -> Any:
         """Execute a tool by name with given parameters."""
         _HINT = "\n\n[Analyze the error above and try a different approach.]"
-        tool, params, error = self.prepare_call(name, params)
+        tool, params, error = self.prepare_call(name, params, background=background)
         if error:
             return error + _HINT
 

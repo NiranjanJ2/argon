@@ -18,3 +18,23 @@ import pytest
 @pytest.fixture(autouse=True)
 def _isolate_argon_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("ARGON_HOME", str(tmp_path_factory.mktemp("argon-home")))
+
+
+@pytest.fixture(autouse=True)
+def _reset_process_caches():
+    """Drop the process-wide caches between tests.
+
+    Both are keyed by workspace and so *usually* isolate themselves, which is
+    worse than not isolating at all: a Classroom read cached under one test's
+    path made a later test pass or fail depending on the order it ran in. The
+    operational store also holds a per-thread connection that has to be dropped
+    when ARGON_HOME moves.
+    """
+    from argon import commitments
+    from argon.core import store
+
+    commitments.invalidate()
+    store.reset_for_tests()
+    yield
+    commitments.invalidate()
+    store.reset_for_tests()

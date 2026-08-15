@@ -81,6 +81,10 @@ def google_tools(workspace: Path) -> list[Tool]:
         GetCoursesTool,
         GetCourseStreamTool,
     )
+    from argon.google.classroom_dispositions import (
+        IgnoreClassroomAssignmentTool,
+        RestoreClassroomAssignmentTool,
+    )
     from argon.google.drive import DriveTool
     from argon.google.gmail import GmailTool
 
@@ -89,6 +93,7 @@ def google_tools(workspace: Path) -> list[Tool]:
         UpdateCalendarEventTool, DeleteCalendarEventTool, ListCalendarsTool,
         GetCoursesTool, GetCourseAssignmentsTool, GetAllAssignmentsTool,
         GetAssignmentInfoTool, GetCourseStreamTool,
+        IgnoreClassroomAssignmentTool, RestoreClassroomAssignmentTool,
         DriveTool, GmailTool,
     ]
     return [tool_type(workspace) for tool_type in tool_types]

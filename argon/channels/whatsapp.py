@@ -26,7 +26,7 @@ import httpx
 from loguru import logger
 from pydantic import Field
 
-from argon.channels.base import BaseChannel
+from argon.channels.base import BaseChannel, ChannelSendError
 from argon.config import Base
 from argon.core.bus import MessageBus, OutboundMessage
 
@@ -143,15 +143,19 @@ class WhatsAppChannel(BaseChannel):
             self._http = None
 
     async def send(self, msg: OutboundMessage) -> None:
+        """Send via the local bridge.
+
+        Raises :class:`ChannelSendError` when the message did not go out — the
+        dispatcher turns that into a retry and, for a tracked promise, into an
+        honest "not delivered" instead of a silent one.
+        """
         if self._http is None:
-            logger.warning("WhatsApp: not running — cannot send.")
-            return
+            raise ChannelSendError("WhatsApp bridge is not running")
 
         # Resolve destination: use chat_id from the message (the sender's @c.us id)
         to = msg.chat_id
         if not to:
-            logger.warning("WhatsApp: outbound message has no chat_id — dropped.")
-            return
+            raise ChannelSendError("outbound WhatsApp message has no chat_id")
 
         content = msg.content or ""
         if not content:
@@ -163,10 +167,12 @@ class WhatsAppChannel(BaseChannel):
                 f"http://127.0.0.1:{port}/send",
                 json={"to": to, "body": content},
             )
-            if resp.status_code != 200:
-                logger.warning("WhatsApp bridge /send returned {}: {}", resp.status_code, resp.text)
         except Exception as e:
-            logger.error("WhatsApp send failed: {}", e)
+            raise ChannelSendError(f"WhatsApp send failed: {e}") from e
+        if resp.status_code != 200:
+            raise ChannelSendError(
+                f"WhatsApp bridge /send returned {resp.status_code}: {resp.text}"
+            )
 
     # ── allow_from override (strips @c.us suffix) ─────────────────────────────
 

@@ -72,7 +72,9 @@ class TestUnscheduled:
 
 
 class TestTheGateGoesQuiet:
-    def test_no_idle_nudge_when_everything_is_scheduled(self, tmp_path, monkeypatch):
+    def test_a_scheduled_commitment_is_material_for_the_secretary_brief(
+        self, tmp_path, monkeypatch
+    ):
         from argon.services import agenda
         from argon.services.reminder import ReminderService
 
@@ -87,7 +89,7 @@ class TestTheGateGoesQuiet:
         monkeypatch.setattr(agenda, "upcoming", lambda ws: [_entry("Start Math homework")])
 
         assert svc.pending_task_count() == 0
-        assert svc.has_material() is False
+        assert svc.has_material() is True
 
     def test_unscheduled_work_still_earns_one(self, tmp_path, monkeypatch):
         from argon.services import agenda

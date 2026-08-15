@@ -26,9 +26,13 @@ class ChannelManager:
     - Route outbound messages
     """
 
-    def __init__(self, config: Config, bus: MessageBus):
+    def __init__(self, config: Config, bus: MessageBus, outbox: Any | None = None):
         self.config = config
         self.bus = bus
+        # The record of what Argon promised to deliver. The dispatcher is the
+        # only place that learns whether a send really resolved, so it is the
+        # only place that may say so. See argon/core/outbox.py.
+        self.outbox = outbox
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
 
@@ -179,9 +183,11 @@ class ChannelManager:
 
                 channel = self.channels.get(msg.channel)
                 if channel:
-                    await self._send_with_retry(channel, msg)
+                    ok, error = await self._send_with_retry(channel, msg)
+                    self._acknowledge(msg, ok, error)
                 else:
                     logger.warning("Unknown channel: {}", msg.channel)
+                    self._acknowledge(msg, False, f"unknown channel: {msg.channel}")
 
             except asyncio.TimeoutError:
                 continue
@@ -246,9 +252,29 @@ class ChannelManager:
         )
         return merged, non_matching
 
-    async def _send_with_retry(self, channel: BaseChannel, msg: OutboundMessage) -> None:
+    def _acknowledge(self, msg: OutboundMessage, ok: bool, error: str | None) -> None:
+        """Tell the outbox what really happened to a tracked message.
+
+        Terminal send failures used to end at a `logger.error` here, so cron and
+        the check-in ledger both recorded success for messages that never left
+        the machine.
+        """
+        from argon.core.outbox import ACK_KEY
+
+        key = (msg.metadata or {}).get(ACK_KEY)
+        if not key or self.outbox is None:
+            return
+        try:
+            self.outbox.ack(key, ok, error)
+        except Exception:  # noqa: BLE001 — an ack must never kill the dispatcher
+            logger.exception("Could not acknowledge outbox delivery {}", key)
+
+    async def _send_with_retry(
+        self, channel: BaseChannel, msg: OutboundMessage
+    ) -> tuple[bool, str | None]:
         """Send a message with retry on failure using exponential backoff.
 
+        Returns whether the send actually resolved, and why not if it did not.
         Note: CancelledError is re-raised to allow graceful shutdown.
         """
         max_attempts = max(self.config.channels.send_max_retries, 1)
@@ -256,7 +282,7 @@ class ChannelManager:
         for attempt in range(max_attempts):
             try:
                 await self._send_once(channel, msg)
-                return  # Send succeeded
+                return True, None
             except asyncio.CancelledError:
                 raise  # Propagate cancellation for graceful shutdown
             except Exception as e:
@@ -265,7 +291,7 @@ class ChannelManager:
                         "Failed to send to {} after {} attempts: {} - {}",
                         msg.channel, max_attempts, type(e).__name__, e
                     )
-                    return
+                    return False, f"{type(e).__name__}: {e}"
                 delay = _SEND_RETRY_DELAYS[min(attempt, len(_SEND_RETRY_DELAYS) - 1)]
                 logger.warning(
                     "Send to {} failed (attempt {}/{}): {}, retrying in {}s",
@@ -275,6 +301,7 @@ class ChannelManager:
                     await asyncio.sleep(delay)
                 except asyncio.CancelledError:
                     raise  # Propagate cancellation during sleep
+        return False, "exhausted retries"
 
     def get_channel(self, name: str) -> BaseChannel | None:
         """Get a channel by name."""

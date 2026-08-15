@@ -15,6 +15,7 @@ import pytest
 
 from argon.core import journal as journal_mod
 from argon.core.journal import Fact, Journal, parse_facts, prune, render_facts
+from argon.core.threads import Threads
 
 
 @pytest.fixture(autouse=True)
@@ -220,6 +221,50 @@ async def test_a_bogus_expiry_is_ignored_not_fatal(tmp_path):
     await journal_mod.consolidate_day(j, provider, "m", "2026-08-01")
 
     assert Journal(tmp_path).facts()[0].until is None
+
+
+async def test_consolidation_rejects_relative_day_facts(tmp_path):
+    j = _journal(tmp_path)
+    (j.days / "2026-08-01.md").write_text("- 14:00 [said] rest day\n")
+    provider = _Provider({"keep": [{"fact": "Tomorrow is a rest day."}]})
+
+    added, _ = await journal_mod.consolidate_day(j, provider, "m", "2026-08-01")
+
+    assert added == 0
+    assert Journal(tmp_path).facts() == []
+
+
+async def test_nightly_thread_entries_keep_the_day_being_consolidated(tmp_path, monkeypatch):
+    monkeypatch.setattr(journal_mod.clock, "today_key", lambda *a, **k: "2026-08-12")
+    j = _journal(tmp_path)
+    (j.days / "2026-08-11.md").write_text("- 14:00 [said] Petoi update\n")
+    provider = _Provider({"keep": [], "threads": [{
+        "name": "Petoi robot", "entry": "Ordered the kit", "aliases": ["petoi"],
+    }]})
+
+    await journal_mod.consolidate_day(j, provider, "m", "2026-08-11")
+
+    thread = Threads(tmp_path).get("Petoi robot")
+    assert thread.first_seen == "2026-08-11"
+    assert thread.last_touched == "2026-08-11"
+    assert thread.log == ["- 2026-08-11 — Ordered the kit"]
+
+
+async def test_nightly_thread_reuses_an_existing_alias(tmp_path, monkeypatch):
+    monkeypatch.setattr(journal_mod.clock, "today_key", lambda *a, **k: "2026-08-12")
+    j = _journal(tmp_path)
+    Threads(tmp_path).note("Chemistry", "Read chapter one", aliases=["chem"])
+    (j.days / "2026-08-11.md").write_text("- 14:00 [said] Chem update\n")
+    provider = _Provider({"keep": [], "threads": [{
+        "name": "AP Chemistry", "entry": "Started the lab", "aliases": ["chem"],
+    }]})
+
+    await journal_mod.consolidate_day(j, provider, "m", "2026-08-11")
+
+    threads = Threads(tmp_path).all()
+    assert len(threads) == 1
+    assert threads[0].name == "Chemistry"
+    assert "AP Chemistry" in threads[0].aliases
 
 
 def test_the_legacy_history_dump_is_archived_not_deleted(tmp_path):

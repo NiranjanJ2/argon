@@ -26,33 +26,44 @@ session state at all.
 
 from __future__ import annotations
 
-import json
+import threading
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 from argon.clock import now as _now
 from argon.clock import today_key as _today_key
+from argon.core import store
 
 Mode = Literal["idle", "working", "napping", "lock_in", "done"]
 
 #: Modes that mean "something is in flight". The rest are resting states.
 SESSION_MODES = ("working", "lock_in")
 
+#: The document holding today's state. See argon/core/store.py.
+STATE_DOC = "daily_state"
+
+_STATE_LOCK = threading.RLock()
+
 
 class DailyState:
-    """Persisted daily session state."""
+    """Persisted daily session state.
+
+    This was a JSON file read whole, edited, and written back with no lock and
+    no atomic replace — and every reader turned a malformed file into defaults.
+    A torn write therefore did not read as a fault; it read as an idle day with
+    nothing in it. It is now one transactional document, and unreadable state
+    raises rather than quietly becoming an empty day.
+    """
 
     def __init__(self, workspace: Path) -> None:
-        self._path = workspace / "daily" / "state.json"
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._workspace = workspace
+        self._lock = _STATE_LOCK
 
     def _load(self) -> dict[str, Any]:
-        if not self._path.exists():
-            return self._defaults()
-        try:
-            data = json.loads(self._path.read_text())
-        except (OSError, json.JSONDecodeError):
+        data = store.get_doc(STATE_DOC)
+        if not isinstance(data, dict):
             return self._defaults()
         # A new day drops everything, the running session included. This is the
         # day boundary that Google Tasks metadata never had.
@@ -64,7 +75,6 @@ class DailyState:
         return {
             "date": _today_key(),
             "mode": "idle",
-            "home_arrival": None,
             "session": None,
             "nap_start": None,
             "onboarding_done": False,
@@ -73,7 +83,21 @@ class DailyState:
         }
 
     def _save(self, data: dict[str, Any]) -> None:
-        self._path.write_text(json.dumps(data, indent=2))
+        store.put_doc(STATE_DOC, data)
+
+    @contextmanager
+    def _edit(self) -> Iterator[dict[str, Any]]:
+        """Read-modify-write today's state as one transaction.
+
+        Several mutators used to load, change one key and save outside the
+        lock, so a Flask API request and an asyncio turn could each write a
+        document the other had already superseded.
+        """
+        with self._lock, store.edit_doc(STATE_DOC, self._defaults()) as data:
+            if data.get("date") != _today_key():
+                data.clear()
+                data.update(self._defaults())
+            yield data
 
     # ------------------------------------------------------------------
     # The session — one record; everything else is a view of it
@@ -108,7 +132,14 @@ class DailyState:
         Starting a second task without finishing the first is a correction, not
         two parallel sessions — he has one attention.
         """
-        data = self._load()
+        with self._edit() as data:
+            session = self._begin(data, kind=kind, task_id=task_id, title=title)
+        return dict(session)
+
+    @staticmethod
+    def _begin(
+        data: dict[str, Any], *, kind: str, task_id: str | None, title: str | None
+    ) -> dict[str, Any]:
         now_iso = _now().isoformat()
         session = {
             "kind": kind if kind in SESSION_MODES else "working",
@@ -120,17 +151,40 @@ class DailyState:
         data["mode"] = session["kind"]
         data["nap_start"] = None
         data.setdefault("ready_to_work_times", []).append(now_iso)
-        self._save(data)
-        return dict(session)
+        return session
 
     def end_session(self) -> dict[str, Any] | None:
         """Finish the session and fall back to idle. Returns what ended."""
-        data = self._load()
+        with self._edit() as data:
+            ended = self._clear_session(data)
+        return ended
+
+    def end_session_if_task(
+        self, task_id: str, *, title: str | None = None
+    ) -> dict[str, Any] | None:
+        """End the active session only when it still belongs to ``task_id``.
+
+        The check and the write are one transaction, so a stale dashboard
+        request cannot end a session that another request just started.
+        ``title`` supports state written before task ids were stored.
+        """
+        with self._edit() as data:
+            session = data.get("session")
+            matches_task = session and session.get("task_id") == task_id
+            matches_legacy_title = (
+                session and not session.get("task_id") and title and session.get("title") == title
+            )
+            if not matches_task and not matches_legacy_title:
+                return None
+            ended = self._clear_session(data)
+        return ended
+
+    def _clear_session(self, data: dict[str, Any]) -> dict[str, Any] | None:
+        """End whatever is running. Caller owns the transaction."""
         session = data.get("session")
         data["session"] = None
         if data.get("mode") in SESSION_MODES:
             data["mode"] = "idle"
-        self._save(data)
         if not session:
             return None
         return {**session, "elapsed_min": self._elapsed_min(session)}
@@ -161,54 +215,45 @@ class DailyState:
         set without settling that question. "working" with nothing running is
         the state that muted check-ins for an entire afternoon.
         """
-        if mode in SESSION_MODES:
-            data = self._load()
-            if session := data.get("session"):
-                # Already going: keep the elapsed time and the task, just move
-                # between working and lock_in.
-                session["kind"] = mode
-                data["mode"] = mode
-                data["nap_start"] = None
-                self._save(data)
-            else:
-                self.start_session(kind=mode)
-            return
-
-        self.end_session()
-        data = self._load()
-        data["mode"] = mode
-        data["nap_start"] = _now().isoformat() if mode == "napping" else None
-        self._save(data)
-
-    def set_home_arrival(self) -> None:
-        data = self._load()
-        data["home_arrival"] = _now().isoformat()
-        self._save(data)
+        with self._edit() as data:
+            if mode in SESSION_MODES:
+                if session := data.get("session"):
+                    # Already going: keep the elapsed time and the task, just
+                    # move between working and lock_in.
+                    session["kind"] = mode
+                    data["mode"] = mode
+                    data["nap_start"] = None
+                else:
+                    self._begin(data, kind=mode, task_id=None, title=None)
+                return
+            self._clear_session(data)
+            data["mode"] = mode
+            data["nap_start"] = _now().isoformat() if mode == "napping" else None
 
     def set_current_task(self, task: str | None) -> None:
         """Kept for callers that only have a title. Prefer ``start_session``."""
-        if task is None:
-            self.end_session()
-            return
-        session = self._load().get("session") or {}
-        self.start_session(
-            kind=session.get("kind", "working"),
-            task_id=session.get("task_id"),
-            title=task,
-        )
+        with self._edit() as data:
+            if task is None:
+                self._clear_session(data)
+                return
+            session = data.get("session") or {}
+            self._begin(
+                data,
+                kind=session.get("kind", "working"),
+                task_id=session.get("task_id"),
+                title=task,
+            )
 
     def mark_onboarding_done(self) -> None:
-        data = self._load()
-        data["onboarding_done"] = True
-        self._save(data)
+        with self._edit() as data:
+            data["onboarding_done"] = True
 
     def add_note(self, note: str) -> None:
-        data = self._load()
-        data.setdefault("notes", []).append({
-            "time": _now().isoformat(),
-            "text": note,
-        })
-        self._save(data)
+        with self._edit() as data:
+            data.setdefault("notes", []).append({
+                "time": _now().isoformat(),
+                "text": note,
+            })
 
     def get_mode(self) -> Mode:
         return self._load().get("mode", "idle")

@@ -101,18 +101,15 @@ class ApiConfig(Base):
 class HeartbeatConfig(Base):
     """Background turns: the heartbeat and every check-in.
 
-    ``model`` was declared twice here, so the intended "run background chatter
-    on the cheap 20b" default was silently dead — the second declaration won and
-    background turns have always used the interactive model. Leaving it that
-    way on purpose: the 4 PM brief is the most important message Argon sends,
-    and it is a background turn. Set this only to deliberately go cheaper.
+    The after-school brief is one of the most important messages Argon sends,
+    so background turns use the same 120b model by default. Set this only to
+    deliberately select a different background model.
     """
 
     enabled: bool = True
     interval_s: int = 30 * 60
     keep_recent_messages: int = 8
-    #: None means "whatever agents.defaults says".
-    model: str | None = None
+    model: str | None = "openai/gpt-oss-120b"
     provider: str | None = None
 
 
@@ -120,8 +117,8 @@ class CheckInConfig(Base):
     """Unprompted messages — how often Argon may start a conversation."""
 
     enabled: bool = True
-    max_per_day: int = 8
-    min_gap_minutes: int = 25
+    max_per_day: int = 3
+    min_gap_minutes: int = 60
     quiet_start_hour: int = 23
     quiet_end_hour: int = 7
     #: Before this hour Argon may still deliver things Niranjan scheduled — a
@@ -258,6 +255,12 @@ def _migrate(data: dict[str, Any]) -> dict[str, Any]:
     # workspace is no longer configurable — state always lives in ~/.argon.
     defaults.pop("workspace", None)
     defaults.pop("memoryWindow", None)
+
+    # 0.167 was the shipped ten-minute reset. Preserve an explicit 0 (never
+    # reset), but repair the historical default so a coffee break is not a new
+    # conversation on migrated installs.
+    if defaults.get("idleSessionResetHours") == 0.167:
+        defaults["idleSessionResetHours"] = 14.0
 
     # A cron session reached 14MB because this was pinned to 0 and nothing else
     # bounded raw history. Anyone still carrying the old 0 gets the new default.

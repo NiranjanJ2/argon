@@ -12,7 +12,16 @@ as though Niranjan had said them.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+
+from argon.core.hook import AgentHookContext
 from argon.core.journal import UNDATED, Fact, Journal, describe_tool, parse_facts
+from argon.core.loop import _LoopHook
+from argon.providers.base import ToolCallRequest
+from argon.tools.base import Tool, ToolResult
+from argon.tools.registry import ToolRegistry
 
 
 class TestDescribeTool:
@@ -118,6 +127,98 @@ class TestJournalWriting:
         journal = Journal(tmp_path)
         journal.note("   ")
         assert journal.read_day() == ""
+
+
+@pytest.mark.asyncio
+async def test_a_failed_mutation_never_enters_the_journal_as_done():
+    wrote = []
+    loop = SimpleNamespace(_journal_tool=lambda name, args: wrote.append((name, args)))
+    hook = _LoopHook(loop)
+    context = AgentHookContext(
+        iteration=0,
+        messages=[],
+        tool_calls=[
+            ToolCallRequest(id="start", name="start_task", arguments={"task_id": "a"}),
+            ToolCallRequest(id="finish", name="complete_task", arguments={"task_id": "a"}),
+        ],
+        tool_events=[
+            {"name": "start_task", "status": "ok", "detail": "Started"},
+            {"name": "complete_task", "status": "error", "detail": "network down"},
+        ],
+    )
+
+    await hook.after_iteration(context)
+
+    assert wrote == [("start_task", {"task_id": "a"})]
+
+
+@pytest.mark.asyncio
+async def test_a_semantic_mutation_refusal_is_classified_as_an_error_before_journalling():
+    """A refusal changes no state even when its human text is not an exception."""
+    from argon.core.runner import AgentRunner, AgentRunSpec
+
+    class RefuseFocus(Tool):
+        @property
+        def name(self):
+            return "set_focus_mode"
+
+        @property
+        def description(self):
+            return "test only"
+
+        @property
+        def parameters(self):
+            return {"type": "object", "properties": {}, "required": []}
+
+        async def execute(self, **_kwargs):
+            return ToolResult("Not applied: confirmation required.", success=False)
+
+    registry = ToolRegistry()
+    registry.register(RefuseFocus())
+    spec = AgentRunSpec(
+        initial_messages=[], tools=registry, model="test", max_iterations=1,
+        max_tool_result_chars=1000,
+    )
+    _, event, error = await AgentRunner(object())._run_tool(
+        spec, ToolCallRequest(id="focus", name="set_focus_mode", arguments={}), {}
+    )
+
+    assert error is None
+    assert event["status"] == "error"
+
+
+def test_automation_speech_is_not_attributed_to_niranjan():
+    wrote = []
+    loop = object.__new__(__import__("argon.core.loop", fromlist=["AgentLoop"]).AgentLoop)
+    loop._journal_note = lambda text, *, kind: wrote.append((kind, text))
+
+    loop._journal_said("[Scheduled Task] Timer finished.", "cron:abc", origin="cron")
+
+    assert wrote == []
+
+
+def test_automation_does_not_refresh_the_unsolicited_delivery_target(monkeypatch, tmp_path):
+    from argon.config import Config
+    from argon.core import target
+    from argon.core.bus import MessageBus
+    from argon.core.loop import AgentLoop
+    from argon.providers.base import GenerationSettings, LLMResponse
+
+    class Provider:
+        generation = GenerationSettings()
+
+        async def chat_with_retry(self, **_kwargs):
+            return LLMResponse(content="done")
+
+    remembered = []
+    monkeypatch.setenv("ARGON_HOME", str(tmp_path))
+    monkeypatch.setattr(target, "remember", lambda *args: remembered.append(args))
+    loop = AgentLoop(Config(google={"enabled": False}), MessageBus(), Provider(), register_tools=False)
+
+    import asyncio
+    asyncio.run(loop.process_direct("timer fired", origin="cron", background=True))
+
+    assert remembered == []
 
 
 class TestUndatedFacts:

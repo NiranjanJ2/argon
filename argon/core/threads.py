@@ -260,15 +260,17 @@ class Threads:
         summary: str | None = None,
         status: str | None = None,
         aliases: list[str] | None = None,
+        day: str | None = None,
     ) -> Thread:
         """Create or update a thread. Every call counts as touching it."""
-        today = clock.today_key()
+        today = day or clock.today_key()
         thread = self.get(name) or Thread(
             slug=slugify(name), name=name.strip(), first_seen=today
         )
-        if summary is not None:
+        newest = not thread.last_touched or today >= thread.last_touched
+        if summary is not None and newest:
             thread.summary = summary.strip()
-        if status in STATUSES:
+        if status in STATUSES and newest:
             thread.status = status
         for alias in aliases or []:
             if alias.strip() and alias.strip().lower() != thread.name.lower():
@@ -276,11 +278,11 @@ class Threads:
                     thread.aliases.append(alias.strip())
         if entry.strip():
             line = f"- {today} — {entry.strip()}"
-            if not thread.log or thread.log[-1] != line:
+            if line not in thread.log:
                 thread.log.append(line)
-        thread.last_touched = today
-        if not thread.first_seen:
-            thread.first_seen = today
+                thread.log.sort(key=lambda item: item[2:12])
+        thread.last_touched = max(filter(None, (thread.last_touched, today)))
+        thread.first_seen = min(filter(None, (thread.first_seen, today)))
         return self.save(thread)
 
     # -- retrieval ---------------------------------------------------------

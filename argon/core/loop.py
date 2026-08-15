@@ -6,14 +6,14 @@ import asyncio
 import json
 import os
 import time
-from contextlib import AsyncExitStack, nullcontext
+from contextlib import AsyncExitStack, asynccontextmanager, nullcontext
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
 from argon.config import Config
-from argon.core import target
+from argon.core import target, turn
 from argon.core.bus import InboundMessage, MessageBus, OutboundMessage
 from argon.core.commands import CommandContext, CommandRouter, register_builtin_commands
 from argon.core.context import ContextBuilder
@@ -22,6 +22,7 @@ from argon.core.memory import MemoryConsolidator
 from argon.core.runner import AgentRunner, AgentRunSpec
 from argon.core.session import Session, SessionManager
 from argon.core.skills import BUILTIN_SKILLS_DIR
+from argon.core.store import StoreCorrupt
 from argon.providers.base import LLMProvider
 from argon.tools.cron import CronTool
 from argon.tools.fs import ReadFileTool
@@ -93,8 +94,6 @@ class _LoopHook(AgentHook):
         for tc in context.tool_calls:
             args_str = json.dumps(tc.arguments, ensure_ascii=False)
             logger.info("Tool call: {}({})", tc.name, args_str[:200])
-            self._loop._journal_tool(tc.name, tc.arguments)
-        self._loop._set_tool_context(self._channel, self._chat_id, self._message_id)
 
     async def after_iteration(self, context: AgentHookContext) -> None:
         u = context.usage or {}
@@ -104,6 +103,9 @@ class _LoopHook(AgentHook):
             u.get("completion_tokens", 0),
             u.get("cached_tokens", 0),
         )
+        for call, event in zip(context.tool_calls, context.tool_events):
+            if event.get("status") == "ok":
+                self._loop._journal_tool(call.name, call.arguments)
 
     def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
         return self._loop._strip_think(content)
@@ -370,13 +372,6 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
-        """Update context for all tools that need routing info."""
-        for name in ("message", "spawn", "cron"):
-            if tool := self.tools.get(name):
-                if hasattr(tool, "set_context"):
-                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
-
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
         """Remove <think>…</think> blocks that some models embed in content."""
@@ -407,6 +402,7 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         message_id: str | None = None,
+        background: bool = False,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop.
 
@@ -451,6 +447,7 @@ class AgentLoop:
             provider_retry_mode=self.provider_retry_mode,
             progress_callback=on_progress,
             checkpoint_callback=_checkpoint,
+            background=background,
         ))
         self._last_usage = result.usage
         if result.stop_reason == "max_iterations":
@@ -491,11 +488,24 @@ class AgentLoop:
             self._active_tasks.setdefault(msg.session_key, []).append(task)
             task.add_done_callback(lambda t, k=msg.session_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
 
-    async def _dispatch(self, msg: InboundMessage) -> None:
-        """Process a message: per-session serial, cross-session concurrent."""
-        lock = self._session_locks.setdefault(msg.session_key, asyncio.Lock())
+    @asynccontextmanager
+    async def _submitted(self, session_key: str):
+        """The one gate every turn passes through.
+
+        Per-session serial, cross-session concurrent. The HTTP bridge used to
+        call ``process_direct``, which went straight to ``_process_message`` and
+        skipped this entirely — so a `/v1/chat` request and a Discord message on
+        the same session could interleave, each saving a session the other had
+        already moved on from.
+        """
+        lock = self._session_locks.setdefault(session_key, asyncio.Lock())
         gate = self._concurrency_gate or nullcontext()
         async with lock, gate:
+            yield
+
+    async def _dispatch(self, msg: InboundMessage) -> None:
+        """Process a message: per-session serial, cross-session concurrent."""
+        async with self._submitted(msg.session_key):
             try:
                 on_stream = on_stream_end = None
                 if msg.metadata.get("_wants_stream"):
@@ -542,6 +552,20 @@ class AgentLoop:
             except asyncio.CancelledError:
                 logger.info("Task cancelled for session {}", msg.session_key)
                 raise
+            except StoreCorrupt as exc:
+                # "Nothing today" and "I cannot read today" are different
+                # sentences, and the second one is the whole reason the store
+                # raises instead of returning an empty day. Say it.
+                logger.exception("Operational store unreadable for {}", msg.session_key)
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=(
+                        "My records are unreadable right now, so I can't tell you "
+                        f"what's on today without guessing ({exc}). Run "
+                        "`argon doctor` — until it's fixed, treat anything I say "
+                        "about your schedule as unverified."
+                    ),
+                ))
             except Exception:
                 logger.exception("Error processing message for session {}", msg.session_key)
                 await self.bus.publish_outbound(OutboundMessage(
@@ -633,14 +657,14 @@ class AgentLoop:
         if line := describe_tool(name, arguments):
             self._journal_note(line, kind="did")
 
-    def _journal_said(self, text: str, key: str) -> None:
+    def _journal_said(self, text: str, key: str, *, origin: str = "user") -> None:
         """Record what Niranjan actually said.
 
         Skips the check-in session: those prompts are written by Argon itself
         ("It's 9:51 PM and free time…"), and journalling them would feed its own
         nudges back as though they were his words.
         """
-        if key == CHECK_IN_SESSION or not text.strip() or text.startswith("/"):
+        if origin != "user" or key == CHECK_IN_SESSION or not text.strip() or text.startswith("/"):
             return
         self._journal_note(text, kind="said")
 
@@ -651,67 +675,103 @@ class AgentLoop:
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
+        *,
+        origin: str = "user",
+        background: bool = False,
     ) -> OutboundMessage | None:
-        """Process a single inbound message and return the response."""
+        """Process a single inbound message and return the response.
+
+        Everything below runs inside one :class:`~argon.core.turn.TurnContext`.
+        Tools read the destination from there rather than from fields the next
+        concurrent turn is free to overwrite.
+        """
         # System messages: parse origin from chat_id ("channel:chat_id")
         if msg.channel == "system":
             channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
                                 else ("cli", msg.chat_id))
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
-            session = self.sessions.get_or_create(key)
-            if self._restore_runtime_checkpoint(session):
-                self.sessions.save(session)
-            await self.memory_consolidator.maybe_consolidate_by_tokens(session)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
-            history = session.get_history(max_messages=0)
-            current_role = "assistant" if msg.sender_id == "subagent" else "user"
-            messages = self.context.build_messages(
-                history=history,
-                current_message=msg.content, channel=channel, chat_id=chat_id,
-                current_role=current_role,
-            )
-            final_content, _, all_msgs = await self._run_agent_loop(
-                messages, session=session, channel=channel, chat_id=chat_id,
+            with turn.use(turn.TurnContext(
+                channel=channel, chat_id=chat_id, session_key=key,
                 message_id=msg.metadata.get("message_id"),
-            )
-            self._save_turn(session, all_msgs, 1 + len(history))
-            self._clear_runtime_checkpoint(session)
-            self.sessions.save(session)
-            self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
-            return OutboundMessage(channel=channel, chat_id=chat_id,
-                                  content=final_content or "Background task completed.")
+                origin="system", user_text="", background=background,
+            )):
+                return await self._process_system_message(msg, channel, chat_id, key)
 
+        key = session_key or msg.session_key
+        ctx = turn.TurnContext(
+            channel=msg.channel, chat_id=msg.chat_id, session_key=key,
+            message_id=msg.metadata.get("message_id"),
+            origin=origin, user_text=msg.content if origin == "user" else "",
+            background=background,
+        )
+        with turn.use(ctx):
+            return await self._process_user_message(
+                msg, ctx, key,
+                on_progress=on_progress, on_stream=on_stream, on_stream_end=on_stream_end,
+                origin=origin, background=background,
+            )
+
+    async def _process_system_message(
+        self, msg: InboundMessage, channel: str, chat_id: str, key: str
+    ) -> OutboundMessage:
+        """A turn Argon started for itself (subagent results, internal events)."""
+        session = self.sessions.get_or_create(key)
+        if self._restore_runtime_checkpoint(session):
+            self.sessions.save(session)
+        await self.memory_consolidator.maybe_consolidate_by_tokens(session)
+        history = session.get_history(max_messages=0)
+        current_role = "assistant" if msg.sender_id == "subagent" else "user"
+        messages = self.context.build_messages(
+            history=history,
+            current_message=msg.content, channel=channel, chat_id=chat_id,
+            current_role=current_role,
+        )
+        final_content, _, all_msgs = await self._run_agent_loop(
+            messages, session=session, channel=channel, chat_id=chat_id,
+            message_id=msg.metadata.get("message_id"),
+        )
+        self._save_turn(session, all_msgs, 1 + len(history))
+        self._clear_runtime_checkpoint(session)
+        self.sessions.save(session)
+        self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+        return OutboundMessage(channel=channel, chat_id=chat_id,
+                               content=final_content or "Background task completed.")
+
+    async def _process_user_message(
+        self,
+        msg: InboundMessage,
+        ctx: turn.TurnContext,
+        key: str,
+        on_progress: Callable[[str], Awaitable[None]] | None = None,
+        on_stream: Callable[[str], Awaitable[None]] | None = None,
+        on_stream_end: Callable[..., Awaitable[None]] | None = None,
+        *,
+        origin: str = "user",
+        background: bool = False,
+    ) -> OutboundMessage | None:
+        """An ordinary turn: a message from Niranjan, or one Argon scheduled."""
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         # Where to send anything Niranjan did not ask for. Recorded here rather
         # than inferred from session files, which get archived and rotated.
-        target.remember(self.workspace, msg.channel, msg.chat_id)
+        if origin == "user":
+            target.remember(self.workspace, msg.channel, msg.chat_id)
 
-        key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
         if self._restore_runtime_checkpoint(session):
             self.sessions.save(session)
 
         # Slash commands
         raw = msg.content.strip()
-        ctx = CommandContext(msg=msg, session=session, key=key, raw=raw, loop=self)
-        if result := await self.commands.dispatch(ctx):
+        command_ctx = CommandContext(msg=msg, session=session, key=key, raw=raw, loop=self)
+        if result := await self.commands.dispatch(command_ctx):
             return result
 
         await self._maybe_reset_idle_session(session)
-        self._journal_said(msg.content, key)
+        self._journal_said(msg.content, key, origin=origin)
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
-
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
-        # Any tool that cares about turn boundaries gets told. `message` uses it
-        # to avoid double-sending; `set_focus_mode` uses it to force a question
-        # out to Niranjan before it can block his phone at night.
-        for tool in (self.tools.get(name) for name in self.tools.tool_names):
-            start = getattr(tool, "start_turn", None)
-            if callable(start):
-                start()
 
         history = session.get_history(max_messages=0)
         status_context: str | None = None
@@ -748,6 +808,7 @@ class AgentLoop:
             session=session,
             channel=msg.channel, chat_id=msg.chat_id,
             message_id=msg.metadata.get("message_id"),
+            background=background,
         )
 
         if final_content is None or not final_content.strip():
@@ -772,7 +833,10 @@ class AgentLoop:
         else:
             self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
 
-        if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+        # Did the model already deliver during this turn? Asked of the turn, not
+        # of the shared tool — a concurrent turn used to reset that flag and the
+        # real reply was swallowed as a duplicate.
+        if ctx.said:
             return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
@@ -941,11 +1005,21 @@ class AgentLoop:
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
+        *,
+        origin: str = "user",
+        background: bool = False,
     ) -> OutboundMessage | None:
-        """Process a message directly and return the outbound payload."""
+        """Process a message directly and return the outbound payload.
+
+        Goes through the same submitted-turn gate as a bus message: the HTTP
+        bridge, cron and the check-in loop all arrive here, and they must not be
+        able to interleave with a chat turn on the same session.
+        """
         await self._connect_mcp()
-        msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
-        return await self._process_message(
-            msg, session_key=session_key, on_progress=on_progress,
-            on_stream=on_stream, on_stream_end=on_stream_end,
-        )
+        msg = InboundMessage(channel=channel, sender_id=origin, chat_id=chat_id, content=content)
+        async with self._submitted(session_key):
+            return await self._process_message(
+                msg, session_key=session_key, on_progress=on_progress,
+                on_stream=on_stream, on_stream_end=on_stream_end,
+                origin=origin, background=background,
+            )

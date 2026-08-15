@@ -23,16 +23,13 @@ class TrackThreadTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Record something about an ongoing thing in his life — a project, a "
-            "class, a person, a recurring commitment. Use it the first time he "
-            "mentions one, and again every time there is news. "
-            "'I'm building a quadruped robot' starts a thread; 'got the servos "
-            "calibrated' three weeks later is an entry on it. "
-            "This is what lets you know what he means when he brings something "
-            "up a month from now — a fact in memory says what is true, a thread "
-            "remembers what happened. Give aliases for whatever else he calls "
-            "it. Set status to done or dropped when it ends, so it stops "
-            "showing up as live."
+            "Record a material update to an ongoing operational matter Niranjan "
+            "is explicitly managing over time and is likely to follow up on, such "
+            "as an active project or recurring commitment. Do not create a thread "
+            "for an incidental person, ordinary class mention, hypothetical idea, "
+            "routine conversation topic, or one-off errand. Add an entry only when "
+            "the matter materially changes. Give aliases only for names he actually "
+            "uses. Set status to done or dropped when the matter ends."
         )
 
     @property

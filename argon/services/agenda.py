@@ -284,13 +284,23 @@ _schoolwork: tuple[float, list[dict[str, Any]]] | None = None
 _schoolwork_lock = threading.Lock()
 
 
+def invalidate_schoolwork() -> None:
+    """Drop cached Classroom results after a local ignore/restore decision."""
+    global _schoolwork
+    with _schoolwork_lock:
+        _schoolwork = None
+
+
 def _fetch_schoolwork(workspace: Path, days_ahead: int) -> list[dict[str, Any]]:
     from argon.google.classroom import upcoming_assignments
+    from argon.google.classroom_dispositions import ClassroomDispositionStore
     from argon.google.service import build_google_service
     from argon.utils.helpers import when_label
 
     svc = build_google_service(workspace, "classroom", "v1", "school")
-    assignments, unreadable = upcoming_assignments(svc, days_ahead=days_ahead)
+    assignments, unreadable = upcoming_assignments(
+        svc, days_ahead=days_ahead, dispositions=ClassroomDispositionStore(workspace)
+    )
     if unreadable:
         logger.warning("Classroom courses unreadable: {}", unreadable)
 
@@ -306,10 +316,29 @@ def _fetch_schoolwork(workspace: Path, days_ahead: int) -> list[dict[str, Any]]:
             "course": item.get("course_name") or "",
             "due": due,
             "due_when": when_label(due),
+            "due_precision": item.get("due_precision"),
+            "submission_error": item.get("submission_error"),
             "days_left": (when.date() - clock.now().date()).days if when else None,
         })
     out.sort(key=lambda a: a["due"] or "9999")
-    return _one_per_thing(out)
+    visible = _one_per_thing(out)
+    submission_errors = {
+        str(item["submission_error"]) for item in out if item.get("submission_error")
+    }
+    warnings = [
+        {
+            "kind": "warning",
+            "warning": warning,
+            "title": "Classroom incomplete: {}".format(warning),
+            "course": "",
+            "due": None,
+            "due_when": None,
+            "days_left": None,
+        }
+        for warning in unreadable
+        if not any(error in warning for error in submission_errors)
+    ]
+    return warnings + visible
 
 
 def _one_per_thing(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -376,6 +405,8 @@ def schoolwork(
 
 def describe_assignment(item: dict[str, Any]) -> str:
     """One line for an assignment, with how much runway is left."""
+    if item.get("kind") == "warning":
+        return "Classroom incomplete: {}".format(item.get("warning", "unknown failure"))
     days = item.get("days_left")
     if days is None:
         runway = ""
@@ -386,7 +417,11 @@ def describe_assignment(item: dict[str, Any]) -> str:
     else:
         runway = " — {} days".format(days)
     course = " ({})".format(item["course"]) if item.get("course") else ""
-    return "{}{}{}{}".format(
+    status = (
+        " (submission status unavailable: {})".format(item["submission_error"])
+        if item.get("submission_error") else ""
+    )
+    return "{}{}{}{}{}".format(
         item.get("title", "?"), course,
-        " {}".format(item["due_when"]) if item.get("due_when") else "", runway,
+        " {}".format(item["due_when"]) if item.get("due_when") else "", runway, status,
     )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
 
+from argon.core import turn
 from argon.core.bus import OutboundMessage
 from argon.tools.base import Tool
 
@@ -15,6 +16,12 @@ class MessageTool(Tool):
     wrong — it once passed the literal string "Niranjan" as a Discord chat id and
     crashed the send with ``int('Niranjan')``. Argon has exactly one user, so the
     destination is never the model's decision: it is the conversation in flight.
+
+    "The conversation in flight" was itself stored here, on a tool shared by
+    every session, and rewritten before each batch of tool calls. Two concurrent
+    turns therefore fought over one destination and one "already replied" flag.
+    Both now come from :mod:`argon.core.turn`, which asyncio copies per task, so
+    a Discord turn and an iOS turn cannot see each other's.
     """
 
     def __init__(
@@ -25,39 +32,17 @@ class MessageTool(Tool):
         default_message_id: str | None = None,
     ):
         self._send_callback = send_callback
-        self._channel = default_channel
-        self._chat_id = default_chat_id
-        self._message_id = default_message_id
-        self._sent_in_turn: bool = False
-        self._last_sent: str = ""
-
-    def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
-        self._channel = channel
-        self._chat_id = chat_id
-        self._message_id = message_id
+        self._default_channel = default_channel
+        self._default_chat_id = default_chat_id
+        self._default_message_id = default_message_id
 
     def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[None]]) -> None:
         self._send_callback = callback
 
-    def start_turn(self) -> None:
-        self._sent_in_turn = False
-        self._last_sent = ""
-
-    @property
-    def sent_in_turn(self) -> bool:
-        """Did the model already deliver this turn? Guards double-sends."""
-        return self._sent_in_turn
-
-    @property
-    def last_sent(self) -> str:
-        """What was actually delivered this turn.
-
-        The check-in ledger needs the real text. Recording the placeholder
-        "(sent)" instead meant the model was shown "(sent)" as its own history
-        and could not tell it had already asked — so it asked what Niranjan's
-        plan was nine times in one day, each time slightly reworded.
-        """
-        return self._last_sent
+    def _destination(self) -> tuple[str, str, str | None]:
+        if (ctx := turn.current()) is not None:
+            return ctx.channel, ctx.chat_id, ctx.message_id
+        return self._default_channel, self._default_chat_id, self._default_message_id
 
     @property
     def name(self) -> str:
@@ -94,23 +79,28 @@ class MessageTool(Tool):
     ) -> str:
         from argon.utils.helpers import strip_think
 
-        if not self._channel or not self._chat_id:
+        channel, chat_id, message_id = self._destination()
+        if not channel or not chat_id:
             return "Error: no active conversation to send to"
         if not self._send_callback:
             return "Error: message sending not configured"
 
         body = strip_think(content)
         msg = OutboundMessage(
-            channel=self._channel,
-            chat_id=self._chat_id,
+            channel=channel,
+            chat_id=chat_id,
             content=body,
             media=media or [],
-            metadata={"message_id": self._message_id} if self._message_id else {},
+            metadata={"message_id": message_id} if message_id else {},
         )
         try:
             await self._send_callback(msg)
         except Exception as e:
             return f"Error sending message: {e}"
-        self._sent_in_turn = True
-        self._last_sent = body
+        # Recorded on the turn, not the tool. The check-in ledger needs the real
+        # text: storing the placeholder "(sent)" once meant the model was shown
+        # "(sent)" as its own history, could not tell it had already asked, and
+        # asked what Niranjan's plan was nine times in one day.
+        if (ctx := turn.current()) is not None:
+            ctx.said.append(body)
         return f"Sent{f' with {len(media)} attachment(s)' if media else ''}."

@@ -11,6 +11,20 @@ from loguru import logger
 from argon.core.bus import InboundMessage, MessageBus, OutboundMessage
 
 
+class ChannelSendError(RuntimeError):
+    """A message did not reach the person it was addressed to.
+
+    Every ``send`` implementation used to log its failures and return normally:
+    a Discord client still connecting, a non-numeric chat id, an unfetchable
+    channel, a bridge returning 500. The dispatcher therefore recorded a
+    successful send for every one of them, and once delivery acknowledgement was
+    wired to that signal, "sent" meant "we called a function that returned".
+
+    Raising is what makes the acknowledgement real. Anything that means he did
+    not get the message must come out of ``send`` as this.
+    """
+
+
 class BaseChannel(ABC):
     """
     Abstract base class for chat channel implementations.

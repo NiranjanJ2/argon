@@ -4,6 +4,7 @@ from contextvars import ContextVar
 from datetime import datetime
 from typing import Any
 
+from argon.core import turn
 from argon.services.cron import CronJobState, CronSchedule, CronService
 from argon.tools.base import Tool
 
@@ -14,14 +15,18 @@ class CronTool(Tool):
     def __init__(self, cron_service: CronService, default_timezone: str = "UTC"):
         self._cron = cron_service
         self._default_timezone = default_timezone
-        self._channel = ""
-        self._chat_id = ""
         self._in_cron_context: ContextVar[bool] = ContextVar("cron_in_context", default=False)
 
-    def set_context(self, channel: str, chat_id: str) -> None:
-        """Set the current session context for delivery."""
-        self._channel = channel
-        self._chat_id = chat_id
+    @staticmethod
+    def _destination() -> tuple[str, str]:
+        """Where a job scheduled in this turn should deliver.
+
+        Read from the turn rather than remembered on the tool: this instance is
+        shared by every session, so a concurrent turn used to be able to point a
+        scheduled reminder at someone else's conversation.
+        """
+        ctx = turn.current()
+        return (ctx.channel, ctx.chat_id) if ctx else ("", "")
 
     def set_cron_context(self, active: bool):
         """Mark whether the tool is executing inside a cron job callback."""
@@ -73,7 +78,7 @@ class CronTool(Tool):
                     "enum": ["add", "list", "remove"],
                     "description": "Action to perform",
                 },
-                "message": {"type": "string", "description": "Instruction for the agent to execute when the job triggers (e.g., 'Send a reminder to WeChat: xxx' or 'Check system status and report')"},
+                "message": {"type": "string", "description": "For a one-time 'at' reminder: the EXACT text Niranjan will receive, written as you would text it — it is delivered verbatim, with no further model call. For recurring jobs: the instruction to execute when it triggers (e.g. 'Check system status and report')."},
                 "every_seconds": {
                     "type": "integer",
                     "description": "Interval in seconds (for recurring tasks)",
@@ -139,7 +144,8 @@ class CronTool(Tool):
     ) -> str:
         if not message:
             return "Error: message is required for add"
-        if not self._channel or not self._chat_id:
+        channel, chat_id = self._destination()
+        if not channel or not chat_id:
             return "Error: no session context (channel/chat_id)"
         if tz and not cron_expr:
             return "Error: tz can only be used with cron_expr"
@@ -173,14 +179,19 @@ class CronTool(Tool):
         else:
             return "Error: either every_seconds, cron_expr, or at is required"
 
+        # A one-shot reminder he asked for is not a prompt to be re-improvised at
+        # fire time. Its text is fixed now, delivered verbatim, and no second
+        # model gets a vote on whether it goes out. Recurring jobs stay agent
+        # turns, because "check X and tell me" genuinely needs a turn.
         job = self._cron.add_job(
             name=message[:30],
             schedule=schedule,
             message=message,
             deliver=deliver,
-            channel=self._channel,
-            to=self._chat_id,
+            channel=channel,
+            to=chat_id,
             delete_after_run=delete_after,
+            kind="reminder" if (schedule.kind == "at" and deliver) else "agent_turn",
         )
         on_calendar = self._mirror_to_calendar(message, schedule, deliver)
         return f"Created job '{job.name}' (id: {job.id}){on_calendar}"

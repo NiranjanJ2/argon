@@ -6,12 +6,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-from argon.google.tasks_store import GoogleTasksStore
+from argon.google.tasks_store import GoogleTasksStore, TaskResolutionAmbiguityError
 from argon.paths import argon_home
 from argon.productivity.habits import HabitsTracker
 from argon.productivity.log import DailyLog
 from argon.productivity.state import DailyState
-from argon.tools.base import Tool
+from argon.tools.base import Tool, ToolResult
 
 __all__ = ["mark_running", "mark_scheduled", "unscheduled"]
 
@@ -76,7 +76,7 @@ def mark_running(
 
 
 class ListTasksTool(Tool):
-    """List all pending tasks from Google Tasks."""
+    """List everything outstanding, from the one reconciled commitment board."""
 
     def __init__(
         self, store: GoogleTasksStore, state: DailyState, workspace: Path | None = None
@@ -92,14 +92,19 @@ class ListTasksTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "List Niranjan's pending tasks, sorted by priority then due date. "
-            "Each carries days_overdue and days_open. Read them the way a "
+            "List Niranjan's outstanding commitments — Google Tasks and "
+            "Classroom assignments already reconciled into one list, sorted by "
+            "priority then due date. Anything turned in or ignored is gone. "
+            "`official_due` is the school's deadline and `work_by` is the "
+            "earlier date he set himself; they are different facts. Each entry "
+            "carries days_overdue and days_open. Read them the way a "
             "secretary would: a task that has sat there for a week, or is days "
             "past its due date and still open, has usually stopped being real — "
             "it was finished and never ticked off, or quietly dropped. Ask him "
             "which, rather than listing it again as ordinary pending work. Use "
             "your judgement about when it is worth raising; there is no "
-            "threshold that makes it true."
+            "threshold that makes it true. If `complete` is false, one of the "
+            "sources is down — say so rather than implying the list is all of it."
         )
 
     @property
@@ -111,14 +116,23 @@ class ListTasksTool(Tool):
         return {"type": "object", "properties": {}, "required": []}
 
     async def execute(self, **kwargs: Any) -> str:
+        from argon.commitments import load_board
         from argon.services import agenda
 
-        tasks = mark_running(self._store.get_all(), self._state.get_session())
+        board = load_board(self._state_workspace, store=self._store)
+        rows = mark_running(board.as_dicts(), self._state.get_session())
         try:
-            tasks = mark_scheduled(tasks, agenda.upcoming(self._state_workspace))
-        except Exception:  # noqa: BLE001 — the task list matters more than the stamp
+            rows = mark_scheduled(rows, agenda.upcoming(self._state_workspace))
+        except Exception:  # noqa: BLE001 — the list matters more than the stamp
             pass
-        return json.dumps(tasks, indent=2)
+        return json.dumps(
+            {
+                "commitments": rows,
+                "sources": board.health_as_dicts(),
+                "complete": board.complete,
+            },
+            indent=2,
+        )
 
 
 class AddTaskTool(Tool):
@@ -151,7 +165,7 @@ class AddTaskTool(Tool):
                     "enum": ["high", "medium", "low"],
                     "description": "Default: medium.",
                 },
-                "due": {"type": "string", "description": "ISO 8601 due date/time."},
+                "due": {"type": "string", "description": "Work-by date: YYYY-MM-DD."},
                 "subject": {"type": "string", "description": "Class or project (e.g. 'AP Chemistry')."},
                 "source": {
                     "type": "string",
@@ -180,7 +194,7 @@ class AddTaskTool(Tool):
         if kwargs.get("time_estimate_min"):
             self._store.set_time_estimate(task["id"], int(kwargs["time_estimate_min"]))
         self._log.append(f"Task added: {title}", tag="task")
-        return f"Added: {title}"
+        return ToolResult(f"Added: {title}")
 
 
 class StartTaskTool(Tool):
@@ -217,9 +231,12 @@ class StartTaskTool(Tool):
         }
 
     async def execute(self, **kwargs: Any) -> str:
-        task = self._store.start_task(kwargs["task_id"])
+        try:
+            task = self._store.start_task(kwargs["task_id"])
+        except TaskResolutionAmbiguityError as exc:
+            return ToolResult(str(exc), success=False)
         if not task:
-            return f"No task matching '{kwargs['task_id']}'."
+            return ToolResult(f"No task matching '{kwargs['task_id']}'.", success=False)
         # Starting work is what puts him in "working" mode. Setting only the
         # task left mode on "idle", so the check-in gate kept classifying a
         # working afternoon as free time and interrupting it.
@@ -227,7 +244,7 @@ class StartTaskTool(Tool):
             kind="working", task_id=task["id"], title=task["title"]
         )
         self._log.log_task_started(task["title"])
-        return f"Started: {task['title']}"
+        return ToolResult(f"Started: {task['title']}")
 
 
 class CompleteTaskTool(Tool):
@@ -295,9 +312,12 @@ class CompleteTaskTool(Tool):
         )
         actual_min = session.get("elapsed_min") if on_this_task else None
 
-        completed = self._store.complete_task(task_id, actual_min=actual_min)
+        try:
+            completed = self._store.complete_task(task_id, actual_min=actual_min)
+        except TaskResolutionAmbiguityError as exc:
+            return ToolResult(str(exc), success=False)
         if not completed:
-            return f"No pending task matching '{task_id}'."
+            return ToolResult(f"No pending task matching '{task_id}'.", success=False)
 
         title = completed["title"]
         subject = completed.get("subject")
@@ -309,9 +329,9 @@ class CompleteTaskTool(Tool):
         # nothing running made the check-in gate take its mid-flow branch,
         # measure zero minutes, and stay silent for the rest of the day.
         if on_this_task:
-            self._state.end_session()
+            self._state.end_session_if_task(completed.get("id") or task_id, title=title)
 
-        return f"Done: {title}" + (f" ({actual_min}min)" if actual_min else "")
+        return ToolResult(f"Done: {title}" + (f" ({actual_min}min)" if actual_min else ""))
 
 
 class UpdateTaskTool(Tool):
@@ -342,7 +362,7 @@ class UpdateTaskTool(Tool):
             "properties": {
                 "task_id": {"type": "string", "description": "Task ID or partial title match."},
                 "priority": {"type": "string", "enum": ["high", "medium", "low"]},
-                "due": {"type": "string", "description": "ISO 8601 date/time, or 'tomorrow'."},
+                "due": {"type": "string", "description": "Work-by date YYYY-MM-DD, or 'tomorrow'."},
             },
             "required": ["task_id"],
         }
@@ -352,20 +372,26 @@ class UpdateTaskTool(Tool):
         changes: list[str] = []
 
         if priority := kwargs.get("priority"):
-            ok = self._store.update_priority(task_id, priority)
+            try:
+                ok = self._store.update_priority(task_id, priority)
+            except TaskResolutionAmbiguityError as exc:
+                return ToolResult(str(exc), success=False)
             if not ok:
-                return f"No task matching '{task_id}'."
+                return ToolResult(f"No task matching '{task_id}'.", success=False)
             changes.append(f"priority → {priority}")
 
         if due := kwargs.get("due"):
-            if due.lower() == "tomorrow":
-                ok = self._store.carry_over_task(task_id)
-            else:
-                ok = self._store.update_due(task_id, due)
+            try:
+                if due.lower() == "tomorrow":
+                    ok = self._store.carry_over_task(task_id)
+                else:
+                    ok = self._store.update_due(task_id, due)
+            except TaskResolutionAmbiguityError as exc:
+                return ToolResult(str(exc), success=False)
             if not ok:
-                return f"No task matching '{task_id}'."
+                return ToolResult(f"No task matching '{task_id}'.", success=False)
             changes.append(f"due → {due}")
 
         if not changes:
-            return "Provide at least one field to update: priority or due."
-        return "Updated: " + ", ".join(changes)
+            return ToolResult("Provide at least one field to update: priority or due.", success=False)
+        return ToolResult("Updated: " + ", ".join(changes))

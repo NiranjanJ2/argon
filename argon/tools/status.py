@@ -11,7 +11,7 @@ from loguru import logger
 from argon.productivity.habits import HabitsTracker
 from argon.productivity.log import DailyLog
 from argon.productivity.state import DailyState
-from argon.tools.base import Tool
+from argon.tools.base import Tool, ToolResult
 
 
 class GetStatusTool(Tool):
@@ -29,7 +29,7 @@ class GetStatusTool(Tool):
     def description(self) -> str:
         return (
             "Get Niranjan's current session status: mode, active task, work duration, "
-            "home arrival, and current school period. One call covers everything."
+            "and current school period. One call covers everything."
         )
 
     @property
@@ -44,10 +44,14 @@ class GetStatusTool(Tool):
         data = self._state.get()
         session = self._state.get_session()
 
+        # `home_arrival` is deliberately absent. Nothing in production ever set
+        # it — the "Neon is home" skill only writes a log note — so it was
+        # always null, and a null field reads as "he is not home yet" rather
+        # than "this is not tracked". Do not advertise state that cannot become
+        # true; the arrival is in today's log if it matters.
         result: dict[str, Any] = {
             "mode": data.get("mode", "idle"),
             "current_task": data.get("current_task"),
-            "home_arrival": data.get("home_arrival"),
             "work_session_minutes": self._state.get_work_session_duration_minutes(),
             "lock_in_minutes": self._state.get_lock_in_duration_minutes(),
             # Stated outright so the model never has to infer it from a start
@@ -149,7 +153,7 @@ class SetModeTool(Tool):
             except Exception:  # noqa: BLE001 — the mode change itself still stands
                 logger.warning("Could not release the phone block on leaving lock_in")
 
-        return f"Mode: {mode}.{released}"
+        return ToolResult(f"Mode: {mode}.{released}")
 
 
 class LogNoteTool(Tool):
@@ -184,10 +188,10 @@ class LogNoteTool(Tool):
     async def execute(self, **kwargs: Any) -> str:
         note = kwargs["note"].strip()
         if not note:
-            return "Error: note is empty."
+            return ToolResult("Error: note is empty.", success=False)
         self._state.add_note(note)
         self._log.log_note(note)
-        return "Logged."
+        return ToolResult("Logged.")
 
 
 class ReadLogTool(Tool):

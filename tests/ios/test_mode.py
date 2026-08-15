@@ -348,19 +348,117 @@ async def test_the_model_cannot_confirm_on_his_behalf(monkeypatch):
     assert ios_mode.get_mode()["mode"] == "off"
 
 
-async def test_a_night_block_goes_through_once_he_has_replied(monkeypatch):
-    """New turn after the refusal = he was actually asked."""
+def _turn(text: str, session_key: str = "discord:1"):
+    from argon.core import turn
+
+    return turn.use(turn.TurnContext(
+        channel="discord", chat_id="1", session_key=session_key, user_text=text,
+    ))
+
+
+async def test_a_night_block_goes_through_on_an_explicit_yes(monkeypatch):
     from argon.tools.focus import SetFocusModeTool
 
     night = datetime.now(LA).replace(hour=1, minute=37)
     monkeypatch.setattr("argon.tools.focus.clock.now", lambda: night)
     tool = SetFocusModeTool(60)
 
-    assert "Not applied" in await tool.execute(mode="lock_in", reason="SAT prep")
-    tool.start_turn()  # Niranjan replied; the loop starts a fresh turn
-    await tool.execute(mode="lock_in", reason="he said yes")
+    with _turn("lock my phone"):
+        assert "Not applied" in await tool.execute(mode="lock_in", reason="SAT prep")
+    with _turn("yes"):
+        await tool.execute(mode="lock_in", reason="he said yes")
 
     assert ios_mode.get_mode()["mode"] == "lock_in"
+
+
+async def test_an_unrelated_reply_is_not_consent_to_blocking_his_phone(monkeypatch):
+    """The old guard took *any* message within thirty minutes as a yes.
+
+    So "actually never mind", "what time is it?", and a message about something
+    else entirely all locked the phone at 1:37 AM. Consent has to be consent to
+    the thing being asked about.
+    """
+    from argon.tools.focus import SetFocusModeTool
+
+    night = datetime.now(LA).replace(hour=1, minute=37)
+    monkeypatch.setattr("argon.tools.focus.clock.now", lambda: night)
+    tool = SetFocusModeTool(60)
+
+    with _turn("lock my phone"):
+        assert "Not applied" in await tool.execute(mode="lock_in", reason="SAT prep")
+    for unrelated in ("what time is it?", "actually never mind", "no", "ok but not now"):
+        with _turn(unrelated):
+            assert "Not applied" in await tool.execute(mode="lock_in", reason="retry")
+        assert ios_mode.get_mode()["mode"] == "off", f"{unrelated!r} is not consent"
+
+
+async def test_consent_does_not_carry_to_a_different_block(monkeypatch):
+    """Yes to sixty minutes is not yes to four hours."""
+    from argon.tools.focus import SetFocusModeTool
+
+    night = datetime.now(LA).replace(hour=1, minute=37)
+    monkeypatch.setattr("argon.tools.focus.clock.now", lambda: night)
+    tool = SetFocusModeTool(60)
+
+    with _turn("lock my phone"):
+        await tool.execute(mode="lock_in", duration_min=60, reason="SAT prep")
+    with _turn("yes"):
+        assert "Not applied" in await tool.execute(
+            mode="lock_in", duration_min=240, reason="much longer"
+        )
+
+    assert ios_mode.get_mode()["mode"] == "off"
+
+
+async def test_consent_does_not_carry_across_sessions(monkeypatch):
+    """The tool is shared by every session; the consent record must not be."""
+    from argon.tools.focus import SetFocusModeTool
+
+    night = datetime.now(LA).replace(hour=1, minute=37)
+    monkeypatch.setattr("argon.tools.focus.clock.now", lambda: night)
+    tool = SetFocusModeTool(60)
+
+    with _turn("lock my phone", session_key="discord:1"):
+        await tool.execute(mode="lock_in", reason="SAT prep")
+    with _turn("yes", session_key="whatsapp:2"):
+        assert "Not applied" in await tool.execute(mode="lock_in", reason="SAT prep")
+
+    assert ios_mode.get_mode()["mode"] == "off"
+
+
+async def test_an_expired_request_cannot_be_answered(monkeypatch):
+    from argon.tools.focus import CONSENT_TTL_MINUTES, SetFocusModeTool
+
+    night = datetime.now(LA).replace(hour=1, minute=37)
+    monkeypatch.setattr("argon.tools.focus.clock.now", lambda: night)
+    tool = SetFocusModeTool(60)
+    with _turn("lock my phone"):
+        await tool.execute(mode="lock_in", reason="SAT prep")
+
+    later = night + timedelta(minutes=CONSENT_TTL_MINUTES + 1)
+    monkeypatch.setattr("argon.tools.focus.clock.now", lambda: later)
+    with _turn("yes"):
+        assert "Not applied" in await tool.execute(mode="lock_in", reason="SAT prep")
+
+    assert ios_mode.get_mode()["mode"] == "off"
+
+
+async def test_an_automated_turn_can_never_authorise_a_night_block(monkeypatch):
+    """A check-in or cron turn is not Niranjan saying yes."""
+    from argon.core import turn
+    from argon.tools.focus import SetFocusModeTool
+
+    night = datetime.now(LA).replace(hour=1, minute=37)
+    monkeypatch.setattr("argon.tools.focus.clock.now", lambda: night)
+
+    with turn.use(turn.TurnContext(
+        channel="discord", chat_id="1", session_key="heartbeat",
+        origin="checkin", user_text="yes",
+    )):
+        result = await SetFocusModeTool(60).execute(mode="lock_in", reason="SAT prep")
+
+    assert "Not applied" in result
+    assert ios_mode.get_mode()["mode"] == "off"
 
 
 async def test_daytime_blocks_need_no_confirmation(monkeypatch):
@@ -382,3 +480,33 @@ async def test_unblocking_is_never_refused_by_the_night_guard(monkeypatch):
     monkeypatch.setattr("argon.tools.focus.clock.now", lambda: night)
 
     assert "released" in await SetFocusModeTool(60).execute(mode="off")
+
+
+async def test_the_model_cannot_grant_consent_inside_the_turn_that_asked(monkeypatch):
+    """The 1:47 AM lock, reachable again by a different route.
+
+    A turn gets many tool calls and `user_text` is identical for all of them.
+    So the model could call set_focus_mode twice in one turn — refused, which
+    records the request, then again, which found a matching record and an
+    affirmative `user_text` — and lock the phone. His only message that turn was
+    an "ok" about something else entirely.
+    """
+    from argon.tools.focus import SetFocusModeTool
+
+    night = datetime.now(LA).replace(hour=1, minute=47)
+    monkeypatch.setattr("argon.tools.focus.clock.now", lambda: night)
+    tool = SetFocusModeTool(60)
+
+    # One turn, whose user message happens to read as a yes.
+    with _turn("ok"):
+        first = await tool.execute(mode="lock_in", reason="SAT prep")
+        second = await tool.execute(mode="lock_in", reason="SAT prep")
+
+    assert "Not applied" in first
+    assert "Not applied" in second, "a second call in the same turn is not consent"
+    assert ios_mode.get_mode()["mode"] == "off"
+
+    # A genuinely later turn, with an explicit yes, still works.
+    with _turn("yes"):
+        await tool.execute(mode="lock_in", reason="SAT prep")
+    assert ios_mode.get_mode()["mode"] == "lock_in"

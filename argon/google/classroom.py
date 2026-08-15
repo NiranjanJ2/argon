@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from argon.google.classroom_dispositions import ClassroomDispositionStore, assignment_key
 from argon.google.service import LOCAL_TZ, GoogleAPITool
 
 
@@ -14,8 +15,8 @@ def classroom_due(coursework: dict) -> datetime | None:
 
     Classroom reports ``dueDate``/``dueTime`` in **UTC**; reading them as local
     time shifts every deadline by the UTC offset (an 11:59 PM assignment lands
-    on the following morning). With no ``dueTime`` the deadline is a date only,
-    so it becomes end of the local day.
+    on the following morning). With no ``dueTime`` there is no official instant;
+    the local end-of-day value is only a work-by fallback.
     """
     due_date = coursework.get("dueDate")
     if not due_date:
@@ -30,6 +31,7 @@ def classroom_due(coursework: dict) -> datetime | None:
         return datetime(
             due_date["year"], due_date["month"], due_date["day"],
             due_time.get("hours", 0), due_time.get("minutes", 0),
+            due_time.get("seconds", 0), due_time.get("nanos", 0) // 1000,
             tzinfo=timezone.utc,
         ).astimezone(LOCAL_TZ)
     except (KeyError, TypeError, ValueError):
@@ -41,13 +43,21 @@ def _fmt_coursework(cw: dict, *, full_description: bool = False) -> dict:
 
     desc = cw.get("description") or None
     due = classroom_due(cw)
+    has_due_time = cw.get("dueTime") is not None
+    due_value = (
+        due.isoformat() if due and has_due_time
+        else due.date().isoformat() if due
+        else None
+    )
     return {
         "id": cw.get("id"),
         "course_id": cw.get("courseId"),
+        "classroom_key": assignment_key(str(cw.get("courseId", "")), str(cw.get("id", ""))),
         "title": cw.get("title"),
         "description": desc if full_description or not desc else desc[:400],
-        "due": due.isoformat() if due else None,
-        "due_when": when_label(due),
+        "due": due_value,
+        "due_when": when_label(due_value),
+        "due_precision": "instant" if has_due_time else "work_by_day" if due else None,
         "type": cw.get("workType"),
         "max_points": cw.get("maxPoints"),
         "state": cw.get("state"),
@@ -62,12 +72,26 @@ def _by_due(item: dict) -> str:
 
 def active_courses(svc) -> list[dict]:
     """Courses the student is currently enrolled in."""
-    return svc.courses().list(
-        studentId="me", courseStates=["ACTIVE"]
-    ).execute().get("courses", [])
+    courses: list[dict] = []
+    page_token: str | None = None
+    while True:
+        kwargs: dict[str, Any] = {"studentId": "me", "courseStates": ["ACTIVE"]}
+        if page_token:
+            kwargs["pageToken"] = page_token
+        page = svc.courses().list(**kwargs).execute()
+        courses.extend(page.get("courses", []))
+        page_token = page.get("nextPageToken")
+        if not page_token:
+            return courses
 
 
-def upcoming_assignments(svc, days_ahead: int = 30) -> tuple[list[dict], list[str]]:
+def upcoming_assignments(
+    svc,
+    days_ahead: int = 30,
+    *,
+    dispositions: ClassroomDispositionStore | None = None,
+    include_suppressed: bool = False,
+) -> tuple[list[dict], list[str]]:
     """Published assignments due within *days_ahead*, plus any courses that failed.
 
     Shared by ``get_all_assignments`` and the daily overview so both agree on
@@ -82,11 +106,21 @@ def upcoming_assignments(svc, days_ahead: int = 30) -> tuple[list[dict], list[st
     unreadable: list[str] = []
     for course in active_courses(svc):
         try:
-            works = svc.courses().courseWork().list(
-                courseId=course["id"],
-                courseWorkStates=["PUBLISHED"],
-                pageSize=50,
-            ).execute().get("courseWork", [])
+            works: list[dict] = []
+            page_token: str | None = None
+            while True:
+                kwargs: dict[str, Any] = {
+                    "courseId": course["id"],
+                    "courseWorkStates": ["PUBLISHED"],
+                    "pageSize": 50,
+                }
+                if page_token:
+                    kwargs["pageToken"] = page_token
+                page = svc.courses().courseWork().list(**kwargs).execute()
+                works.extend(page.get("courseWork", []))
+                page_token = page.get("nextPageToken")
+                if not page_token:
+                    break
         except HttpError as exc:
             # One locked-down course must not blank out every other course.
             unreadable.append(f"{course.get('name', course['id'])}: {exc.reason}")
@@ -96,7 +130,36 @@ def upcoming_assignments(svc, days_ahead: int = 30) -> tuple[list[dict], list[st
             if due is None or not (now < due <= cutoff):
                 continue
             item = _fmt_coursework(cw)
+            item["course_id"] = course["id"]
+            item["classroom_key"] = assignment_key(course["id"], str(cw.get("id", "")))
             item["course_name"] = course.get("name", "")
+            if dispositions and dispositions.is_ignored(item["classroom_key"]):
+                if include_suppressed:
+                    item["suppressed_reason"] = "ignored"
+                    assignments.append(item)
+                continue
+            try:
+                submissions = svc.courses().courseWork().studentSubmissions().list(
+                    courseId=course["id"], courseWorkId=cw["id"], userId="me", pageSize=1,
+                ).execute().get("studentSubmissions", [])
+            except Exception as exc:  # noqa: BLE001 — unknown must remain visible
+                message = f"{type(exc).__name__}: {exc}"
+                item["submission_error"] = message
+                unreadable.append(f"{course.get('name', course['id'])} / {cw.get('id', '?')}: {message}")
+            else:
+                if submissions:
+                    item["submission_state"] = submissions[0].get("state")
+                else:
+                    message = "No submission record returned"
+                    item["submission_error"] = message
+                    unreadable.append(
+                        f"{course.get('name', course['id'])} / {cw.get('id', '?')}: {message}"
+                    )
+            if item.get("submission_state") in {"TURNED_IN", "RETURNED"}:
+                if include_suppressed:
+                    item["suppressed_reason"] = item["submission_state"]
+                    assignments.append(item)
+                continue
             assignments.append(item)
 
     assignments.sort(key=_by_due)
@@ -224,7 +287,8 @@ class GetAllAssignmentsTool(ClassroomTool):
 
     def _run(self, kwargs: dict[str, Any]) -> str:
         assignments, unreadable = upcoming_assignments(
-            self._svc(), int(kwargs.get("days_ahead", 30))
+            self._svc(), int(kwargs.get("days_ahead", 30)),
+            dispositions=ClassroomDispositionStore(self._workspace),
         )
         payload: dict[str, Any] = {"count": len(assignments), "assignments": assignments}
         if unreadable:

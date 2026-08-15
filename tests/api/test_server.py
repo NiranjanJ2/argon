@@ -461,6 +461,49 @@ def test_tasks_patch_maps_a_missing_task_to_404(tmp_path, monkeypatch):
     assert response.status_code == 404
 
 
+def test_stopping_a_stale_dashboard_task_does_not_stop_the_running_one(tmp_path, monkeypatch):
+    class State(_FakeTaskState):
+        def __init__(self):
+            self.ended = False
+
+        def end_session_if_task(self, _task_id):
+            return None
+
+    store, state = _FakeTaskStore(), State()
+    monkeypatch.setattr(srv, "_task_dependencies", lambda: (store, state, _FakeLog(), object()))
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.patch("/v1/tasks/another-task", headers=AUTH, json={"action": "stop"})
+
+    assert response.status_code == 409
+    assert state.ended is False
+
+
+def test_stopping_uses_one_atomic_compare_and_end_operation(tmp_path, monkeypatch):
+    class State(_FakeTaskState):
+        def __init__(self):
+            self.compared = []
+
+        def get_session(self):
+            raise AssertionError("endpoint must not check then end in separate calls")
+
+        def end_session(self):
+            raise AssertionError("endpoint must compare and end atomically")
+
+        def end_session_if_task(self, task_id):
+            self.compared.append(task_id)
+            return None
+
+    store, state = _FakeTaskStore(), State()
+    monkeypatch.setattr(srv, "_task_dependencies", lambda: (store, state, _FakeLog(), object()))
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.patch("/v1/tasks/task-1", headers=AUTH, json={"action": "stop"})
+
+    assert response.status_code == 409
+    assert state.compared == ["task-1"]
+
+
 # ---------------------------------------------------------------------------
 # /v1/screentime
 # ---------------------------------------------------------------------------
@@ -554,6 +597,21 @@ def test_status_returns_the_widget_payload(tmp_path, monkeypatch):
 
     assert body["mode"] == "idle"
     assert "school_period" in body
+
+
+def test_status_plan_payload_contains_only_explicit_blocks(tmp_path, monkeypatch):
+    from argon.productivity.plan import DayPlan
+
+    client = _client(tmp_path, monkeypatch)
+    stored = DayPlan(tmp_path).set_blocks([{"start": "2pm", "what": "SAT prep"}])
+    body = client.get("/v1/status", headers=AUTH).get_json()
+
+    assert body["plan"] == {
+        "blocks": [{
+            "id": stored[0].id, "start": "14:00", "end": None,
+            "what": "SAT prep", "status": "pending",
+        }],
+    }
 
 
 
@@ -693,17 +751,17 @@ def _plan_client(tmp_path, monkeypatch):
 
     client = _client(tmp_path, monkeypatch)
     plan = DayPlan(tmp_path)
-    plan.set_blocks([
+    stored = plan.set_blocks([
         {"start": "5pm", "end": "6pm", "what": "SAT prep"},
         {"start": "7pm", "what": "UCLA work"},
     ])
-    return client, plan
+    return client, plan, stored
 
 
 def test_a_block_can_be_marked_done_from_the_desktop(tmp_path, monkeypatch):
-    client, plan = _plan_client(tmp_path, monkeypatch)
+    client, plan, stored = _plan_client(tmp_path, monkeypatch)
 
-    reply = client.patch("/v1/plan/b0", json={"status": "done"},
+    reply = client.patch(f"/v1/plan/{stored[0].id}", json={"status": "done"},
                          headers={"Authorization": "Bearer s3cret-token"})
 
     assert reply.status_code == 200
@@ -711,20 +769,22 @@ def test_a_block_can_be_marked_done_from_the_desktop(tmp_path, monkeypatch):
 
 
 def test_an_unknown_block_is_a_404(tmp_path, monkeypatch):
-    client, _ = _plan_client(tmp_path, monkeypatch)
-    reply = client.patch("/v1/plan/b9", json={"status": "done"},
+    client, _, _ = _plan_client(tmp_path, monkeypatch)
+    reply = client.patch("/v1/plan/nosuchid", json={"status": "done"},
                          headers={"Authorization": "Bearer s3cret-token"})
     assert reply.status_code == 404
 
 
 def test_a_bad_status_is_refused(tmp_path, monkeypatch):
-    client, plan = _plan_client(tmp_path, monkeypatch)
-    reply = client.patch("/v1/plan/b0", json={"status": "finished-ish"},
+    client, plan, stored = _plan_client(tmp_path, monkeypatch)
+    reply = client.patch(f"/v1/plan/{stored[0].id}", json={"status": "finished-ish"},
                          headers={"Authorization": "Bearer s3cret-token"})
     assert reply.status_code == 400
     assert [b.status for b in plan.blocks()] == ["pending", "pending"]
 
 
 def test_it_needs_the_token(tmp_path, monkeypatch):
-    client, _ = _plan_client(tmp_path, monkeypatch)
-    assert client.patch("/v1/plan/b0", json={"status": "done"}).status_code == 401
+    client, _, stored = _plan_client(tmp_path, monkeypatch)
+    assert client.patch(
+        f"/v1/plan/{stored[0].id}", json={"status": "done"}
+    ).status_code == 401

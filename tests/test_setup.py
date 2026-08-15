@@ -92,6 +92,62 @@ class TestReRunning:
         assert (tmp_path / "config.json").read_text() == "{not json"
 
 
+class TestPromptTemplateUpdates:
+    @staticmethod
+    def _bundle(tmp_path, monkeypatch, text: str):
+        import importlib.resources
+
+        package = tmp_path / "package"
+        prompts = package / "prompts"
+        prompts.mkdir(parents=True, exist_ok=True)
+        (prompts / "SOUL.md").write_text(text)
+        monkeypatch.setattr(importlib.resources, "files", lambda _name: package)
+        return prompts
+
+    def test_an_untouched_seed_is_updated_when_the_bundle_changes(self, tmp_path, monkeypatch):
+        from argon.utils.helpers import sync_workspace_templates
+
+        prompts = self._bundle(tmp_path, monkeypatch, "first")
+        workspace = tmp_path / "workspace"
+        sync_workspace_templates(workspace, silent=True)
+        (prompts / "SOUL.md").write_text("second")
+
+        changed = sync_workspace_templates(workspace, silent=True)
+
+        assert (workspace / "SOUL.md").read_text() == "second"
+        assert changed == ["SOUL.md"]
+
+    def test_a_user_edited_prompt_is_preserved(self, tmp_path, monkeypatch):
+        from argon.utils.helpers import sync_workspace_templates
+
+        prompts = self._bundle(tmp_path, monkeypatch, "first")
+        workspace = tmp_path / "workspace"
+        sync_workspace_templates(workspace, silent=True)
+        (workspace / "SOUL.md").write_text("my local instructions")
+        (prompts / "SOUL.md").write_text("second")
+
+        changed = sync_workspace_templates(workspace, silent=True)
+
+        assert (workspace / "SOUL.md").read_text() == "my local instructions"
+        assert changed == []
+
+    def test_force_updates_a_known_safe_existing_install(self, tmp_path, monkeypatch):
+        from argon.utils.helpers import sync_workspace_templates
+
+        self._bundle(tmp_path, monkeypatch, "bundled")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "SOUL.md").write_text("old bundled copy")
+        (workspace / "memory").mkdir()
+        (workspace / "memory" / "MEMORY.md").write_text("real memory")
+
+        changed = sync_workspace_templates(workspace, silent=True, force=True)
+
+        assert (workspace / "SOUL.md").read_text() == "bundled"
+        assert (workspace / "memory" / "MEMORY.md").read_text() == "real memory"
+        assert "SOUL.md" in changed
+
+
 class TestTheApiReportsItsOwnFailure:
     def test_a_taken_port_is_not_reported_as_ok(self, tmp_path, monkeypatch):
         """It logged "HTTP API on ..." and printed OK while the serving thread

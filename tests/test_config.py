@@ -11,8 +11,6 @@ from __future__ import annotations
 import copy
 import json
 
-import pytest
-
 from argon.config import KNOWN_API_BASES, Config, ProviderConfig, _migrate, load_config
 
 # Every provider the old fixed schema declared. Only two carry credentials.
@@ -111,11 +109,6 @@ def test_custom_provider_renamed_to_openrouter_not_openai():
     assert "openai" not in out["providers"]
 
 
-@pytest.mark.xfail(
-    reason="argon/config.py:237 matches the provider *name* against the URL, so nim "
-           "(integrate.api.nvidia.com) and ollama (localhost) never match — and nim is "
-           "the default provider, so this is the case that matters most",
-)
 def test_custom_provider_is_renamed_for_every_known_api_base():
     unmatched = []
     for name, base in KNOWN_API_BASES.items():
@@ -124,6 +117,30 @@ def test_custom_provider_is_renamed_for_every_known_api_base():
         if name not in _migrate(data)["providers"]:
             unmatched.append(name)
     assert unmatched == []
+
+
+def test_historical_ten_minute_idle_reset_migrates_to_fourteen_hours():
+    data = legacy_config()
+    data["agents"]["defaults"]["idleSessionResetHours"] = 0.167
+
+    cfg = Config.model_validate(_migrate(data))
+
+    assert cfg.agents.defaults.idle_session_reset_hours == 14.0
+
+
+def test_explicit_never_reset_survives_migration():
+    data = legacy_config()
+    data["agents"]["defaults"]["idleSessionResetHours"] = 0
+
+    cfg = Config.model_validate(_migrate(data))
+
+    assert cfg.agents.defaults.idle_session_reset_hours == 0
+
+
+def test_background_model_defaults_to_the_interactive_model_explicitly():
+    from argon.config import HeartbeatConfig
+
+    assert HeartbeatConfig().model == "openai/gpt-oss-120b"
 
 
 
