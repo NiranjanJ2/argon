@@ -446,6 +446,52 @@ def doctor(
 
 
 # ---------------------------------------------------------------------------
+# push
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def push(
+    text: str = typer.Argument("Argon can reach your phone.", help="Body of the notification"),
+    title: str = typer.Option("Argon", "--title", help="Notification title"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Send one notification to the phone, and say exactly what Apple replied.
+
+    Push fails silently by nature — the phone simply does not buzz — so the only
+    way to know it works is to ask Apple and print the answer.
+    """
+    import asyncio
+
+    from argon.ios.push import APNsClient, device_token
+
+    cfg = _load(config)
+    client = APNsClient(cfg)
+    token, environment = device_token()
+
+    console.print(f"configured : {client.configured}")
+    console.print(f"token      : {'registered' if token else '[red]none[/red]'} ({environment})")
+    if not client.configured:
+        console.print(
+            "[red]Push is not configured.[/red] Set ios.apns.enabled, teamId, keyId and "
+            "bundleId in config.json, and put the key at ~/.argon/apns/AuthKey_<keyId>.p8"
+        )
+        raise typer.Exit(1)
+    if not token:
+        console.print(
+            "[yellow]No device token yet.[/yellow] Open the app once so it registers."
+        )
+        raise typer.Exit(1)
+
+    result = asyncio.run(client.send(title, text, category="ARGON_TASK"))
+    if result.ok:
+        console.print("[green]Apple accepted the notification.[/green]")
+        return
+    console.print(f"[red]Rejected:[/red] {result.status} {result.reason}")
+    raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
 # outbox
 # ---------------------------------------------------------------------------
 

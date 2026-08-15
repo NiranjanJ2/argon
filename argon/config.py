@@ -81,12 +81,33 @@ class ChannelsConfig(Base):
     send_max_retries: int = Field(default=3, ge=0, le=10)
 
 
+class ApnsConfig(Base):
+    """Reaching the phone when the app is not open.
+
+    Without this the iOS app is pull-only: it learns what Argon wants when
+    Niranjan opens it, so a reminder can only arrive on Discord and a focus
+    change waits for the next launch.
+
+    ``key_path`` is optional; the key is looked up at
+    ``~/.argon/apns/AuthKey_<key_id>.p8`` by default. It is a real credential —
+    it can push to any of his apps until revoked — so it lives outside the
+    checkout with the Google tokens rather than in config.
+    """
+
+    enabled: bool = False
+    team_id: str = ""
+    key_id: str = ""
+    bundle_id: str = ""
+    key_path: str = ""
+
+
 class IosConfig(Base):
-    """iOS app. APNs push is not wired yet — the app polls while foregrounded."""
+    """iOS app: Screen Time reconciliation and push."""
 
     default_lock_minutes: int = 60
     #: How long an emergency override blocks any new lock.
     override_minutes: int = 120
+    apns: ApnsConfig = Field(default_factory=ApnsConfig)
 
 
 class ApiConfig(Base):
