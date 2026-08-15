@@ -539,6 +539,39 @@ def screentime_history() -> Any:
 
 
 
+@app.get("/v1/inbox")
+@require_token
+def inbox_list() -> Any:
+    """What Argon said unprompted, newest first, with the buttons it offered."""
+    from argon.ios import inbox as ios_inbox
+
+    limit = request.args.get("limit", type=int) or 20
+    items = ios_inbox.recent(limit=min(50, max(1, limit)))
+    return jsonify({"items": items, "unanswered": len(ios_inbox.unanswered())})
+
+
+@app.post("/v1/inbox/<item_id>/answer")
+@require_token
+def inbox_answer(item_id: str) -> Any:
+    """Record that he answered a message.
+
+    Deliberately does not perform the action. ``PATCH /v1/tasks/<id>`` already
+    starts and completes tasks; the app calls that and then reports the answer
+    here, so there is exactly one implementation of "start a task" and the two
+    surfaces cannot drift into disagreeing about what is running.
+    """
+    from argon.ios import inbox as ios_inbox
+
+    body = _body()
+    verb = str(body.get("action") or "").strip()
+    if not verb:
+        return jsonify({"error": "action required"}), 400
+    answered = ios_inbox.mark_answered(item_id, verb, str(body.get("result") or ""))
+    if answered is None:
+        return jsonify({"error": "no such message"}), 404
+    return jsonify(answered)
+
+
 @app.errorhandler(Exception)
 def _on_error(exc: Exception) -> Any:
     """Answer in JSON always, and never leak a traceback or a config value."""

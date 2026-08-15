@@ -300,6 +300,22 @@ def build_runtime(config: Config) -> Runtime:
         check-in ledger recorded "said" regardless. Two days of check-ins died
         here in silence while the log said "Check-in spoke".
         """
+        delivery_key = key or f"notify:{int(_now_ms())}"
+        # Recorded before delivery and regardless of its outcome. The phone is a
+        # surface in its own right, and it is exactly where you want the message
+        # when Discord is the thing that is down. Recording under the delivery
+        # key means a retry updates the one entry instead of stacking copies.
+        try:
+            from argon.ios import inbox as ios_inbox
+
+            ios_inbox.record(
+                response,
+                actions=actions if isinstance(actions, list) else None,
+                key=delivery_key,
+            )
+        except Exception as exc:  # noqa: BLE001 - the inbox must never block a send
+            logger.warning("Could not record an unprompted message for the phone: {}", exc)
+
         channel, chat_id = pick_target()
         if channel == "cli":
             logger.warning(
@@ -307,7 +323,7 @@ def build_runtime(config: Config) -> Runtime:
             )
             return False
         return await outbox.deliver(
-            key=key or f"notify:{int(_now_ms())}",
+            key=delivery_key,
             channel=channel, chat_id=chat_id, content=response, kind="unprompted",
             actions=actions,
         )
