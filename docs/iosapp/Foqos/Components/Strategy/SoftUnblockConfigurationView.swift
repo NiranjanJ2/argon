@@ -165,6 +165,9 @@ struct SoftUnblockConfigurationView: View {
       return "Your opens do not reset during this session."
     }
 
+    if allowanceResetIntervalInHours == 1 {
+      return "You get all your opens back every hour."
+    }
     return "You get all your opens back every \(allowanceResetIntervalInHours) hours."
   }
 }

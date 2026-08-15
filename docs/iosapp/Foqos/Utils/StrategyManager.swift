@@ -371,17 +371,11 @@ class StrategyManager: ObservableObject {
     expiresAt: Date?,
     context: ModelContext
   ) throws -> String {
-    let profiles = try BlockedProfiles.fetchProfiles(in: context)
-    guard
-      let profile =
-        profiles.first(where: {
-          $0.name.compare(profileName, options: [.caseInsensitive, .diacriticInsensitive])
-            == .orderedSame
-        })
-        ?? (profiles.count == 1 ? profiles.first : nil)
-    else {
-      throw ArgonScreenTimeError.profileNotFound(profileName)
-    }
+    let profile = try argonProfile(named: profileName, in: context)
+
+    // Taking a hard block over a metered one must not leave the allowance
+    // behind: a stale active session would keep the shield offering breaks.
+    clearMeteredAllowance()
 
     if let activeSession = getActiveSession(context: context) {
       if activeSession.blockedProfile.id == profile.id {
@@ -421,9 +415,102 @@ class StrategyManager: ObservableObject {
     return profile.name
   }
 
+  private func argonProfile(
+    named profileName: String,
+    in context: ModelContext
+  ) throws -> BlockedProfiles {
+    let profiles = try BlockedProfiles.fetchProfiles(in: context)
+    guard
+      let profile =
+        profiles.first(where: {
+          $0.name.compare(profileName, options: [.caseInsensitive, .diacriticInsensitive])
+            == .orderedSame
+        })
+        ?? (profiles.count == 1 ? profiles.first : nil)
+    else {
+      throw ArgonScreenTimeError.profileNotFound(profileName)
+    }
+    return profile
+  }
+
+  private func clearMeteredAllowance() {
+    SoftUnblockGrantScheduler.stopAll()
+    SoftUnblockGrantStore.clearAll()
+  }
+
+  /// Apply a *metered* block: shielded, but tapping a blocked app buys a short
+  /// break from a refillable allowance instead of hitting a wall.
+  ///
+  /// Two things here are load-bearing.
+  ///
+  /// It is idempotent. `reconcile` runs on every status poll — roughly every
+  /// twenty seconds — with no version gate, so beginning a session
+  /// unconditionally would reset the allowance faster than it could ever be
+  /// spent and quietly make the limit infinite. An already-running session with
+  /// the same terms is left strictly alone.
+  ///
+  /// It never writes `StrategyTimerData`. `strategyData` is one shared blob and
+  /// the shield extension reads `SoftUnblockStrategyData` out of it, so setting
+  /// a timer expiry there would erase the allowance and turn this back into an
+  /// ordinary block. That is why metered modes run open-ended.
+  @discardableResult
+  func applyArgonMetered(
+    profileName: String,
+    allowanceMinutes: Int,
+    resetIntervalInHours: Int,
+    context: ModelContext
+  ) throws -> String {
+    let profile = try argonProfile(named: profileName, in: context)
+    let configuration = SoftUnblockStrategyData(
+      accessDurationInMinutes: allowanceMinutes,
+      maximumUnblockCount: 1,
+      allowanceResetIntervalInHours: resetIntervalInHours
+    )
+
+    if let activeSession = getActiveSession(context: context),
+      activeSession.blockedProfile.id == profile.id,
+      SoftUnblockGrantStore.isActive(sessionId: activeSession.id, profileId: profile.id),
+      SoftUnblockStrategyData.decode(profile.strategyData) == configuration
+    {
+      return profile.name  // Already metered on these terms. Do not touch it.
+    }
+
+    if let activeSession = getActiveSession(context: context) {
+      let manualStrategy = getStrategy(id: ManualBlockingStrategy.id, context: context)
+      _ = manualStrategy.stopBlocking(context: context, session: activeSession)
+    }
+    clearMeteredAllowance()
+
+    profile.strategyData = SoftUnblockStrategyData.encode(configuration)
+    profile.updatedAt = Date()
+    try context.save()
+    BlockedProfiles.updateSnapshot(for: profile)
+
+    // Tagged manual, not soft-unblock: the allowance comes from the grant store,
+    // which the shield reads directly, while the tag decides how the session can
+    // be *stopped*. Argon must be able to end this without a QR code or tag.
+    let session = BlockedProfileSession.createSession(
+      in: context,
+      withTag: ManualBlockingStrategy.id,
+      withProfile: profile,
+      forceStart: true
+    )
+    SoftUnblockGrantStore.beginSession(
+      sessionId: session.id,
+      profileId: profile.id,
+      maximumUnblockCount: configuration.maximumUnblockCount,
+      allowanceResetIntervalInHours: configuration.allowanceResetIntervalInHours,
+      startedAt: session.startTime
+    )
+    AppBlockerUtil().activateRestrictions(for: BlockedProfiles.getSnapshot(for: profile))
+    loadActiveSession(context: context)
+    return profile.name
+  }
+
   /// Clear the active restrictions after a trusted command from Argon.
   @discardableResult
   func applyArgonUnlock(context: ModelContext) -> String? {
+    clearMeteredAllowance()
     guard let activeSession = getActiveSession(context: context) else {
       AppBlockerUtil().deactivateRestrictions()
       loadActiveSession(context: context)

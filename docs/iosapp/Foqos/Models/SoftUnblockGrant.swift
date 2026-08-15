@@ -31,7 +31,10 @@ struct SoftUnblockGrant: Codable, Equatable, Identifiable {
 
 struct SoftUnblockSessionState: Codable, Equatable {
   static let maximumUnblockCountRange = 1...10
-  static let allowanceResetIntervalsInHours = [6, 12, 24]
+  /// 1 exists for Argon's weekend mode: a small allowance that refills every
+  /// hour reads as a lighter touch, where the same minutes granted once a day
+  /// get spent by 9am and leave the rest of the day a hard wall.
+  static let allowanceResetIntervalsInHours = [1, 6, 12, 24]
 
   let sessionId: String
   let profileId: UUID

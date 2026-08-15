@@ -89,6 +89,16 @@ final class ArgonReconciler {
         _ = StrategyManager.shared.applyArgonUnlock(context: container.mainContext)
         message = "The Argon focus window expired"
         shielded = false
+      } else if let allowance = desired.allowance {
+        let applied = try StrategyManager.shared.applyArgonMetered(
+          profileName: profileName,
+          allowanceMinutes: allowance.minutes,
+          resetIntervalInHours: allowance.perHours,
+          context: container.mainContext
+        )
+        let window = allowance.perHours == 1 ? "hour" : "\(allowance.perHours)h"
+        message = "\(applied): \(allowance.minutes)m break every \(window)"
+        shielded = true
       } else {
         let profileName = try StrategyManager.shared.applyArgonLock(
           profileName: profileName,
