@@ -188,7 +188,9 @@ def _cached_tasks(store: Any, *, fresh: bool = False) -> tuple[list[Any], dict[s
     return tasks, {"cached": False}
 
 
-def _task_dashboard(store: Any, state: Any, *, fresh: bool = False) -> dict[str, Any]:
+def _task_dashboard(
+    store: Any, state: Any, *, fresh: bool = False, classroom_fresh: bool = False
+) -> dict[str, Any]:
     """Shape the reconciled commitment board for the native iOS dashboard.
 
     This used to serve raw Google Tasks, which is how an assignment he had
@@ -210,7 +212,7 @@ def _task_dashboard(store: Any, state: Any, *, fresh: bool = False) -> dict[str,
     # course and one submission lookup per assignment, synchronously, on the
     # Flask request thread.
     board = build_board(
-        classroom_snapshot(ws),
+        classroom_snapshot(ws, fresh=classroom_fresh),
         SourceSnapshot("tasks", tuple(tasks), meta.get("error"), ()),
     )
     current = state.get()
@@ -327,7 +329,11 @@ def tasks_get() -> Any:
     """
     try:
         store, state, _, _ = _task_dependencies()
-        return jsonify(_task_dashboard(store, state, fresh=request.args.get("fresh") == "1"))
+        # Pulling to refresh means "go and look", including at Classroom.
+        wants_fresh = request.args.get("fresh") == "1"
+        return jsonify(
+            _task_dashboard(store, state, fresh=wants_fresh, classroom_fresh=wants_fresh)
+        )
     except Exception:
         logger.exception("Could not load the iOS task dashboard")
         return jsonify({"error": "task store unavailable", "tasks": []}), 503

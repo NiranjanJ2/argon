@@ -78,10 +78,16 @@ __all__ = [
 
 #: Classroom is a multi-request fetch (courses, then coursework, then one
 #: submission lookup per assignment) and the desktop widgets poll ``/v1/tasks``
-#: every few seconds. Deadlines do not move inside five minutes. Google Tasks is
-#: a single cheap request and is *not* cached here — the API server already owns
-#: that cache, and a task he just ticked off has to disappear immediately.
-CLASSROOM_TTL_S = 300.0
+#: every few seconds, so it cannot be read every time somebody asks.
+#:
+#: Two minutes is the compromise. Submission state is the thing that goes stale
+#: in a way he notices — he turns something in on Classroom and wants it off his
+#: list, not still being announced as due — and five minutes of that is long
+#: enough to look broken. A pull-to-refresh bypasses this entirely.
+#:
+#: Google Tasks is a single cheap request and is *not* cached here: the API
+#: server owns that cache, and a task he just ticked off has to vanish at once.
+CLASSROOM_TTL_S = 120.0
 
 #: Submission states that mean the work is done and must not be announced again.
 DONE_SUBMISSION_STATES = frozenset({"TURNED_IN", "RETURNED"})
