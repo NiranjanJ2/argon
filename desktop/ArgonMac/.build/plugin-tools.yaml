@@ -1,0 +1,66 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "ArgonMac-arm64-apple-macosx-release.exe": ["<ArgonMac-arm64-apple-macosx-release.exe>"]
+  "ArgonMac-arm64-apple-macosx-release.module": ["<ArgonMac-arm64-apple-macosx-release.module>"]
+  "PackageStructure": ["<PackageStructure>"]
+  "main": ["<ArgonMac-arm64-apple-macosx-release.exe>","<ArgonMac-arm64-apple-macosx-release.module>"]
+  "test": ["<ArgonMac-arm64-apple-macosx-release.exe>","<ArgonMac-arm64-apple-macosx-release.module>"]
+default: "main"
+nodes:
+  "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+commands:
+  "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonClient.swift","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonMacApp.swift","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonModels.swift","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonStore.swift"]
+    outputs: ["/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/sources"]
+    description: "Write auxiliary file /Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/sources"
+
+  "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.product/Objects.LinkFileList":
+    tool: write-auxiliary-file
+    inputs: ["<link-file-list>","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonClient.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonMacApp.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonModels.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonStore.swift.o"]
+    outputs: ["/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.product/Objects.LinkFileList"]
+    description: "Write auxiliary file /Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.product/Objects.LinkFileList"
+
+  "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"]
+    outputs: ["/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
+
+  "<ArgonMac-arm64-apple-macosx-release.exe>":
+    tool: phony
+    inputs: ["/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac"]
+    outputs: ["<ArgonMac-arm64-apple-macosx-release.exe>"]
+
+  "<ArgonMac-arm64-apple-macosx-release.module>":
+    tool: phony
+    inputs: ["/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonClient.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonMacApp.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonModels.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonStore.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/Modules/ArgonMac.swiftmodule"]
+    outputs: ["<ArgonMac-arm64-apple-macosx-release.module>"]
+
+  "C.ArgonMac-arm64-apple-macosx-release.exe":
+    tool: shell
+    inputs: ["/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonClient.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonMacApp.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonModels.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonStore.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.product/Objects.LinkFileList"]
+    outputs: ["/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac"]
+    description: "Linking ./.build/arm64-apple-macosx/release/ArgonMac"
+    args: ["/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc","-L","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release","-o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac","-module-name","ArgonMac","-Xlinker","-no_warn_duplicate_libraries","-emit-executable","-Xlinker","-dead_strip","-Xlinker","-alias","-Xlinker","_ArgonMac_main","-Xlinker","_main","-Xlinker","-rpath","-Xlinker","@loader_path","@/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.product/Objects.LinkFileList","-Xlinker","-rpath","-Xlinker","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-6.2/macosx","-target","arm64-apple-macosx14.0","-plugin-path","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing","-sdk","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-I","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-L","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-g"]
+
+  "C.ArgonMac-arm64-apple-macosx-release.module":
+    tool: shell
+    inputs: ["/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonClient.swift","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonMacApp.swift","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonModels.swift","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonStore.swift","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/sources"]
+    outputs: ["/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonClient.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonMacApp.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonModels.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonStore.swift.o","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/Modules/ArgonMac.swiftmodule"]
+    description: "Compiling Swift Module 'ArgonMac' (4 sources)"
+    args: ["/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc","-module-name","ArgonMac","-emit-dependencies","-emit-module","-emit-module-path","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/Modules/ArgonMac.swiftmodule","-output-file-map","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/output-file-map.json","-whole-module-optimization","-num-threads","10","-c","@/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/sources","-I","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/Modules","-target","arm64-apple-macosx14.0","-whole-module-optimization","-num-threads","10","-serialize-diagnostics","-O","-j10","-DSWIFT_PACKAGE","-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE","-module-cache-path","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ModuleCache","-parseable-output","-Xfrontend","-entry-point-function-name","-Xfrontend","ArgonMac_main","-swift-version","5","-plugin-path","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing","-sdk","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-I","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-L","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-g","-Xcc","-isysroot","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk","-Xcc","-F","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-Xcc","-fPIC","-Xcc","-g","-package-name","argonmac"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Package.swift","/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+

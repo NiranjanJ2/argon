@@ -224,6 +224,11 @@ class GoogleTasksStore:
         self._service = None       # cached API client
         self._tl_id: str | None = None  # cached task list ID
 
+    @property
+    def workspace(self) -> Path:
+        """Where this store's data lives — callers need it to load the board."""
+        return self._workspace
+
     def _svc(self):
         """Google Tasks client for the work account, built once per store."""
         if self._service is None:

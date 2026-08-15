@@ -222,6 +222,51 @@ TASK_FOCUS_WINDOW_MIN = 120
 AUTO_FOCUS_SOURCE = "task"
 
 
+def overlay_for_classroom(store: GoogleTasksStore, task_id: str) -> dict[str, Any] | None:
+    """Give a Classroom assignment the Google Task it needs to be worked on.
+
+    The board shows assignments directly, because Classroom owns the title and
+    the deadline and copying them wholesale creates a second owner that goes
+    stale the moment either changes. The cost is that an assignment has nowhere
+    to record "started 4:10 PM, took 35 minutes" — those facts live on a task,
+    and every commitment on the board can be Classroom-only, which is why
+    starting anything returned "task not found".
+
+    So the overlay is created at the moment he actually starts one. That is
+    precisely the case the design reserves it for — "a task he wants to
+    schedule" — rather than the bulk projection it forbids. ``add_task``
+    deduplicates on ``classroom_key``, so this cannot produce a second row.
+
+    Returns None when the id is not a Classroom commitment, leaving the caller's
+    existing "no such task" answer intact.
+    """
+    from argon.commitments import load_board
+
+    board = load_board(store.workspace, store=store)
+    match = next(
+        (c for c in board.as_dicts()
+         if c.get("id") == task_id and c.get("source") == "classroom"),
+        None,
+    )
+    if not match or match.get("google_task_id"):
+        return None
+
+    created = store.add_task(
+        title=match.get("title") or "Untitled assignment",
+        source="classroom",
+        priority=match.get("priority") or "medium",
+        # The work-by date if he set one, else the school's deadline — `due` is
+        # already that derived value, so it does not need recomputing here.
+        due=match.get("due"),
+        subject=match.get("subject"),
+        classroom_id=match.get("classroom_id"),
+        classroom_key=match.get("classroom_key"),
+        official_due=match.get("official_due"),
+    )
+    logger.info("Created a Classroom overlay so {!r} could be started", match.get("title"))
+    return created
+
+
 def engage_task_focus(task: dict[str, Any]) -> str | None:
     """Shield the phone for a task that just started. Never raises.
 
@@ -323,6 +368,12 @@ class StartTaskTool(Tool):
     async def execute(self, **kwargs: Any) -> str:
         try:
             task = self._store.start_task(kwargs["task_id"])
+            if not task:
+                # Probably a Classroom assignment with no overlay yet: it is on
+                # the board and looks startable, but there is no task record to
+                # start. Make one, then start that.
+                if overlay := overlay_for_classroom(self._store, kwargs["task_id"]):
+                    task = self._store.start_task(overlay["id"])
         except TaskResolutionAmbiguityError as exc:
             return ToolResult(str(exc), success=False)
         if not task:
