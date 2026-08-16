@@ -219,7 +219,14 @@ def set_mode(
 #: Reset windows the phone will accept. Anything else is silently dropped there,
 #: so it is clamped here instead — the server advertising an allowance the phone
 #: never applied is the same lie as advertising a lock it never took.
-ALLOWANCE_WINDOWS_HOURS = (1, 6, 12, 24)
+#:
+#: Only two, because only two are expressible. Screen Time repeats a schedule
+#: whose components are minutes hourly, and one with hours and minutes daily;
+#: there is no single schedule that repeats every six hours. The previous list
+#: included 6 and 12 because the foqos allowance this was built on counted
+#: *unblocks* against a timer it managed itself, which Screen Time was not
+#: enforcing.
+ALLOWANCE_WINDOWS_HOURS = (1, 24)
 ALLOWANCE_MINUTES_RANGE = (5, 60)
 
 

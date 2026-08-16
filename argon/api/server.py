@@ -548,6 +548,38 @@ def screentime_history() -> Any:
 
 
 
+@app.post("/v1/ios/diagnostics")
+@require_token
+def ios_diagnostics_post() -> Any:
+    """Accept one self-report from the phone. Shape is up to the app."""
+    from argon.ios import diagnostics
+
+    payload = _body()
+    if not payload:
+        return jsonify({"error": "json object required"}), 400
+    return jsonify(diagnostics.record(payload))
+
+
+@app.get("/v1/ios/diagnostics")
+@require_token
+def ios_diagnostics_get() -> Any:
+    """Read the phone's reports back — ``?limit=N&kind=screentime``."""
+    from argon.ios import diagnostics
+
+    limit = request.args.get("limit", type=int) or 50
+    entries = diagnostics.recent(limit=min(200, max(1, limit)), kind=request.args.get("kind"))
+    return jsonify({"count": len(entries), "entries": entries})
+
+
+@app.delete("/v1/ios/diagnostics")
+@require_token
+def ios_diagnostics_clear() -> Any:
+    """Start a clean run before reproducing something."""
+    from argon.ios import diagnostics
+
+    return jsonify({"cleared": diagnostics.clear()})
+
+
 @app.get("/v1/inbox")
 @require_token
 def inbox_list() -> Any:
