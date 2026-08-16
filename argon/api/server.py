@@ -471,6 +471,45 @@ def ios_mode_get() -> Any:
     return jsonify(ios_mode.get_mode())
 
 
+@app.post("/v1/ios/mode")
+@require_token
+def ios_mode_set() -> Any:
+    """Set the desired focus mode directly, from a switch he actually threw.
+
+    Deliberately not routed through ``set_focus_mode``. That tool refuses a
+    night-time block until he confirms in a later message, because the model
+    asking for one is a guess about what he wants and a bad guess once locked
+    the phone at 1:47 AM. A tap on a switch is not a guess — it is the explicit
+    consent the guard exists to obtain, so demanding a second confirmation for
+    it would be asking him to agree with himself.
+
+    The emergency override still wins. Nothing here can jam it shut.
+    """
+    from argon.ios import mode as ios_mode
+
+    body = _body()
+    mode = str(body.get("mode") or "").strip()
+    if mode not in ios_mode.MODES:
+        return jsonify({"error": f"mode must be one of {list(ios_mode.MODES)}"}), 400
+
+    try:
+        desired = ios_mode.set_mode(
+            mode,
+            duration_min=body.get("minutes"),
+            allow_early_end=bool(body.get("allow_early_end", True)),
+            reason=str(body.get("reason") or "set from the phone"),
+            # Not "task": finishing a task must never clear a mode he chose.
+            source="phone",
+            allowance_minutes=body.get("allowance_min"),
+            allowance_per_hours=body.get("allowance_per_hours"),
+        )
+    except ios_mode.OverrideActive as exc:
+        return jsonify({"error": str(exc)}), 409
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(desired)
+
+
 @app.post("/v1/ios/state")
 @require_token
 def ios_state() -> Any:
