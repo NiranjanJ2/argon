@@ -87,3 +87,49 @@ def mark_answered(item_id: str, verb: str, result: str = "") -> dict[str, Any] |
 def unanswered() -> list[dict[str, Any]]:
     """Items still waiting on him — what a badge count would show."""
     return [i for i in recent(MAX_ITEMS) if not i.get("answered") and i.get("actions")]
+
+
+def backfill_from_ledger() -> int:
+    """Adopt check-ins the ledger recorded before this inbox existed.
+
+    Not invented history: the ledger's ``said`` list is what Argon actually
+    sent, verbatim, with the time it went out. Without this the phone shows
+    nothing until the next unprompted message — Argon speaks about twice a day,
+    so a feature shipped at 4:02 PM would look broken until the following
+    afternoon.
+
+    Keyed the same way ``notify`` keys a live delivery, so a check-in that is
+    later recorded properly updates this entry instead of appearing twice. No
+    actions are recovered, because the ledger never stored them; a backfilled
+    item is a statement rather than a question, which is the honest reading of
+    a message whose buttons are long gone.
+    """
+    from argon.services.reminder import LEDGER_DOC
+
+    ledger = store.get_doc(LEDGER_DOC, {}) or {}
+    day = ledger.get("date")
+    said = ledger.get("said") or []
+    if not day or not said:
+        return 0
+
+    added = 0
+    with store.edit_doc(_DOC, {"items": []}) as doc:
+        items = doc.get("items", [])
+        known = {i.get("id") for i in items}
+        for entry in said:
+            key = f"checkin:{day}:{entry.get('occasion') or 'unknown'}"
+            if key in known or not entry.get("text"):
+                continue
+            items.append({
+                "id": key,
+                "text": entry["text"],
+                "sent_at": entry.get("at") or _stamp(),
+                "actions": [],
+                "answered": None,
+            })
+            known.add(key)
+            added += 1
+        if added:
+            items.sort(key=lambda i: i.get("sent_at") or "")
+            doc["items"] = items[-MAX_ITEMS:]
+    return added

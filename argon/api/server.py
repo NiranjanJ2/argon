@@ -554,6 +554,14 @@ def inbox_list() -> Any:
     """What Argon said unprompted, newest first, with the buttons it offered."""
     from argon.ios import inbox as ios_inbox
 
+    # Adopt anything the check-in ledger recorded that the inbox missed —
+    # messages sent before this existed, or while the service was restarting.
+    # Deduplicated by delivery key, so this is a no-op after the first call.
+    try:
+        ios_inbox.backfill_from_ledger()
+    except Exception:  # noqa: BLE001 - never fail a read over history
+        logger.exception("Could not backfill the phone inbox from the ledger")
+
     limit = request.args.get("limit", type=int) or 20
     items = ios_inbox.recent(limit=min(50, max(1, limit)))
     return jsonify({"items": items, "unanswered": len(ios_inbox.unanswered())})

@@ -67,3 +67,46 @@ class TestAnswering:
     def test_answering_something_that_aged_out_is_not_resurrected(self):
         assert inbox.mark_answered("gone", "start") is None
         assert inbox.recent() == []
+
+
+class TestBackfill:
+    """Messages Argon really sent, adopted from the ledger."""
+
+    def _ledger(self, entries):
+        from argon.core import store
+        from argon.services.reminder import LEDGER_DOC
+
+        store.put_doc(LEDGER_DOC, {"date": "2026-08-15", "said": entries})
+
+    def test_a_check_in_sent_before_the_inbox_existed_is_adopted(self):
+        self._ledger([
+            {"at": "2026-08-15T16:00:01-07:00", "occasion": "daily_brief",
+             "text": "Two Math summer assignments are due Sunday."}
+        ])
+
+        assert inbox.backfill_from_ledger() == 1
+        assert inbox.recent()[0]["text"].startswith("Two Math")
+
+    def test_backfilling_twice_does_not_duplicate(self):
+        self._ledger([{"at": "2026-08-15T16:00:01-07:00", "occasion": "daily_brief",
+                       "text": "Brief"}])
+
+        inbox.backfill_from_ledger()
+        assert inbox.backfill_from_ledger() == 0
+        assert len(inbox.recent()) == 1
+
+    def test_a_live_recording_wins_over_the_backfilled_copy(self):
+        # Same delivery key, so the version carrying buttons replaces the
+        # text-only one rather than sitting beside it.
+        self._ledger([{"at": "2026-08-15T16:00:01-07:00", "occasion": "daily_brief",
+                       "text": "Brief"}])
+        inbox.backfill_from_ledger()
+
+        inbox.record("Brief", actions=_actions(), key="checkin:2026-08-15:daily_brief")
+
+        [item] = inbox.recent()
+        assert item["actions"], "the live copy should carry its buttons"
+
+    def test_an_empty_ledger_adopts_nothing(self):
+        assert inbox.backfill_from_ledger() == 0
+        assert inbox.recent() == []
