@@ -552,6 +552,39 @@ final class ArgonBridge: ObservableObject {
     }
   }
 
+  /// Turn a focus mode on or off from a switch, without asking Argon to.
+  ///
+  /// Goes straight to the server rather than through a message. Asking the
+  /// model to set a mode means hoping it calls the tool, and after 11 PM that
+  /// tool deliberately refuses until he confirms in a second message — a good
+  /// guard against Argon deciding to lock his phone, and a bad way to reach a
+  /// switch he is holding.
+  @discardableResult
+  func setFocusMode(
+    _ mode: String,
+    allowanceMinutes: Int? = nil,
+    perHours: Int? = nil
+  ) async -> Bool {
+    guard var request = makeRequest(path: "/v1/ios/mode", method: "POST") else { return false }
+    var body: [String: Any] = ["mode": mode, "reason": "set from the phone"]
+    if let allowanceMinutes { body["allowance_min"] = allowanceMinutes }
+    if let perHours { body["allowance_per_hours"] = perHours }
+
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+    do {
+      _ = try await perform(request)
+      lastError = nil
+      // Apply it now rather than waiting for the next poll, so the switch
+      // moving and the shield changing feel like one action.
+      _ = await refreshStatus()
+      return true
+    } catch {
+      lastError = "Could not set \(mode): \(error.localizedDescription)"
+      return false
+    }
+  }
+
   /// Send everything about Screen Time that only exists on the device.
   ///
   /// The state report carries a mode, a version and one error string, which

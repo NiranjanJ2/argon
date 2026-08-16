@@ -15,6 +15,10 @@ struct SettingsView: View {
   /// ArgonOverride lives in UserDefaults, not in @Published state, so the view
   /// needs a nudge to re-read it after the switch is thrown.
   @State private var overrideTick = 0
+  @State private var isSettingMode = false
+  /// Remembered across launches so the picker does not snap back to a default
+  /// he did not choose while the server round-trip is in flight.
+  @AppStorage("argon.weekendMinutes") private var weekendMinutes = 15
 
   private var appVersion: String {
     Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
@@ -26,6 +30,66 @@ struct SettingsView: View {
       get: { argonBridge.apiToken },
       set: { argonBridge.apiToken = $0 }
     )
+  }
+
+  /// Weekend mode, as a switch rather than a thing you have to ask for.
+  ///
+  /// Until this existed the only way in was telling Argon, which meant hoping
+  /// the model called the tool — and after 11 PM that tool refuses until you
+  /// confirm in a second message. Good guard against Argon locking the phone
+  /// on a guess; useless as a way to flip a switch you are already holding.
+  @ViewBuilder
+  private var weekendMode: some View {
+    Section {
+      Toggle(isOn: weekendBinding) {
+        VStack(alignment: .leading, spacing: 3) {
+          Text("Weekend mode")
+            .font(.headline)
+          Text(
+            argonBridge.desiredMode == "weekend"
+              ? "\(weekendMinutes) minutes an hour, then shielded"
+              : "Meter distracting apps instead of blocking them"
+          )
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        }
+      }
+      .disabled(isSettingMode)
+
+      if argonBridge.desiredMode == "weekend" {
+        Picker("Budget", selection: $weekendMinutes) {
+          ForEach([5, 10, 15, 20, 30, 45, 60], id: \.self) { Text("\($0)m").tag($0) }
+        }
+        .onChange(of: weekendMinutes) { _, minutes in
+          guard argonBridge.desiredMode == "weekend" else { return }
+          setMode("weekend", minutes: minutes)
+        }
+      }
+    } footer: {
+      Text(
+        "Apps stay open until you have used your budget for the hour, then they "
+          + "shield until the next one. Time you do not spend is not lost."
+      )
+    }
+  }
+
+  private var weekendBinding: Binding<Bool> {
+    Binding(
+      get: { argonBridge.desiredMode == "weekend" },
+      set: { on in setMode(on ? "weekend" : "off", minutes: on ? weekendMinutes : nil) }
+    )
+  }
+
+  private func setMode(_ mode: String, minutes: Int?) {
+    isSettingMode = true
+    Task {
+      await argonBridge.setFocusMode(
+        mode,
+        allowanceMinutes: mode == "weekend" ? minutes : nil,
+        perHours: mode == "weekend" ? 1 : nil
+      )
+      isSettingMode = false
+    }
   }
 
   /// The last thing on the page: kill any block, now, whatever Argon wants.
@@ -257,6 +321,7 @@ struct SettingsView: View {
           }
         }
 
+        weekendMode
         emergencyRelease
       }
       .navigationTitle("Settings")
