@@ -90,6 +90,19 @@ export const className = `
                text-overflow: ellipsis; white-space: nowrap; }
   .row .when { font-size: 10px; color: #9BAAC0; flex: none; }
 
+  /* Argon's open questions sit above everything: it is the only thing on the
+     desktop waiting on an answer rather than informing. */
+  .asked { margin-bottom: 14px; padding-bottom: 12px;
+           border-bottom: 1px solid rgba(169,221,255,0.10); }
+  .q { margin-top: 6px; }
+  .qtext { font-size: 12px; color: #F4F8FF; line-height: 1.35; }
+  .qacts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .qbtn { padding: 5px 10px; border-radius: 8px; cursor: pointer; font-size: 11px;
+          border: 1px solid rgba(169,221,255,0.16);
+          background: rgba(18,33,58,0.75); color: #A9DDFF;
+          transition: background 120ms ease; }
+  .qbtn:hover { background: rgba(39,93,255,0.30); }
+
   .plan { margin-top: 14px; padding-top: 12px;
           border-top: 1px solid rgba(169,221,255,0.10); }
   .blk { display: flex; align-items: center; gap: 9px; padding: 5px 8px;
@@ -156,11 +169,29 @@ export const render = ({ output }) => {
 
   const now = v.now || {};
   const agenda = v.agenda || [];
-  const plan = v.plan || {};
-  const due = v.due || [];
+  const inbox = v.inbox || [];
 
   return (
     <div>
+      {inbox.length > 0 && (
+        <div className="asked">
+          <div className="eyebrow">Argon asked</div>
+          {inbox.map((q) => (
+            <div key={q.id} className="q">
+              <div className="qtext">{q.text}</div>
+              <div className="qacts">
+                {q.actions.filter((a) => a.task_id).map((a) => (
+                  <span key={a.action} className="qbtn"
+                        onClick={(e) => act(e, a.action, a.task_id)}>
+                    {a.label}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {now.state === "running" ? (
         <div className="panel">
           <div className="eyebrow">Working on</div>
@@ -195,46 +226,6 @@ export const render = ({ output }) => {
           ) : (
             <div className="empty">Nothing on the list.</div>
           )}
-        </div>
-      )}
-
-      {plan.text && (!plan.blocks || plan.blocks.length === 0) && (
-        <div className="plan">
-          <div className="eyebrow">Plan</div>
-          <div className="empty">{plan.text}</div>
-        </div>
-      )}
-
-      {plan.blocks && plan.blocks.length > 0 && (
-        <div className="plan">
-          <div className="eyebrow">Plan</div>
-          {plan.blocks.map((b) => (
-            <div key={b.id}
-                 className={"blk" + (b.live ? " live" : b.ahead ? "" : " gone")}>
-              <span className="span">{b.span}</span>
-              <span className="what">{b.what}</span>
-              {b.status === "pending" ? (
-                <span className="tick" onClick={(e) => act(e, "block", b.id, "done")}>
-                  done
-                </span>
-              ) : (
-                <span className="when">{b.label}</span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {due.length > 0 && (
-        <div className="due">
-          <div className="eyebrow">Due</div>
-          {due.map((d) => (
-            <div key={d.title + d.when} className={d.urgent ? "hw urgent" : "hw"}>
-              <Icon name="cap" />
-              <span className="name">{d.title}</span>
-              <span className="when">{d.when}</span>
-            </div>
-          ))}
         </div>
       )}
 

@@ -21,6 +21,28 @@ struct ArgonTask: Codable, Identifiable, Equatable {
     case timeEstimateMin = "time_estimate_min"
   }
 
+  init(
+    id: String,
+    title: String,
+    done: Bool = false,
+    priority: String = "medium",
+    subject: String? = nil,
+    due: String? = nil,
+    running: Bool? = nil,
+    runningMinutes: Int? = nil,
+    timeEstimateMin: Int? = nil
+  ) {
+    self.id = id
+    self.title = title
+    self.done = done
+    self.priority = priority
+    self.subject = subject
+    self.due = due
+    self.running = running
+    self.runningMinutes = runningMinutes
+    self.timeEstimateMin = timeEstimateMin
+  }
+
   init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString

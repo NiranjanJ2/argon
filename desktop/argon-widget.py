@@ -220,6 +220,15 @@ def collect():
         status["tasks_state"] = {}
         status["tasks_cached"] = False
         status["tasks_error"] = str(e)
+
+    # Argon's open questions. Also allowed to fail alone: an older server has no
+    # /v1/inbox at all, and the readout predates it, so a 404 here must leave
+    # everything else on screen.
+    try:
+        payload = reach(bases, token, lambda b: get(b, token, "/v1/inbox"))
+        status["inbox"] = payload.get("items", [])
+    except Exception:  # noqa: BLE001
+        status["inbox"] = []
     return status
 
 
@@ -294,7 +303,7 @@ def due_bucket(stamp):
 # View model — the single source of what the readout says
 # ---------------------------------------------------------------------------
 
-def build_view(d, minutes_now=None):
+def build_view(d):
     """Turn raw server state into everything both renderers display."""
     if d.get("error"):
         return {"ok": False, "error": d["error"], "updated": now().strftime("%-I:%M:%S %p")}
@@ -358,13 +367,31 @@ def build_view(d, minutes_now=None):
         },
         "groups": group_tasks(d.get("tasks") or []),
         "now": now_panel(d),
-        "plan": plan_panel(d, minutes_now),
-        "due": [
-            {"title": a.get("title") or "?", "course": a.get("course") or "",
-             "when": a.get("due_when") or "", "days": a.get("days_left"),
-             "urgent": isinstance(a.get("days_left"), int) and a["days_left"] <= 1}
-            for a in (d.get("schoolwork") or [])
+        # Argon's open questions, drawn above everything else. This is the only
+        # thing on the desktop waiting on him rather than informing him, and it
+        # was the one thing the readout could not show at all.
+        "inbox": [
+            {"id": i.get("id"), "text": i.get("text") or "",
+             "actions": [
+                 {"label": a.get("label") or a.get("action") or "?",
+                  "action": a.get("action") or "",
+                  "task_id": a.get("task_id") or ""}
+                 for a in (i.get("actions") or [])
+             ]}
+            for i in (d.get("inbox") or [])
+            if not i.get("answered") and i.get("actions")
         ],
+        # `plan` and `due` are gone, deliberately.
+        #
+        # Plan drew timed blocks. He does not work in blocks — that model was
+        # abandoned — so the panel maintained a schedule nothing writes to and
+        # sat there permanently reading "Not planned yet".
+        #
+        # Due listed schoolwork, which on this board *is* the task list: every
+        # commitment is Classroom-sourced, so it reprinted `groups` directly
+        # underneath `groups`. Two renderings of one list is how a readout stops
+        # being read. Urgency already lives on the task row, which says
+        # "tomorrow" and turns amber on its own.
         "agenda": [
             {"id": e.get("id"), "summary": e.get("summary") or "(untitled)",
              "when": e.get("when") or "", "location": e.get("location")}
@@ -450,55 +477,6 @@ BLOCK_MARK = {
     "done": ("done", "checkmark.circle.fill", False),
     "skipped": ("skipped", "xmark.circle", False),
 }
-
-
-def plan_panel(d, minutes_now=None):
-    """Today's blocks, and which one he is in.
-
-    *minutes_now* exists so the selftest can pin the clock. It used to read the
-    real one, and the fixture hard-coded a 14:00–23:30 block with a comment
-    claiming that always contains "now" — so running the selftest in the morning
-    failed on code nobody had touched.
-
-    The plan is what decides when Argon speaks, so a readout that does not show
-    it is describing a different day from the one Argon is running.
-    """
-    plan = d.get("plan") or {}
-    blocks = plan.get("blocks") or []
-    if not blocks:
-        return {
-            "state": "none",
-            "text": "No explicit plan",
-            "blocks": [],
-        }
-
-    if minutes_now is None:
-        minutes_now = now().hour * 60 + now().minute
-    out, current = [], None
-    for block in blocks:
-        start = hhmm_minutes(block.get("start"))
-        end = hhmm_minutes(block.get("end"))
-        status = block.get("status") or "pending"
-        label, icon, ahead = BLOCK_MARK.get(status, BLOCK_MARK["pending"])
-        live = (status == "pending" and start is not None and start <= minutes_now
-                and (end is None or minutes_now < end))
-        if live:
-            label, icon = "now", "play.circle.fill"
-            current = block.get("what")
-        elif status == "pending" and start is not None and minutes_now >= (end or start):
-            label, icon, ahead = "passed", "circle.dotted", False
-        out.append({
-            "id": block.get("id"),
-            "what": block.get("what") or "?",
-            "span": span_label(block.get("start"), block.get("end")),
-            "status": status,
-            "label": label,
-            "icon": icon,
-            "live": live,
-            "ahead": ahead and not live,
-        })
-    return {"state": "planned", "current": current, "blocks": out,
-            "text": current or "Between blocks"}
 
 
 def hhmm_minutes(value):
@@ -652,39 +630,19 @@ def render_swiftbar(view):
             out.append(bar(label, size=12, color=item["tint"], sfimage="play.circle",
                            **action_params("start", item["id"])))
 
-    # -- today's plan ------------------------------------------------------
-    plan = view.get("plan") or {}
-    if plan.get("blocks"):
+    # -- Argon's open questions ---------------------------------------------
+    # Above the task list, because this is the part waiting on an answer.
+    if view.get("inbox"):
         out.append("---")
-        out.append(bar("Plan", color=PALETTE["mutedInk"], size=11))
-        for block in plan["blocks"]:
-            tail = " · " + block["label"] if block["label"] else ""
-            out.append(bar(
-                "{}  {}{}".format(block["span"], block["what"], tail),
-                size=12, sfimage=block["icon"],
-                color=PALETTE["cyan"] if block["live"] else (
-                    PALETTE["ink"] if block["ahead"] else PALETTE["mutedInk"]),
-            ))
-            if block["status"] == "pending":
-                out.append(bar("Mark done", size=11, sfimage="checkmark",
-                               **action_params("block", block["id"], "done")))
-                out.append(bar("Skip", size=11, sfimage="xmark",
-                               **action_params("block", block["id"], "skipped")))
-    elif plan.get("text"):
-        out.append("---")
-        out.append(bar(plan["text"], color=PALETTE["mutedInk"], size=11,
-                       sfimage="calendar.badge.exclamationmark"))
-
-    # -- due from Classroom -------------------------------------------------
-    if view.get("due"):
-        out.append("---")
-        out.append(bar("Due", color=PALETTE["mutedInk"], size=11))
-        for item in view["due"]:
-            label = "{} · {}".format(item["title"], item["when"])
-            out.append(bar(label, size=12, sfimage="graduationcap",
-                           color=PALETTE["warning"] if item["urgent"] else PALETTE["ink"]))
-            if item["course"]:
-                out.append(bar("--" + item["course"], color=PALETTE["mutedInk"], size=11))
+        out.append(bar("Argon asked", color=PALETTE["mutedInk"], size=11))
+        for item in view["inbox"]:
+            out.append(bar(item["text"][:80], size=12, color=PALETTE["ink"]))
+            for action in item["actions"]:
+                if action["task_id"]:
+                    out.append(bar(
+                        "--" + action["label"], size=11,
+                        **action_params(action["action"], action["task_id"])
+                    ))
 
     # -- agenda ------------------------------------------------------------
     if view.get("agenda"):
@@ -858,11 +816,6 @@ def action_params(*args):
 
 # ---------------------------------------------------------------------------
 
-#: The minute the selftest pretends it is. Pinned, so the plan assertions do
-#: not depend on the hour the suite happens to run at.
-SELFTEST_MINUTE = 15 * 60      # 3:00 PM
-
-
 def selftest():
     """Smallest thing that fails if the view logic breaks. No network."""
     from datetime import timedelta
@@ -909,18 +862,7 @@ def selftest():
              "running": True, "running_minutes": 12},
         ],
         "agenda": [{"id": "e1", "summary": "All Project Sync", "when": "in 12 min"}],
-        "plan": {"blocks": [
-            {"id": "b0", "start": "09:00", "end": "10:00", "what": "Gym", "status": "done"},
-            {"id": "b1", "start": "14:00", "end": "23:30", "what": "SAT prep", "status": "pending"},
-            {"id": "b2", "start": "23:45", "end": None, "what": "Reading", "status": "pending"},
-        ]},
-        "schoolwork": [
-            {"title": "Racism Reflection", "course": "APUSH PM",
-             "due_when": "Fri 08/14, 11:59 PM", "days_left": 3},
-            {"title": "Chem lab", "course": "AP Chem",
-             "due_when": "Wed 08/13", "days_left": 1},
-        ],
-    }, minutes_now=SELFTEST_MINUTE)
+    })
 
     assert view["hero"]["eyebrow"] == "LOCKED IN" and view["hero"]["icon"] == "lock.fill"
     assert [m["value"] for m in view["metrics"]] == ["0m", "61m", "3"]
@@ -968,33 +910,21 @@ def selftest():
                                    "running_minutes": 900}]})
     assert plain["now"]["over"] is False
 
-    # -- the plan ----------------------------------------------------------
-    # Explicit blocks may produce start reminders, so the readout must agree.
-    assert span_label("14:00", "16:00") == "2–4 PM"
-    assert span_label("09:00", "12:30") == "9 AM – 12:30 PM"
-    assert span_label("19:00", None) == "7 PM"
-    assert hhmm_minutes("14:30") == 870 and hhmm_minutes("nonsense") is None
-
-    blocks = view["plan"]["blocks"]
-    assert [b["what"] for b in blocks] == ["Gym", "SAT prep", "Reading"]
-    assert blocks[0]["label"] == "done" and blocks[0]["ahead"] is False
-    # 3 PM falls inside the 14:00–23:30 block. Pinned rather than read off the
-    # wall clock: this assertion used to fail before 2 PM on unchanged code.
-    assert blocks[1]["live"] is True and blocks[1]["label"] == "now"
-    assert blocks[2]["ahead"] is True and blocks[2]["live"] is False
-    assert view["plan"]["current"] == "SAT prep"
-
-    # No explicit plan is a normal state, not an unanswered request.
-    assert build_view({"tasks": []})["plan"]["state"] == "none"
-    assert build_view({"tasks": []})["plan"]["text"] == "No explicit plan"
-
-    # Coursework: nearest first, and tomorrow reads as urgent.
-    due = view["due"]
-    assert [d["title"] for d in due] == ["Racism Reflection", "Chem lab"]
-    assert due[1]["urgent"] is True and due[0]["urgent"] is False
-
-    params = action_params("block", "b1", "done")
-    assert params["param2"] == '"block"' and params["param4"] == '"done"'
+    # -- Argon's open questions --------------------------------------------
+    # An answered item is history and must not sit there looking like a
+    # question; one with no buttons is a statement, not a request.
+    asked = build_view({
+        "tasks": [],
+        "inbox": [
+            {"id": "k1", "text": "Have you started APUSH?",
+             "actions": [{"label": "Starting now", "action": "start", "task_id": "t1"}]},
+            {"id": "k2", "text": "Answered already", "answered": {"verb": "start"},
+             "actions": [{"label": "Starting now", "action": "start", "task_id": "t2"}]},
+            {"id": "k3", "text": "Your meeting starts in 15 minutes.", "actions": []},
+        ],
+    })["inbox"]
+    assert [i["text"] for i in asked] == ["Have you started APUSH?"]
+    assert asked[0]["actions"][0]["action"] == "start"
 
     # -- reaching the server -----------------------------------------------
     # Home is direct; school goes out through Cloudflare and back. Trying the

@@ -159,6 +159,16 @@ export const className = `
   .btn:hover { background: rgba(93,169,255,0.14); border-color: rgba(93,169,255,0.30); }
   .btn svg { width: 11px; height: 11px; }
 
+  /* Argon's open questions: the only thing here waiting on an answer. */
+  .q { margin: 4px 0 10px; }
+  .qtext { font-size: 12px; color: #F4F8FF; line-height: 1.35; }
+  .qacts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .qbtn { padding: 5px 10px; border-radius: 8px; cursor: pointer; font-size: 11px;
+          border: 1px solid rgba(169,221,255,0.16);
+          background: rgba(18,33,58,0.75); color: #A9DDFF;
+          transition: background 120ms ease; }
+  .qbtn:hover { background: rgba(39,93,255,0.30); }
+
   .empty { text-align: center; padding: 22px 8px; }
   .empty svg { width: 28px; height: 28px; stroke: #A9DDFF; stroke-width: 1.7;
                filter: drop-shadow(0 0 9px rgba(93,169,255,0.46)); }
@@ -236,8 +246,7 @@ export const render = ({ output }) => {
   }
 
   const groups = v.groups || [];
-  const plan = v.plan || {};
-  const due = v.due || [];
+  const inbox = v.inbox || [];
   const focus = v.focus || {};
   const phone = v.phone || {};
 
@@ -281,56 +290,25 @@ export const render = ({ output }) => {
         </div>
       )}
 
-      {plan.text && (!plan.blocks || plan.blocks.length === 0) && (
-        <div>
-          <div className="section">
-            <span className="dot" style={{ background: "#9BAAC0" }} />
-            <span className="display name">Plan</span>
-          </div>
-          <div className="blk gone"><span className="what">{plan.text}</span></div>
-        </div>
-      )}
-
-      {plan.blocks && plan.blocks.length > 0 && (
+      {inbox.length > 0 && (
         <div>
           <div className="section">
             <span className="dot" style={{ background: "#65D8FF",
                                            boxShadow: "0 0 5px #65D8FF" }} />
-            <span className="display name">Plan</span>
-            <span className="count">{plan.blocks.length}</span>
+            <span className="display name">Argon asked</span>
+            <span className="count">{inbox.length}</span>
           </div>
-          {plan.blocks.map((b) => (
-            <div key={b.id}
-                 className={"blk" + (b.live ? " live" : b.ahead ? "" : " gone")}>
-              <span className="span">{b.span}</span>
-              <span className="what">{b.what}</span>
-              {b.status === "pending" ? (
-                <span className="tick" onClick={(e) => act(e, "block", b.id, "done")}>
-                  done
-                </span>
-              ) : (
-                <span className="mark">{b.label}</span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {due.length > 0 && (
-        <div>
-          <div className="section">
-            <span className="dot" style={{ background: "#A9DDFF",
-                                           boxShadow: "0 0 5px #A9DDFF" }} />
-            <span className="display name">Due</span>
-            <span className="count">{due.length}</span>
-          </div>
-          {due.map((d) => (
-            <div key={d.title + d.when} className={d.urgent ? "hw urgent" : "hw"}>
-              <span className="name">
-                {d.title}
-                {d.course && <span className="course"> · {d.course}</span>}
-              </span>
-              <span className="when">{d.when}</span>
+          {inbox.map((q) => (
+            <div key={q.id} className="q">
+              <div className="qtext">{q.text}</div>
+              <div className="qacts">
+                {q.actions.filter((a) => a.task_id).map((a) => (
+                  <span key={a.action} className="qbtn"
+                        onClick={(e) => act(e, a.action, a.task_id)}>
+                    {a.label}
+                  </span>
+                ))}
+              </div>
             </div>
           ))}
         </div>
