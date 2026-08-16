@@ -478,10 +478,15 @@ class StrategyManager: ObservableObject {
     }
     clearLegacyGrants()
 
+    // His weekend list if he set one, else everything the lockdown profile
+    // blocks. The fallback keeps the mode working before he has chosen — but
+    // it rations the whole phone, which is why choosing is worth offering.
     try ArgonMetered.start(
       minutes: minutes,
       window: ArgonMetered.Window(rawValue: perHours) ?? .hourly,
-      selection: profile.selectedActivity
+      selection: ArgonMetered.hasConfiguredApps
+        ? (ArgonMetered.configuredApps ?? profile.selectedActivity)
+        : profile.selectedActivity
     )
     loadActiveSession(context: context)
     return profile.name

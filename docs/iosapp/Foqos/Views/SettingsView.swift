@@ -16,6 +16,11 @@ struct SettingsView: View {
   /// needs a nudge to re-read it after the switch is thrown.
   @State private var overrideTick = 0
   @State private var isSettingMode = false
+  @State private var showingWeekendPicker = false
+  @State private var weekendSelection = FamilyActivitySelection()
+  /// Bumped after the picker closes so the caption re-reads the app group,
+  /// which SwiftUI has no way to observe.
+  @State private var weekendAppsTick = 0
   /// Remembered across launches so the picker does not snap back to a default
   /// he did not choose while the server round-trip is in flight.
   @AppStorage("argon.weekendMinutes") private var weekendMinutes = 15
@@ -65,12 +70,39 @@ struct SettingsView: View {
           setMode("weekend", minutes: minutes)
         }
       }
+
+      Button {
+        weekendSelection = ArgonMetered.configuredApps ?? FamilyActivitySelection()
+        showingWeekendPicker = true
+      } label: {
+        HStack {
+          Text("Apps to meter")
+            .foregroundStyle(.primary)
+          Spacer()
+          Text(weekendAppsCaption)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          Image(systemName: "chevron.right")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
     } footer: {
       Text(
         "Apps stay open until you have used your budget for the hour, then they "
           + "shield until the next one. Time you do not spend is not lost."
       )
     }
+  }
+
+  private var weekendAppsCaption: String {
+    guard ArgonMetered.hasConfiguredApps, let selection = ArgonMetered.configuredApps else {
+      // Says what it will actually do rather than "None", which would read as
+      // "nothing is metered" when in fact everything is.
+      return "Same as \(argonBridge.profileName)"
+    }
+    let count = FamilyActivityUtil.countSelectedActivities(selection)
+    return "\(count) selected"
   }
 
   private var weekendBinding: Binding<Bool> {
@@ -345,6 +377,23 @@ struct SettingsView: View {
       }
       .sheet(isPresented: $showDebugView) {
         DebugView()
+      }
+      .sheet(isPresented: $showingWeekendPicker) {
+        AppPicker(selection: $weekendSelection, isPresented: $showingWeekendPicker)
+          .environmentObject(themeManager)
+      }
+      .onChange(of: showingWeekendPicker) { _, presenting in
+        // Saved on dismiss rather than on every tap inside the picker: the
+        // selection binding changes constantly while he is choosing, and
+        // re-arming Screen Time on each change would restart the window.
+        guard !presenting else { return }
+        ArgonMetered.configuredApps = weekendSelection
+        weekendAppsTick += 1
+        // Only re-arm if the mode is actually on; otherwise the new list is
+        // simply what the next weekend will use.
+        if argonBridge.desiredMode == "weekend" {
+          setMode("weekend", minutes: weekendMinutes)
+        }
       }
     }
   }

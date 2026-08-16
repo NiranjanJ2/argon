@@ -176,6 +176,46 @@ extension ManagedSettingsStore.Name {
   static let argonMetered = Self("argonMetered")
 }
 
+extension ArgonMetered {
+  /// The apps he chose to meter at the weekend, if he chose any.
+  ///
+  /// Separate from the lockdown profile on purpose. Locking in and taking a
+  /// lighter weekend are different intents over different apps: the block list
+  /// is everything that could distract him, while the metered list is usually
+  /// the two or three things he actually wants a little of. Sharing one list
+  /// meant weekend mode rationed his whole phone.
+  ///
+  /// Also separate from the selection the extension reads, which is whatever is
+  /// *currently* being metered. Editing this while metered mode is off must not
+  /// change what a running shield applies to.
+  static var configuredApps: FamilyActivitySelection? {
+    get {
+      guard let data = configuredSuite?.data(forKey: configuredKey) else { return nil }
+      return try? JSONDecoder().decode(FamilyActivitySelection.self, from: data)
+    }
+    set {
+      guard let newValue, let data = try? JSONEncoder().encode(newValue) else {
+        configuredSuite?.removeObject(forKey: configuredKey)
+        return
+      }
+      configuredSuite?.set(data, forKey: configuredKey)
+    }
+  }
+
+  /// True when he has actually picked something, rather than left it empty.
+  static var hasConfiguredApps: Bool {
+    guard let selection = configuredApps else { return false }
+    return !selection.applicationTokens.isEmpty
+      || !selection.categoryTokens.isEmpty
+      || !selection.webDomainTokens.isEmpty
+  }
+
+  private static var configuredSuite: UserDefaults? {
+    UserDefaults(suiteName: "group.com.niranjanj.argon")
+  }
+  private static let configuredKey = "argon.weekend.selection"
+}
+
 extension SharedData {
   /// What metered mode is metering, stored where the monitor extension can
   /// reach it.
