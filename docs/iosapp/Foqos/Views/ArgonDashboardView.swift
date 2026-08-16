@@ -4,10 +4,18 @@ struct ArgonDashboardView: View {
   @EnvironmentObject private var bridge: ArgonBridge
   @State private var showingAddTask = false
 
-  /// Only what is still waiting on him. An answered message is history, and
-  /// history belongs in the chat, not at the top of today's list.
-  private var waitingMessages: [ArgonInboxItem] {
-    bridge.inbox.filter(\.isWaiting)
+  /// What Argon has said lately, unanswered first.
+  ///
+  /// This deliberately shows answered messages too. Rendering only open
+  /// questions sounded right and was wrong in practice: Argon speaks unprompted
+  /// about twice a day, so the section was empty almost always and appeared
+  /// three minutes out of every twenty-four hours — which reads as broken
+  /// rather than as "nothing is waiting on you". An answered message still says
+  /// what he was asked and what he replied, which is worth the space.
+  private var recentMessages: [ArgonInboxItem] {
+    let waiting = bridge.inbox.filter(\.isWaiting)
+    let answered = bridge.inbox.filter { !$0.isWaiting }
+    return Array((waiting + answered).prefix(3))
   }
 
   private var pendingTasks: [ArgonTask] {
@@ -50,9 +58,9 @@ struct ArgonDashboardView: View {
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
 
-          if !waitingMessages.isEmpty {
+          if !recentMessages.isEmpty {
             Section {
-              ForEach(waitingMessages) { item in
+              ForEach(recentMessages) { item in
                 ArgonMessageCard(item: item) { action in
                   Task { await bridge.answerInbox(item, with: action) }
                 }
@@ -381,7 +389,16 @@ private struct ArgonMessageCard: View {
           .foregroundStyle(ArgonPalette.mutedInk)
       }
 
-      if !item.actions.isEmpty {
+      if let answered = item.answered {
+        // Already dealt with. Shows what he chose rather than dead buttons,
+        // so the card reads as a record instead of a question asked twice.
+        Label(
+          answered.result?.isEmpty == false ? answered.result! : answered.verb.capitalized,
+          systemImage: "checkmark.circle.fill"
+        )
+        .font(.caption2.weight(.medium))
+        .foregroundStyle(ArgonPalette.mutedInk)
+      } else if !item.actions.isEmpty {
         // Wraps rather than scrolls: three verbs at a readable size do not fit
         // one line on a small phone, and a button you have to scroll to find is
         // one you will not press.
@@ -416,8 +433,13 @@ private struct ArgonMessageCard: View {
     )
     .overlay(
       RoundedRectangle(cornerRadius: 14, style: .continuous)
-        .stroke(ArgonPalette.electricBlue.opacity(0.22), lineWidth: 1)
+        .stroke(
+          // A live question is worth looking at; an answered one is a receipt.
+          ArgonPalette.electricBlue.opacity(item.isWaiting ? 0.22 : 0.08),
+          lineWidth: 1
+        )
     )
+    .opacity(item.isWaiting ? 1 : 0.62)
   }
 
   private func isBusy(_ action: ArgonInboxAction) -> Bool {
