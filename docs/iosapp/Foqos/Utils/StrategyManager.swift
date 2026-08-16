@@ -433,76 +433,56 @@ class StrategyManager: ObservableObject {
     return profile
   }
 
-  private func clearMeteredAllowance() {
+  /// Clear a soft-unblock session left by the previous design.
+  ///
+  /// Kept because a phone upgrading from the previous build can still have a
+  /// live grant session, whose shield would otherwise outlive the mode that
+  /// created it with nothing left able to lift it.
+  private func clearLegacyGrants() {
     SoftUnblockGrantScheduler.stopAll()
     SoftUnblockGrantStore.clearAll()
   }
 
-  /// Apply a *metered* block: shielded, but tapping a blocked app buys a short
-  /// break from a refillable allowance instead of hitting a wall.
+  /// Stand down anything metering apps, from either design.
   ///
-  /// Two things here are load-bearing.
+  /// Separate from `clearLegacyGrants` on purpose: metered mode re-applies on
+  /// every status poll, and stopping monitoring there would restart the window
+  /// each time and refill the budget every twenty seconds — the same mistake
+  /// the previous design made, in a new place.
+  private func clearMeteredAllowance() {
+    ArgonMetered.stop()
+    clearLegacyGrants()
+  }
+
+  /// Put Argon's metered mode in force for the apps a profile names.
   ///
-  /// It is idempotent. `reconcile` runs on every status poll — roughly every
-  /// twenty seconds — with no version gate, so beginning a session
-  /// unconditionally would reset the allowance faster than it could ever be
-  /// spent and quietly make the limit infinite. An already-running session with
-  /// the same terms is left strictly alone.
-  ///
-  /// It never writes `StrategyTimerData`. `strategyData` is one shared blob and
-  /// the shield extension reads `SoftUnblockStrategyData` out of it, so setting
-  /// a timer expiry there would erase the allowance and turn this back into an
-  /// ordinary block. That is why metered modes run open-ended.
+  /// The profile is used only as the list of what to meter — no session is
+  /// started and no blocking strategy runs. This replaced an adaptation of
+  /// foqos's soft-unblock grants, which modelled one unblock *window* per
+  /// period rather than a usage budget, and which needed a live session, a
+  /// grant store and a button on the shield to work at all.
   @discardableResult
-  func applyArgonMetered(
+  func applyArgonMeteredMode(
     profileName: String,
-    allowanceMinutes: Int,
-    resetIntervalInHours: Int,
+    minutes: Int,
+    perHours: Int,
     context: ModelContext
   ) throws -> String {
     let profile = try argonProfile(named: profileName, in: context)
-    let configuration = SoftUnblockStrategyData(
-      accessDurationInMinutes: allowanceMinutes,
-      maximumUnblockCount: 1,
-      allowanceResetIntervalInHours: resetIntervalInHours
-    )
 
-    if let activeSession = getActiveSession(context: context),
-      activeSession.blockedProfile.id == profile.id,
-      SoftUnblockGrantStore.isActive(sessionId: activeSession.id, profileId: profile.id),
-      SoftUnblockStrategyData.decode(profile.strategyData) == configuration
-    {
-      return profile.name  // Already metered on these terms. Do not touch it.
-    }
-
+    // Any ordinary block is stood down first: two shields over the same apps
+    // means the metered one can never let them through.
     if let activeSession = getActiveSession(context: context) {
       let manualStrategy = getStrategy(id: ManualBlockingStrategy.id, context: context)
       _ = manualStrategy.stopBlocking(context: context, session: activeSession)
     }
-    clearMeteredAllowance()
+    clearLegacyGrants()
 
-    profile.strategyData = SoftUnblockStrategyData.encode(configuration)
-    profile.updatedAt = Date()
-    try context.save()
-    BlockedProfiles.updateSnapshot(for: profile)
-
-    // Tagged manual, not soft-unblock: the allowance comes from the grant store,
-    // which the shield reads directly, while the tag decides how the session can
-    // be *stopped*. Argon must be able to end this without a QR code or tag.
-    let session = BlockedProfileSession.createSession(
-      in: context,
-      withTag: ManualBlockingStrategy.id,
-      withProfile: profile,
-      forceStart: true
+    try ArgonMetered.start(
+      minutes: minutes,
+      window: ArgonMetered.Window(rawValue: perHours) ?? .hourly,
+      selection: profile.selectedActivity
     )
-    SoftUnblockGrantStore.beginSession(
-      sessionId: session.id,
-      profileId: profile.id,
-      maximumUnblockCount: configuration.maximumUnblockCount,
-      allowanceResetIntervalInHours: configuration.allowanceResetIntervalInHours,
-      startedAt: session.startTime
-    )
-    AppBlockerUtil().activateRestrictions(for: BlockedProfiles.getSnapshot(for: profile))
     loadActiveSession(context: context)
     return profile.name
   }

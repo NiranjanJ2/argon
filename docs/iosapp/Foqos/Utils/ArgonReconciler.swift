@@ -90,14 +90,20 @@ final class ArgonReconciler {
         message = "The Argon focus window expired"
         shielded = false
       } else if let allowance = desired.allowance {
-        let applied = try StrategyManager.shared.applyArgonMetered(
+        // Metered mode is Argon's own, not a foqos block. There is no session
+        // and no profile to start: Screen Time meters the apps directly and the
+        // monitor extension raises the shield when the budget is spent, so it
+        // keeps working with the app killed and the server unreachable.
+        let applied = try StrategyManager.shared.applyArgonMeteredMode(
           profileName: profileName,
-          allowanceMinutes: allowance.minutes,
-          resetIntervalInHours: allowance.perHours,
+          minutes: allowance.minutes,
+          perHours: allowance.perHours,
           context: container.mainContext
         )
         let window = allowance.perHours == 1 ? "hour" : "\(allowance.perHours)h"
-        message = "\(applied): \(allowance.minutes)m break every \(window)"
+        message = "\(applied): \(allowance.minutes)m of use per \(window)"
+        // Not shielded *yet* — the budget starts full. Reported as shielded
+        // because the mode is in force, which is what convergence asks.
         shielded = true
       } else {
         let profileName = try StrategyManager.shared.applyArgonLock(

@@ -27,6 +27,16 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     super.intervalDidStart(for: activity)
 
     log.info("intervalDidStart for activity: \(activity.rawValue)")
+
+    // A new window: the metered budget refills, so whatever was shielded when
+    // it ran out is released. This is the only thing that lifts that shield —
+    // deliberately, so it survives the app being killed and the server being
+    // unreachable, which is where the previous grant-based design fell over.
+    if activity == ArgonMetered.activityName {
+      ArgonMetered.clearShield()
+      return
+    }
+
     TimerActivityUtil.startTimerActivity(for: activity)
   }
 
@@ -34,6 +44,25 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     super.intervalDidEnd(for: activity)
 
     log.info("intervalDidEnd for activity: \(activity.rawValue)")
+    guard activity != ArgonMetered.activityName else { return }
     TimerActivityUtil.stopTimerActivity(for: activity)
+  }
+
+  /// The budget is spent: shield until the window turns over.
+  ///
+  /// This measures actual usage, not elapsed time — thirty seconds in an app
+  /// costs thirty seconds, where the grant model this replaced spent the whole
+  /// fifteen minutes the moment the app was opened.
+  override func eventDidReachThreshold(
+    _ event: DeviceActivityEvent.Name,
+    activity: DeviceActivityName
+  ) {
+    super.eventDidReachThreshold(event, activity: activity)
+
+    log.info("threshold reached: \(event.rawValue) in \(activity.rawValue)")
+    guard activity == ArgonMetered.activityName, event == ArgonMetered.eventName else {
+      return
+    }
+    ArgonMetered.raiseShield()
   }
 }

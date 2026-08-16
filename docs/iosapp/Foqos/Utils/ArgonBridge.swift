@@ -1,4 +1,5 @@
 import Foundation
+import FamilyControls
 import Security
 import UIKit
 import UserNotifications
@@ -290,6 +291,13 @@ final class ArgonBridge: ObservableObject {
         // Reported either way — silence on failure looks exactly like a phone
         // that is switched off, and Argon would assume the lock had landed.
         await report(result)
+
+        // Diagnostics only when something is actually being metered or a
+        // reconcile failed. Reporting on every poll would bury the interesting
+        // entries under a few thousand identical ones.
+        if desired.isMetered || result.error != nil {
+          await reportDiagnostics("reconcile", note: result.message)
+        }
       }
       publishWidgetSnapshot()
       return true
@@ -542,6 +550,45 @@ final class ArgonBridge: ObservableObject {
       _ = try? await self.perform(request)
       _ = await self.refreshStatus()
     }
+  }
+
+  /// Send everything about Screen Time that only exists on the device.
+  ///
+  /// The state report carries a mode, a version and one error string, which
+  /// answers "did it work" and nothing about why. Every question worth asking
+  /// about weekend mode — is Family Controls authorised, was the profile found,
+  /// how many apps is it actually metering, is monitoring running, is the
+  /// shield up — was answerable only here, which is why diagnosing it meant
+  /// guessing.
+  func reportDiagnostics(_ kind: String, note: String? = nil) async {
+    guard var request = makeRequest(path: "/v1/ios/diagnostics", method: "POST") else { return }
+
+    let selection = SharedData.argonMeteredSelection()
+    var payload: [String: Any] = [
+      "kind": kind,
+      "app_version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?",
+      "build": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?",
+      "screen_time_authorized":
+        AuthorizationCenter.shared.authorizationStatus == .approved,
+      "profile_name": profileName,
+      "desired_mode": desiredMode,
+      "shielded": shielded,
+      "metered_monitoring": ArgonMetered.isMonitoring,
+      "metered_apps": selection?.applicationTokens.count ?? 0,
+      "metered_categories": selection?.categoryTokens.count ?? 0,
+      "override_active": ArgonOverride.isActive,
+    ]
+    if let terms = ArgonMetered.Terms.current {
+      payload["metered_minutes"] = terms.minutes
+      payload["metered_window_hours"] = terms.windowHours
+      payload["metered_budget_spent"] = terms.spent
+    }
+    if let note { payload["note"] = note }
+    if let lastError { payload["last_error"] = lastError }
+
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+    _ = try? await perform(request)
   }
 
   private func registerDevice() async {
