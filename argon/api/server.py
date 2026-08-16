@@ -471,6 +471,96 @@ def ios_mode_get() -> Any:
     return jsonify(ios_mode.get_mode())
 
 
+@app.get("/v1/ac")
+@require_token
+def ac_list() -> Any:
+    """Every adopted unit, with live state. ``?discover=1`` also scans."""
+    from argon.ac import registry
+    from argon.ac.gree import GreeError
+
+    units = []
+    for record in registry.known():
+        entry = {"mac": record["mac"], "name": record.get("name") or "", "reachable": False}
+        unit = registry.with_retry(record["mac"])
+        if unit is not None:
+            try:
+                entry.update(unit.status())
+                entry["reachable"] = True
+            except GreeError as exc:
+                entry["error"] = str(exc)
+        units.append(entry)
+
+    payload: dict[str, Any] = {"units": units}
+    if request.args.get("discover"):
+        payload["found"] = registry.discover()
+    return jsonify(payload)
+
+
+@app.post("/v1/ac/adopt")
+@require_token
+def ac_adopt() -> Any:
+    """Bind to a unit and keep its key. The one call that writes to the AC."""
+    from argon.ac import registry
+    from argon.ac.gree import GreeError
+
+    body = _body()
+    mac = str(body.get("mac") or "").strip()
+    host = str(body.get("host") or "").strip()
+    if not mac or not host:
+        return jsonify({"error": "mac and host required"}), 400
+    try:
+        unit = registry.adopt(mac, host, str(body.get("name") or ""))
+    except GreeError as exc:
+        return jsonify({"error": str(exc)}), 502
+    return jsonify({"mac": unit.mac, "host": unit.host, "name": unit.name, "bound": True})
+
+
+@app.post("/v1/ac/<mac>")
+@require_token
+def ac_set(mac: str) -> Any:
+    """Change one unit.
+
+    ``power`` accepts true, false or "toggle" — the Action Button wants one
+    press to mean "the other thing", and deciding that here keeps the phone
+    from having to read the state first and race with itself.
+    """
+    from argon.ac import registry
+    from argon.ac.gree import MODE_VALUES, GreeError
+
+    unit = registry.with_retry(mac)
+    if unit is None:
+        return jsonify({"error": "unknown or unreachable unit"}), 404
+
+    body = _body()
+    options: dict[str, int] = {}
+    try:
+        power = body.get("power")
+        if power is not None:
+            if isinstance(power, str) and power.lower() == "toggle":
+                options["Pow"] = 0 if unit.status()["on"] else 1
+            else:
+                options["Pow"] = 1 if power else 0
+        if (target := body.get("target_c")) is not None:
+            options["SetTem"] = max(16, min(30, int(target)))
+        if (mode := body.get("mode")) is not None:
+            if mode not in MODE_VALUES:
+                return jsonify({"error": f"mode must be one of {sorted(MODE_VALUES)}"}), 400
+            options["Mod"] = MODE_VALUES[mode]
+        if (fan := body.get("fan")) is not None:
+            options["WdSpd"] = max(0, min(5, int(fan)))
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    if not options:
+        return jsonify({"error": "nothing to change"}), 400
+
+    try:
+        unit.set(**options)
+        return jsonify(unit.status())
+    except GreeError as exc:
+        return jsonify({"error": str(exc)}), 502
+
+
 @app.post("/v1/ios/mode")
 @require_token
 def ios_mode_set() -> Any:
