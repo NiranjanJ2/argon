@@ -43,7 +43,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 CONFIG_PATH = Path.home() / ".config" / "argon" / "desktop.json"
-TIMEOUT_S = 4.0
+#: Generous because one call can still be slow: the board serves stale
+#: Classroom data and re-crawls behind the request, but the very first read
+#: after a server restart has no cache to serve and does the full crawl, which
+#: is several seconds. Four seconds turned that into "read operation timed out"
+#: once per restart and once per cache expiry.
+TIMEOUT_S = 12.0
 #: Writes go through Google Tasks, which is slower than reading a cached list.
 ACTION_TIMEOUT_S = 12.0
 SELF = Path(__file__).resolve()

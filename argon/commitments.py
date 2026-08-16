@@ -98,6 +98,10 @@ _LABELS = {"classroom": "Classroom", "tasks": "Tasks"}
 _classroom_cache: dict[tuple[str, int], tuple[float, "SourceSnapshot"]] = {}
 _classroom_lock = threading.Lock()
 
+#: Cache keys with a background re-crawl already in flight. Without this, the
+#: twenty-fifth poll of a stale cache would start a twenty-fifth crawl.
+_classroom_refreshing: set[tuple] = set()
+
 
 def _when(value: Any) -> str | None:
     from argon.utils.helpers import when_label
@@ -454,9 +458,41 @@ def classroom_snapshot(
     cache_key = (str(workspace), days_ahead)
     with _classroom_lock:
         cached = _classroom_cache.get(cache_key)
-        if cached and not fresh and (time.monotonic() - cached[0]) < CLASSROOM_TTL_S:
+        if cached and not fresh:
+            if (time.monotonic() - cached[0]) < CLASSROOM_TTL_S:
+                return cached[1]
+            # Stale. Answer from the cache anyway and refresh behind the
+            # request: the crawl is one submissions call per assignment and
+            # takes around eight seconds, so making a poll wait for it stalled
+            # every reader on the same two-minute cycle — the desktop readout
+            # timed out and "fixed itself", and the phone silently blocked for
+            # eight seconds. Slightly old coursework beats a readout that
+            # periodically fails.
+            if cache_key not in _classroom_refreshing:
+                _classroom_refreshing.add(cache_key)
+                threading.Thread(
+                    target=_refresh_classroom,
+                    args=(workspace, days_ahead, cache_key),
+                    daemon=True,
+                ).start()
             return cached[1]
 
+    return _crawl_classroom(workspace, days_ahead, cache_key)
+
+
+def _refresh_classroom(workspace: Path, days_ahead: int, cache_key: tuple) -> None:
+    """Re-crawl in the background, then let the next refresh be scheduled."""
+    try:
+        _crawl_classroom(workspace, days_ahead, cache_key)
+    finally:
+        with _classroom_lock:
+            _classroom_refreshing.discard(cache_key)
+
+
+def _crawl_classroom(
+    workspace: Path, days_ahead: int, cache_key: tuple
+) -> SourceSnapshot:
+    """The actual Classroom read. Slow; never call it holding the lock."""
     try:
         from argon.google.classroom import upcoming_assignments
         from argon.google.classroom_dispositions import ClassroomDispositionStore
