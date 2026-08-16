@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from argon.config import Config
-from argon.core import target, turn
+from argon.core import degenerate, target, turn
 from argon.core.bus import InboundMessage, MessageBus, OutboundMessage
 from argon.core.commands import CommandContext, CommandRouter, register_builtin_commands
 from argon.core.context import ContextBuilder
@@ -825,6 +825,16 @@ class AgentLoop:
             or "which was not in request.tools" in final_content.lower()
         ):
             logger.warning("Suppressing raw provider error from user output: {}", final_content[:200])
+            final_content = EMPTY_FINAL_RESPONSE_MESSAGE
+
+        # A decoding loop is not a reply. Suppressed rather than sent, because
+        # the alternative is a wall of punctuation on his phone — and because
+        # this gets stored as the assistant's own words and becomes context for
+        # the next turn, teaching the model that this is how Argon writes.
+        if final_content and degenerate.looks_degenerate(final_content):
+            logger.error(
+                "Suppressing a degenerate model response ({})", degenerate.describe(final_content)
+            )
             final_content = EMPTY_FINAL_RESPONSE_MESSAGE
 
         self._save_turn(session, all_msgs, 1 + len(history))
