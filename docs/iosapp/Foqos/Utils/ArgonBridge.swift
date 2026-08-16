@@ -145,6 +145,7 @@ final class ArgonBridge: ObservableObject {
   @Published private(set) var inboxUnanswered = 0
   /// Buttons mid-flight, so a double tap cannot start the same task twice.
   @Published private(set) var inboxActionIDs: Set<String> = []
+  @Published private(set) var acUnitsCache: [ArgonACUnit] = []
 
   var apiToken: String {
     get { ArgonKeychain.read() }
@@ -549,6 +550,55 @@ final class ArgonBridge: ObservableObject {
       request.setValue("application/json", forHTTPHeaderField: "Content-Type")
       _ = try? await self.perform(request)
       _ = await self.refreshStatus()
+    }
+  }
+
+  /// Every adopted air conditioner, with live state.
+  func acUnits() async -> [ArgonACUnit] {
+    guard let request = makeRequest(path: "/v1/ac") else { return [] }
+    do {
+      let data = try await perform(request)
+      let response = try JSONDecoder().decode(ArgonACResponse.self, from: data)
+      acUnitsCache = response.units
+      return response.units
+    } catch {
+      lastError = "Could not reach the AC: \(error.localizedDescription)"
+      return []
+    }
+  }
+
+  /// Change one unit. `power` may be true, false, or nil for toggle.
+  ///
+  /// Toggle is resolved on the server rather than here: one Action Button press
+  /// means "the other thing", and deciding that on the phone would mean reading
+  /// the state first and racing a second press against the first.
+  @discardableResult
+  func setAC(
+    mac: String,
+    power: Bool? = nil,
+    targetC: Int? = nil,
+    mode: String? = nil,
+    fan: Int? = nil
+  ) async -> ArgonACUnit? {
+    let encoded = mac.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? mac
+    guard var request = makeRequest(path: "/v1/ac/\(encoded)", method: "POST") else { return nil }
+
+    var body: [String: Any] = [:]
+    body["power"] = power.map { $0 as Any } ?? ("toggle" as Any)
+    if let targetC { body["target_c"] = targetC }
+    if let mode { body["mode"] = mode }
+    if let fan { body["fan"] = fan }
+
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+    do {
+      let data = try await perform(request)
+      let unit = try JSONDecoder().decode(ArgonACUnit.self, from: data)
+      lastError = nil
+      return unit
+    } catch {
+      lastError = "AC command failed: \(error.localizedDescription)"
+      return nil
     }
   }
 

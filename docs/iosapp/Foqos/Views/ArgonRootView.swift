@@ -5,6 +5,7 @@ struct ArgonRootView: View {
     case dashboard
     case chat
     case focus
+    case air
   }
 
   @Environment(\.scenePhase) private var scenePhase
@@ -43,6 +44,15 @@ struct ArgonRootView: View {
         .tag(Tab.focus)
         .tabItem {
           Label("Focus", systemImage: "shield.lefthalf.filled")
+        }
+
+      // Nothing to do with the assistant — it is here because this is the app
+      // he already has open, and the server it talks to is the machine on the
+      // same LAN as the air conditioner.
+      ArgonACView()
+        .tag(Tab.air)
+        .tabItem {
+          Label("Air", systemImage: "snowflake")
         }
     }
     .tint(ArgonPalette.iceBlue)
