@@ -24,6 +24,10 @@
       "inputs" : [
         {
           "kind" : "file",
+          "name" : "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonActivity.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonClient.swift"
         },
         {
@@ -51,6 +55,7 @@
       "moduleName" : "ArgonMac",
       "moduleOutputPath" : "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/Modules/ArgonMac.swiftmodule",
       "objects" : [
+        "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonActivity.swift.o",
         "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonClient.swift.o",
         "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonMacApp.swift.o",
         "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonModels.swift.o",
@@ -106,6 +111,10 @@
       "outputs" : [
         {
           "kind" : "file",
+          "name" : "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonActivity.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonClient.swift.o"
         },
         {
@@ -127,6 +136,7 @@
       ],
       "prepareForIndexing" : false,
       "sources" : [
+        "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonActivity.swift",
         "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonClient.swift",
         "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonMacApp.swift",
         "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonModels.swift",
@@ -147,6 +157,7 @@
       "-package-name",
       "argonmac",
       "-c",
+      "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonActivity.swift",
       "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonClient.swift",
       "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonMacApp.swift",
       "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonModels.swift",
@@ -227,6 +238,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonActivity.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/Sources/ArgonMac/ArgonClient.swift"
         },
         {
@@ -250,6 +265,10 @@
         {
           "kind" : "virtual",
           "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/niranjanj/Desktop/argon-worktrees/usefulness-repair/desktop/ArgonMac/.build/arm64-apple-macosx/release/ArgonMac.build/ArgonActivity.swift.o"
         },
         {
           "kind" : "file",

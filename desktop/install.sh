@@ -14,12 +14,21 @@ mkdir -p "$CONFIG_DIR" "$SWIFTBAR_DIR" "$UBERSICHT_DIR"
 # rather than symlink, so the readouts keep working if the checkout moves or is
 # deleted — re-run this script to pick up edits.
 install -m 755 "$SRC/argon-widget.py" "$CONFIG_DIR/argon-widget.py"
+# The readout imports this from its own directory, so it has to land next to it.
+install -m 644 "$SRC/argon_activity.py" "$CONFIG_DIR/argon_activity.py"
 install -m 644 "$SRC/argon.jsx" "$UBERSICHT_DIR/argon.jsx"
 # The Now panel is a second widget, not a replacement: both read the same
 # `argon-widget.py --json`, so they cannot disagree about what is running.
 install -m 644 "$SRC/argon-now.jsx" "$UBERSICHT_DIR/argon-now.jsx"
+# SwiftBar is off by default: Argon.app is a native menu bar item that shows the
+# same thing from one long-lived process, where the plugin costs a fresh Python
+# interpreter every ten seconds — 8,640 process starts a day for a duplicate.
+# Pass --swiftbar to install it anyway.
 rm -f "$SWIFTBAR_DIR"/argon.*.py
-ln -sf "$CONFIG_DIR/argon-widget.py" "$SWIFTBAR_DIR/argon.$INTERVAL.py"
+if [ "${2:-}" = "--swiftbar" ] || [ "${1:-}" = "--swiftbar" ]; then
+  ln -sf "$CONFIG_DIR/argon-widget.py" "$SWIFTBAR_DIR/argon.$INTERVAL.py"
+  echo "SwiftBar plugin installed at $INTERVAL."
+fi
 
 if [ ! -f "$CONFIG_DIR/desktop.json" ]; then
   cat > "$CONFIG_DIR/desktop.json" <<'JSON'

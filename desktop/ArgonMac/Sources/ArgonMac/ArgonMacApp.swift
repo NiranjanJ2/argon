@@ -162,19 +162,53 @@ struct MenuPanel: View {
   }
 
   private var footer: some View {
-    HStack(spacing: 8) {
-      if snapshot.hasNeverSynced {
-        Text("Not synced").foregroundStyle(.secondary)
-      } else if snapshot.isStale {
-        Text("As of \(snapshot.capturedAt, style: .time)").foregroundStyle(.orange)
-      } else {
-        Text("Updated \(snapshot.capturedAt, style: .time)").foregroundStyle(.secondary)
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(spacing: 8) {
+        if store.isDormant {
+          Label(store.dormantReason, systemImage: "moon.zzz.fill")
+            .foregroundStyle(.orange)
+        } else if snapshot.hasNeverSynced {
+          Text("Not synced").foregroundStyle(.secondary)
+        } else if snapshot.isStale {
+          Text("As of \(snapshot.capturedAt, style: .time)").foregroundStyle(.orange)
+        } else {
+          Text("Updated \(snapshot.capturedAt, style: .time)").foregroundStyle(.secondary)
+        }
+        Spacer()
+        Button("Refresh") { Task { await store.refresh() } }
+          .buttonStyle(.link)
+        Button("Quit") { NSApplication.shared.terminate(nil) }
+          .buttonStyle(.link)
       }
-      Spacer()
-      Button("Refresh") { Task { await store.refresh() } }
-        .buttonStyle(.link)
-      Button("Quit") { NSApplication.shared.terminate(nil) }
-        .buttonStyle(.link)
+
+      HStack(spacing: 8) {
+        if store.isDormant {
+          Button("Resume") { store.resume() }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+        } else {
+          // An hour covers "leave me alone for a bit"; indefinite covers a
+          // laptop on a plane. Both write the same file the desktop readout
+          // reads, so this pauses every surface on the Mac at once.
+          Button("Pause 1h") { store.pause(minutes: 60) }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+          Button("Pause") { store.pause(minutes: nil) }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+        }
+        Spacer()
+        Toggle(
+          "\(store.activity.activeFrom)–\(store.activity.activeTo)",
+          isOn: Binding(
+            get: { store.activity.scheduleEnabled },
+            set: { store.setScheduleEnabled($0) }
+          )
+        )
+        .toggleStyle(.checkbox)
+        .controlSize(.mini)
+        .help("Only poll between these hours — Argon sleeps through the school day")
+      }
     }
     .font(.system(size: 10))
   }

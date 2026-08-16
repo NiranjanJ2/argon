@@ -17,7 +17,7 @@ import { run } from "uebersicht";
 const SCRIPT = "$HOME/.config/argon/argon-widget.py";
 
 export const command = SCRIPT + " --json";
-export const refreshFrequency = 5000;
+export const refreshFrequency = 30000;
 
 const sh = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
 
@@ -133,6 +133,7 @@ export const className = `
               text-overflow: ellipsis; white-space: nowrap; }
   .ev .when { font-size: 10px; color: #65D8FF; flex: none; }
 
+  .dormant { opacity: 0.55; }
   .empty { color: #9BAAC0; padding: 6px 2px 2px; }
   .err { color: #FF6B6B; }
   .pending { opacity: 0.4; }
@@ -166,6 +167,17 @@ export const render = ({ output }) => {
   }
 
   if (!v.ok) return <div className="err">{v.error}</div>;
+
+  // Asleep: outside the active hours, or paused by hand. Says so rather than
+  // going blank, because a widget that vanishes reads as broken.
+  if (v.dormant) {
+    return (
+      <div className="dormant">
+        <div className="eyebrow">Argon</div>
+        <div className="empty">{v.reason}</div>
+      </div>
+    );
+  }
 
   const now = v.now || {};
   const agenda = v.agenda || [];

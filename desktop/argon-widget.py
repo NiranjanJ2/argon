@@ -53,6 +53,11 @@ TIMEOUT_S = 12.0
 ACTION_TIMEOUT_S = 12.0
 SELF = Path(__file__).resolve()
 
+# The activity gate lives beside this file, in the checkout and in
+# ~/.config/argon alike, so the import works from either.
+sys.path.insert(0, str(SELF.parent))
+import argon_activity  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Design tokens — mirrored from Foqos/Utils/ArgonDesign.swift
 # ---------------------------------------------------------------------------
@@ -762,6 +767,20 @@ def do_action(argv):
         return 2
 
     verb = argv[0]
+
+    # Handled before the config check: pausing must work even when the server
+    # is unreachable, which is exactly when a laptop is burning battery
+    # retrying and he most wants it to stop.
+    if verb == "pause":
+        minutes = int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else None
+        argon_activity.pause(minutes)
+        notify("Paused" + (" for {}m".format(minutes) if minutes else ""))
+        return 0
+    if verb == "resume":
+        argon_activity.resume()
+        notify("Resumed")
+        return 0
+
     bases, token = load_config()
     if not bases or not token:
         notify("Not configured — see " + str(CONFIG_PATH))
@@ -977,12 +996,43 @@ def selftest():
     print("ok")
 
 
+def dormant_view(reason):
+    """What a paused readout says. No fetch, no view model, no network.
+
+    Still says something rather than going blank: a widget that disappears
+    reads as broken, and the one thing worth showing while asleep is why, and
+    how to wake it.
+    """
+    return {"ok": True, "dormant": True, "reason": reason,
+            "updated": now().strftime("%-I:%M:%S %p")}
+
+
+def render_dormant(reason):
+    out = [bar("", sfimage="moon.zzz", sfcolor=PALETTE["mutedInk"]), "---"]
+    out.append(bar(reason, color=PALETTE["mutedInk"], size=12))
+    out.append(bar("Resume", sfimage="play.fill", size=12,
+                   **action_params("resume")))
+    print("\n".join(out))
+
+
 def main():
     if "--do" in sys.argv:
         sys.exit(do_action(sys.argv[sys.argv.index("--do") + 1:]))
     if "--selftest" in sys.argv:
         selftest()
-    elif "--json" in sys.argv:
+        return
+
+    # Checked before anything touches the network. A refresh while asleep costs
+    # a process start and nothing else — no TLS handshake, no server load.
+    active, reason = argon_activity.status()
+    if not active:
+        if "--json" in sys.argv:
+            print(json.dumps(dormant_view(reason)))
+        else:
+            render_dormant(reason)
+        return
+
+    if "--json" in sys.argv:
         print(json.dumps(build_view(collect())))
     else:
         render_swiftbar(build_view(collect()))

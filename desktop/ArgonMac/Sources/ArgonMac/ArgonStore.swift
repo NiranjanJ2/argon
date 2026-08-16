@@ -15,14 +15,53 @@ final class ArgonStore: ObservableObject {
   /// immediate after a tap — which also triggers a refresh directly.
   private let interval: Duration = .seconds(10)
 
+  @Published private(set) var activity = ArgonActivity.load()
+
+  var isDormant: Bool { !activity.status().active }
+  var dormantReason: String { activity.status().reason }
+
   func start() {
     guard timer == nil else { return }
     timer = Task { [weak self] in
       while !Task.isCancelled {
-        await self?.refresh()
+        await self?.tick()
         try? await Task.sleep(for: self?.interval ?? .seconds(10))
       }
     }
+  }
+
+  /// One beat of the poll loop. Re-reads the gate every time rather than
+  /// caching it, so the schedule takes effect on the hour without a relaunch
+  /// and a pause written by the Übersicht readout is honoured here too.
+  private func tick() async {
+    activity = ArgonActivity.load()
+    guard !isDormant else { return }
+    await refresh()
+  }
+
+  func pause(minutes: Int?) {
+    var settings = activity
+    // A century stands in for "indefinite" so there is one representation of
+    // paused rather than two, and the file still reads as a real date.
+    settings.pausedUntil = Date().addingTimeInterval(
+      Double(minutes ?? (60 * 24 * 365 * 100)) * 60)
+    settings.save()
+    activity = settings
+  }
+
+  func resume() {
+    var settings = activity
+    settings.pausedUntil = nil
+    settings.save()
+    activity = settings
+    Task { await refresh() }
+  }
+
+  func setScheduleEnabled(_ enabled: Bool) {
+    var settings = activity
+    settings.scheduleEnabled = enabled
+    settings.save()
+    activity = settings
   }
 
   func stop() {

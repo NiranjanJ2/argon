@@ -30,7 +30,7 @@ const act = (event, ...args) => {
 
 // Übersicht polls locally; the server caches the Google round-trip, so a short
 // interval costs one LAN request — see TASKS_TTL_S in argon/api/server.py.
-export const refreshFrequency = 5000;
+export const refreshFrequency = 30000;
 
 export const className = `
   top: 24px; right: 24px;
@@ -169,6 +169,7 @@ export const className = `
           transition: background 120ms ease; }
   .qbtn:hover { background: rgba(39,93,255,0.30); }
 
+  .dormant { opacity: 0.55; }
   .empty { text-align: center; padding: 22px 8px; }
   .empty svg { width: 28px; height: 28px; stroke: #A9DDFF; stroke-width: 1.7;
                filter: drop-shadow(0 0 9px rgba(93,169,255,0.46)); }
@@ -241,6 +242,19 @@ export const render = ({ output }) => {
         <div className="orb"><Icon name="bolt.slash.fill" /></div>
         <div className="display headline">Can’t reach Argon</div>
         <div className="msg">{v.error}</div>
+      </div>
+    );
+  }
+
+  // Asleep: outside the active hours, or paused by hand. Says so rather than
+  // going blank, because a widget that vanishes reads as broken — and it is
+  // deliberately not styled as an error, since nothing is wrong.
+  if (v.dormant) {
+    return (
+      <div className="offline dormant">
+        <div className="orb"><Icon name="moon.zzz.fill" /></div>
+        <div className="display headline">Argon is asleep</div>
+        <div className="msg">{v.reason}</div>
       </div>
     );
   }
