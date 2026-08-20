@@ -18,8 +18,10 @@ nag; before school lets out he does not yet know the answer.
 from __future__ import annotations
 
 import re
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Any
+
+from loguru import logger
 
 from argon import clock
 from argon.core import store
@@ -157,3 +159,113 @@ def summarise(result: dict[str, Any]) -> str:
         if result.get(key):
             bits.append(f"{len(result[key])} {label}")
     return "Planned the afternoon: " + (", ".join(bits) if bits else "nothing to change")
+
+
+# ---------------------------------------------------------------------------
+# The start time, and the two things that hang off it
+# ---------------------------------------------------------------------------
+
+#: How long before the start he gets told. Long enough to finish what he is
+#: doing, short enough that he has not forgotten by the time it lands.
+WARNING_MINUTES = 30
+
+#: Cron job names. Prefixed so the runtime can recognise them and act
+#: deterministically instead of putting the model in the loop — a notification
+#: and a Screen Time block are not things a turn should be free to reinterpret.
+JOB_PREFIX = "planner"
+NOTIFY_JOB = f"{JOB_PREFIX}:notify"
+BLOCK_JOB = f"{JOB_PREFIX}:block"
+
+#: The scheduled block is a holding pattern, not the session. It lasts until he
+#: actually starts something, at which point start_task replaces it with a
+#: task-tagged one that lifts when he marks the work done. This ceiling only
+#: matters if he never starts at all — an evening that blocks forever because
+#: he went out is the failure worth avoiding.
+BLOCK_WINDOW_MIN = 90
+
+#: Tagged so start_task's own block cleanly supersedes it, and so finishing a
+#: task never clears a block he did not raise from a task.
+BLOCK_SOURCE = "planner"
+
+
+def start_time() -> str | None:
+    """Today's planned start, ``HH:MM``, or None if he has not chosen one."""
+    state = _state()
+    if state.get("start_for") != clock.today_key():
+        return None
+    return state.get("start_at")
+
+
+def set_start_time(hhmm: str | None, day: str | None = None) -> str | None:
+    """Record when he means to begin. ``None`` clears it."""
+    day = day or clock.today_key()
+    with store.edit_doc(_DOC, {"last_planned": None}) as doc:
+        doc["start_at"] = hhmm
+        doc["start_for"] = day if hhmm else None
+    return hhmm
+
+
+def start_datetime(hhmm: str | None = None, now: datetime | None = None) -> datetime | None:
+    """Today's start as an absolute moment, or None if it has already passed."""
+    now = now or clock.now()
+    hhmm = hhmm or start_time()
+    if not hhmm:
+        return None
+    try:
+        hour, minute = (int(part) for part in hhmm.split(":"))
+    except (ValueError, TypeError):
+        return None
+    when = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return when if when > now else None
+
+
+def schedule_start(cron: Any, hhmm: str | None, now: datetime | None = None) -> dict[str, Any]:
+    """Arm the warning and the block for *hhmm*, replacing any earlier pair.
+
+    Cron sleeps until the next job rather than polling, so these fire on the
+    minute and survive a restart — which matters, because a block that starts
+    ten minutes late is not a start time, and one that never starts because the
+    service bounced is worse.
+    """
+    removed = 0
+    for job in list(getattr(cron, "jobs", []) or []):
+        if str(job.name).startswith(JOB_PREFIX):
+            try:
+                cron.remove_job(job.id)
+                removed += 1
+            except Exception as exc:  # noqa: BLE001 — a stale job is not fatal
+                logger.warning("Could not clear planner job {}: {}", job.id, exc)
+
+    set_start_time(hhmm)
+    if not hhmm:
+        return {"start_at": None, "scheduled": [], "cleared": removed}
+
+    begins = start_datetime(hhmm, now=now)
+    if begins is None:
+        # Already past. The time is still recorded — it is what he intended —
+        # but arming a job for a moment that has gone would fire immediately.
+        return {"start_at": hhmm, "scheduled": [], "cleared": removed, "note": "already passed"}
+
+    from argon.services.cron import CronSchedule
+
+    scheduled = []
+    warn_at = begins - timedelta(minutes=WARNING_MINUTES)
+    if warn_at > (now or clock.now()):
+        cron.add_job(
+            name=NOTIFY_JOB,
+            schedule=CronSchedule(kind="at", at_ms=int(warn_at.timestamp() * 1000)),
+            message=hhmm,
+            kind="system_event",
+            delete_after_run=True,
+        )
+        scheduled.append({"job": NOTIFY_JOB, "at": warn_at.isoformat()})
+
+    cron.add_job(
+        name=BLOCK_JOB,
+        schedule=CronSchedule(kind="at", at_ms=int(begins.timestamp() * 1000)),
+        message=hhmm,
+        kind="system_event",
+        delete_after_run=True,
+    )
+    scheduled.append({"job": BLOCK_JOB, "at": begins.isoformat()})
+    return {"start_at": hhmm, "scheduled": scheduled, "cleared": removed}

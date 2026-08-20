@@ -59,7 +59,11 @@ def gateway(
     verbose: bool = typer.Option(False, "--verbose", help="Debug logging"),
 ):
     """Run the assistant: channels, cron, heartbeat, check-ins, HTTP API."""
-    from argon.api.server import register_agent_handler, start_api_server
+    from argon.api.server import (
+        register_agent_handler,
+        register_cron_service,
+        start_api_server,
+    )
     from argon.runtime import build_runtime, run
     from argon.utils.helpers import sync_workspace_templates
 
@@ -107,6 +111,7 @@ def gateway(
             return asyncio.run_coroutine_threadsafe(turn(), loop).result(timeout=timeout_s)
 
         register_agent_handler(agent_turn)
+        register_cron_service(rt.cron)
         try:
             start_api_server(cfg)
         except OSError as exc:

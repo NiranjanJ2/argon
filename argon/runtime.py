@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from loguru import logger
 
-from argon import clock
+from argon import clock, planner
 from argon.channels.manager import ChannelManager
 from argon.config import Config
 from argon.core import target
@@ -156,6 +156,47 @@ def build_runtime(config: Config) -> Runtime:
                 return channel, chat_id
         return "cli", "direct"
 
+    async def _run_planner_job(job: CronJob) -> JobResult:
+        """Warn him, or start the block. Nothing here asks the model anything."""
+        from argon.ios import mode as ios_mode
+
+        start_at = job.payload.message or planner.start_time() or ""
+
+        if job.name == planner.NOTIFY_JOB:
+            body = (
+                f"Starting at {start_at}. {planner.WARNING_MINUTES} minutes — "
+                "finish what you are on."
+            )
+            sent = False
+            try:
+                from argon.ios.push import APNsClient
+
+                sent = bool(getattr(await APNsClient(config).send("Argon", body), "ok", False))
+            except Exception as exc:  # noqa: BLE001 — fall back to chat
+                logger.warning("Planner push failed, falling back to chat: {}", exc)
+            if not sent:
+                # A warning he never receives is the same as no warning, so chat
+                # is the backstop rather than the whole answer.
+                await notify(body, key=f"planner:notify:{clock.today_key()}")
+            return JobResult(status="ok", delivered=True)
+
+        if job.name == planner.BLOCK_JOB:
+            try:
+                ios_mode.set_mode(
+                    "lock_in",
+                    duration_min=planner.BLOCK_WINDOW_MIN,
+                    reason=f"you said you would start at {start_at}",
+                    source=planner.BLOCK_SOURCE,
+                )
+            except ios_mode.OverrideActive as exc:
+                # He pulled the emergency release. That outranks a plan he made
+                # earlier in the afternoon.
+                logger.info("Planner block skipped: {}", exc)
+                return JobResult(status="ok", delivered=False)
+            return JobResult(status="ok", delivered=True)
+
+        return JobResult(status="ok", delivered=False)
+
     async def on_cron_job(job: CronJob) -> JobResult:
         """Run one due job. Success means Niranjan actually received it.
 
@@ -166,6 +207,12 @@ def build_runtime(config: Config) -> Runtime:
         """
         due_ms = job.schedule.at_ms or job.state.next_run_at_ms or _now_ms()
         key = f"cron:{job.id}:{int(due_ms)}"
+
+        # A notification and a Screen Time block are not things a model turn
+        # should be free to reinterpret — an evaluator once decided a scheduled
+        # reminder was not worth sending, and cron recorded that as success.
+        if job.name.startswith(planner.JOB_PREFIX):
+            return await _run_planner_job(job)
 
         if job.payload.kind == "reminder":
             result = await outbox.deliver(
@@ -301,97 +348,6 @@ def build_runtime(config: Config) -> Runtime:
         here in silence while the log said "Check-in spoke".
         """
         delivery_key = key or f"notify:{int(_now_ms())}"
-        channel, chat_id = pick_target()
-
-        async def _silent(*_a, **_kw):
-            pass
-
-        resp = await heartbeat_agent.process_direct(
-            prompt, session_key="heartbeat", channel=channel, chat_id=chat_id,
-            on_progress=_silent,
-            origin="checkin", background=True,
-        )
-        session = heartbeat_agent.sessions.get_or_create("heartbeat")
-        session.retain_recent_legal_suffix(hb_cfg.keep_recent_messages)
-        heartbeat_agent.sessions.save(session)
-        return resp.content if resp else ""
-
-    async def run_background_turn(prompt: str) -> str:
-        """Serialize background work through its shared AgentLoop and tools."""
-        async with background_turn_lock:
-            return await _run_background_turn(prompt)
-
-    async def on_button(action: dict[str, Any]) -> str:
-        """A button was pressed. Do exactly that, with no model involved.
-
-        This is the whole reason buttons are worth building. "yeah in a bit" has
-        to be interpreted, and interpretation is where Argon decided he had
-        started work he had not started. A press carries a verb chosen by code
-        and a task id chosen by code, so the state change is precisely what he
-        tapped — and `start_task`/`complete_task` stay interactive-only, because
-        this is him acting, not automation acting for him.
-        """
-        from argon.google.tasks_store import GoogleTasksStore
-        from argon.productivity.log import DailyLog
-        from argon.productivity.state import DailyState
-
-        verb = str(action.get("action") or "")
-        task_id = str(action.get("task_id") or "")
-        title = str(action.get("title") or "that")
-        workspace = config.workspace_path
-        state = DailyState(workspace)
-
-        if verb == "start":
-            store = GoogleTasksStore(workspace)
-            task = await asyncio.to_thread(store.start_task, task_id)
-            if task is None:
-                return f"Couldn't find {title} any more — it may have been removed."
-            state.start_session(task_id=task_id, title=task.get("title") or title)
-            DailyLog(workspace).append(f"Started: {task.get('title') or title}", tag="task")
-            return f"Started {task.get('title') or title}."
-
-        if verb == "complete":
-            store = GoogleTasksStore(workspace)
-            session = state.get_session()
-            minutes = session.get("elapsed_min") if session else None
-            done = await asyncio.to_thread(store.complete_task, task_id, actual_min=minutes)
-            if done is None:
-                return f"Couldn't find {title} any more — it may already be done."
-            state.end_session_if_task(task_id, title=done.get("title"))
-            DailyLog(workspace).append(f"Completed: {done.get('title') or title}", tag="task")
-            return f"Done — {done.get('title') or title} is off the list."
-
-        if verb == "defer":
-            # Not a state change. He answered, which is all the follow-up
-            # wanted; the ledger already recorded that this item was asked
-            # about, so nothing chases it again today.
-            return f"Fine — leaving {title} for now."
-
-        return f"Don't know how to do '{verb}'."
-
-    async def notify(response: str, *, key: str | None = None, actions: Any = None) -> Any:
-        """Deliver something Niranjan did not ask for. Returns whether it landed.
-
-        This used to return None whether it sent, dropped, or failed — and the
-        check-in ledger recorded "said" regardless. Two days of check-ins died
-        here in silence while the log said "Check-in spoke".
-        """
-        delivery_key = key or f"notify:{int(_now_ms())}"
-        # Recorded before delivery and regardless of its outcome. The phone is a
-        # surface in its own right, and it is exactly where you want the message
-        # when Discord is the thing that is down. Recording under the delivery
-        # key means a retry updates the one entry instead of stacking copies.
-        try:
-            from argon.ios import inbox as ios_inbox
-
-            ios_inbox.record(
-                response,
-                actions=actions if isinstance(actions, list) else None,
-                key=delivery_key,
-            )
-        except Exception as exc:  # noqa: BLE001 - the inbox must never block a send
-            logger.warning("Could not record an unprompted message for the phone: {}", exc)
-
         channel, chat_id = pick_target()
         if channel == "cli":
             logger.warning(

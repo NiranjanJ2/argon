@@ -57,6 +57,10 @@ class _Runtime:
     config: Config | None = None
     agent: AgentTurn | None = None
     whatsapp: WhatsAppSink | None = None
+    # The scheduler, so the planner can arm its warning and its block. Absent
+    # in tests and when the gateway is not running; the planner then records
+    # the time without scheduling rather than failing the whole submission.
+    cron: Any | None = None
 
 
 _rt = _Runtime()
@@ -65,6 +69,11 @@ _rt = _Runtime()
 def register_agent_handler(handler: AgentTurn) -> None:
     """Register the bridge that runs one agent turn from inside a Flask thread."""
     _rt.agent = handler
+
+
+def register_cron_service(service: Any) -> None:
+    """Register the scheduler used to arm the planner's start-time jobs."""
+    _rt.cron = service
 
 
 def register_whatsapp_handler(handler: WhatsAppSink) -> None:
@@ -731,7 +740,10 @@ def planner_get() -> Any:
     except Exception as exc:  # noqa: BLE001 - a planner without Lang still plans
         logger.warning("Could not read AP Lang posts for the planner: {}", exc)
 
-    return jsonify(planner.build(board.as_dicts(), lang_posts=lang_posts))
+    view = planner.build(board.as_dicts(), lang_posts=lang_posts)
+    view["start_at"] = planner.start_time()
+    view["warning_minutes"] = planner.WARNING_MINUTES
+    return jsonify(view)
 
 
 @app.post("/v1/planner")
@@ -801,6 +813,19 @@ def planner_post() -> Any:
             result["added"].append(str(out))
         except Exception as exc:  # noqa: BLE001
             result["errors"].append(f"add {item.get('title')}: {exc}")
+
+    # The time he means to begin, with its warning and its block armed. Sent
+    # as null to clear it — changing his mind must cancel the old pair rather
+    # than leaving a block armed for a time he has moved away from.
+    if "start_at" in body:
+        start_at = body.get("start_at")
+        if _rt.cron is not None:
+            result["start"] = planner.schedule_start(
+                _rt.cron, str(start_at) if start_at else None
+            )
+        else:
+            planner.set_start_time(str(start_at) if start_at else None)
+            result["start"] = {"start_at": start_at, "scheduled": []}
 
     # Recorded even when nothing changed: "I looked and there is nothing to
     # move" is an answer, and without it the screen reopens on the next launch.

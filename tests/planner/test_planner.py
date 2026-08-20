@@ -118,3 +118,73 @@ class TestBuild:
 
         assert [s["title"] for s in lang] == ["Personal Harper's Index"]
         assert lang[0]["default"] is True
+
+
+class TestStartTime:
+    """The time he says he will begin, and the two jobs that hang off it."""
+
+    class FakeCron:
+        def __init__(self):
+            self.jobs = []
+            self.added = []
+
+        def add_job(self, *, name, schedule, message, kind, delete_after_run):
+            self.added.append({"name": name, "at_ms": schedule.at_ms, "kind": kind})
+
+        def remove_job(self, job_id):
+            self.jobs = [j for j in self.jobs if j.id != job_id]
+
+    def test_it_arms_a_warning_and_a_block(self):
+        cron = self.FakeCron()
+        now = _at(16, 0)
+
+        out = planner.schedule_start(cron, "18:00", now=now)
+
+        names = [j["name"] for j in cron.added]
+        assert names == [planner.NOTIFY_JOB, planner.BLOCK_JOB]
+        assert out["start_at"] == "18:00"
+
+    def test_the_warning_lands_half_an_hour_early(self):
+        cron = self.FakeCron()
+
+        planner.schedule_start(cron, "18:00", now=_at(16, 0))
+
+        warn, block = cron.added
+        gap_minutes = (block["at_ms"] - warn["at_ms"]) / 60000
+        assert gap_minutes == planner.WARNING_MINUTES
+
+    def test_a_start_inside_the_warning_window_still_blocks(self):
+        # Chosen 18:00 at 17:45: there is no time to warn him, but the block
+        # he asked for must still happen.
+        cron = self.FakeCron()
+
+        planner.schedule_start(cron, "18:00", now=_at(17, 45))
+
+        assert [j["name"] for j in cron.added] == [planner.BLOCK_JOB]
+
+    def test_a_time_that_has_already_passed_arms_nothing(self):
+        cron = self.FakeCron()
+
+        out = planner.schedule_start(cron, "09:00", now=_at(16, 0))
+
+        assert cron.added == []
+        assert out["note"] == "already passed"
+        # Still recorded — it is what he intended, and the screen should show it.
+        assert out["start_at"] == "09:00"
+
+    def test_clearing_the_time_cancels_instead_of_leaving_a_block_armed(self):
+        cron = self.FakeCron()
+        planner.schedule_start(cron, "18:00", now=_at(16, 0))
+        cron.added.clear()
+
+        out = planner.schedule_start(cron, None, now=_at(16, 0))
+
+        assert cron.added == []
+        assert out["start_at"] is None
+        assert planner.start_time() is None
+
+    def test_the_start_time_belongs_to_today_only(self):
+        planner.set_start_time("18:00", day="2026-08-18")
+
+        # Yesterday's plan must not silently govern today.
+        assert planner.start_time() is None
