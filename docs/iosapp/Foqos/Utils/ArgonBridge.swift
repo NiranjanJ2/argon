@@ -142,6 +142,10 @@ final class ArgonBridge: ObservableObject {
   @Published private(set) var taskMutationIDs: Set<String> = []
   private(set) var nextEvent: ArgonWidgetSnapshot.Event?
   @Published private(set) var acUnitsCache: [ArgonACUnit] = []
+  /// Which address actually answered. Shown in Settings because "it works at
+  /// home and not on cellular" was invisible for weeks: the app had one
+  /// address, and nothing on screen said which one it was using.
+  @Published private(set) var activeAddress = ""
 
   var apiToken: String {
     get { ArgonKeychain.read() }
@@ -165,6 +169,11 @@ final class ArgonBridge: ObservableObject {
 
   private let defaults = UserDefaults.standard
   private var pollingTimer: Timer?
+  /// Whichever base answered last. Process-local on purpose: it must not
+  /// survive walking out of the house with the LAN address still pinned.
+  private var pinnedBase: URL? {
+    didSet { activeAddress = pinnedBase?.host ?? "" }
+  }
 
   private init() {
     // The public HTTPS endpoint, not the old SSH tunnel to 127.0.0.1:3995.
@@ -786,10 +795,10 @@ final class ArgonBridge: ObservableObject {
     return formatter
   }()
 
-  private var normalizedServerURL: URL? {
-    let value = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+  private func normalized(_ value: String) -> URL? {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
       .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-    guard let url = URL(string: value),
+    guard let url = URL(string: trimmed),
       let scheme = url.scheme?.lowercased(),
       scheme == "http" || scheme == "https"
     else {
@@ -798,8 +807,32 @@ final class ArgonBridge: ObservableObject {
     return url
   }
 
+  private var normalizedServerURL: URL? { normalized(serverURL) }
+
+  /// Every address worth trying, in preference order.
+  ///
+  /// The app used to have exactly one. Set it to the LAN address once — which
+  /// is the fast, obvious thing to do at home — and Argon becomes unreachable
+  /// everywhere else, including on cellular, which reads as "the server is
+  /// down" rather than "this address only exists at home".
+  ///
+  /// The public address is always in the list and is not editable, so it
+  /// cannot be lost by typing over it.
+  var bases: [URL] {
+    var found: [URL] = []
+    for candidate in [normalizedServerURL, normalized(Self.publicURL)] {
+      guard let candidate else { continue }
+      if !found.contains(candidate) { found.append(candidate) }
+    }
+    return found
+  }
+
+  static let publicURL = "https://argon.agentneon.dev"
+
   private func makeRequest(path: String, method: String = "GET") -> URLRequest? {
-    guard let baseURL = normalizedServerURL, !apiToken.isEmpty,
+    // Whichever base answered last, so the usual request is a single attempt.
+    let ordered = pinnedBase.map { pin in [pin] + bases.filter { $0 != pin } } ?? bases
+    guard let baseURL = ordered.first, !apiToken.isEmpty,
       let url = URL(string: path, relativeTo: baseURL)
     else {
       lastError = "Enter the Argon server URL and API token."
@@ -807,12 +840,73 @@ final class ArgonBridge: ObservableObject {
     }
     var request = URLRequest(url: url)
     request.httpMethod = method
-    request.timeoutInterval = 120
+    // Short: a LAN address that is not on this network has to fail fast so the
+    // fallback is tried while he is still looking at the screen. Two minutes
+    // of spinner is indistinguishable from broken.
+    request.timeoutInterval = baseURL.host?.hasPrefix("192.168.") == true ? 4 : 30
     request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
     return request
   }
 
+  /// Rebuild a request against a different base, keeping method, headers, body.
+  private func rebased(_ request: URLRequest, onto base: URL) -> URLRequest? {
+    guard let original = request.url,
+      let path = URLComponents(url: original, resolvingAgainstBaseURL: false)
+        .map({ $0.percentEncodedPath + ($0.percentEncodedQuery.map { "?" + $0 } ?? "") }),
+      let url = URL(string: path, relativeTo: base)
+    else {
+      return nil
+    }
+    var copy = request
+    copy.url = url
+    copy.timeoutInterval = base.host?.hasPrefix("192.168.") == true ? 4 : 30
+    return copy
+  }
+
+  /// Send a request, falling back to the other base if this one cannot be
+  /// reached at all.
+  ///
+  /// Only connection failures fall through. A 401 or a 500 is the server
+  /// answering, and retrying that elsewhere would just ask a second machine
+  /// the same question.
   private func perform(_ request: URLRequest) async throws -> Data {
+    do {
+      let data = try await attempt(request)
+      if let host = request.url { pinnedBase = base(of: host) }
+      return data
+    } catch let error as URLError where Self.unreachable.contains(error.code) {
+      let current = request.url.flatMap(base(of:))
+      for alternative in bases where alternative != current {
+        guard let retry = rebased(request, onto: alternative) else { continue }
+        do {
+          let data = try await attempt(retry)
+          // Pin it so the next request goes straight here rather than waiting
+          // on the dead address again.
+          pinnedBase = alternative
+          return data
+        } catch {
+          continue
+        }
+      }
+      throw error
+    }
+  }
+
+  /// URLErrors that mean "this address is not answering", as opposed to the
+  /// server answering with something unwelcome.
+  private static let unreachable: Set<URLError.Code> = [
+    .cannotConnectToHost, .cannotFindHost, .timedOut,
+    .networkConnectionLost, .notConnectedToInternet, .dnsLookupFailed,
+    .secureConnectionFailed, .resourceUnavailable,
+  ]
+
+  private func base(of url: URL) -> URL? {
+    bases.first { candidate in
+      url.host == candidate.host && url.port == candidate.port
+    }
+  }
+
+  private func attempt(_ request: URLRequest) async throws -> Data {
     let (data, response) = try await URLSession.shared.data(for: request)
     guard let httpResponse = response as? HTTPURLResponse else {
       throw URLError(.badServerResponse)

@@ -236,6 +236,14 @@ struct SettingsView: View {
             }
           }
 
+          if !argonBridge.activeAddress.isEmpty {
+            LabeledContent("Reached via") {
+              Text(argonBridge.activeAddress)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+          }
+
           if let lastError = argonBridge.lastError {
             Text(lastError)
               .font(.caption)
@@ -245,7 +253,9 @@ struct SettingsView: View {
           Text("Argon Connection")
         } footer: {
           Text(
-            "This is the api.token from ~/.argon/config.json. The app reconciles to Argon's desired state directly; APNs wakes it for background changes."
+            "This is the api.token from ~/.argon/config.json. Argon always falls "
+              + "back to \(ArgonBridge.publicURL) if the address above cannot be "
+              + "reached, so a LAN address here still works away from home."
           )
         }
 
