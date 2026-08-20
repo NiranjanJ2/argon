@@ -335,6 +335,14 @@ private struct ArgonTaskRow: View {
   var onToggle: () -> Void = {}
 
   var body: some View {
+    rowBody
+      // The running task is the selected thing on this screen, so it gets the
+      // one treatment selection has everywhere: a blue outline that glows.
+      .argonSelectable(task.isStarted, cornerRadius: 14)
+      .padding(.vertical, 2)
+  }
+
+  private var rowBody: some View {
     HStack(alignment: .top, spacing: 12) {
       Button(action: onToggle) {
         ZStack {
@@ -400,7 +408,6 @@ private struct ArgonTaskRow: View {
       }
     }
     .padding(.trailing, 14)
-    .background(ArgonPalette.surface.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
   }
 
   private var circleColor: Color {

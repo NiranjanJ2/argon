@@ -74,14 +74,16 @@ struct ArgonPlannerView: View {
     HStack {
       if step > 0 {
         Button("Back") { withAnimation { step -= 1 } }
-          .buttonStyle(.bordered)
+          .buttonStyle(ArgonSecondaryButtonStyle())
+          .frame(maxWidth: 110)
       }
       Spacer()
       Button(step == steps.count - 1 ? (isSaving ? "Saving…" : "Start the day") : "Next") {
         if step == steps.count - 1 { save() } else { withAnimation { step += 1 } }
       }
-      .buttonStyle(.borderedProminent)
+      .buttonStyle(ArgonPrimaryButtonStyle())
       .disabled(isSaving || !canAdvance)
+      .opacity(canAdvance ? 1 : 0.45)
     }
     .padding(16)
   }
@@ -121,8 +123,13 @@ struct ArgonPlannerView: View {
       if payload.overdue.isEmpty {
         emptyLine("Nothing is past due.")
       } else {
-        Toggle("None of it — it's all done", isOn: $nothingOverdue)
-          .tint(.green)
+        ArgonChoiceButton(
+          title: "None of it — it's all done",
+          caption: "Clears every item below",
+          isSelected: nothingOverdue
+        ) {
+          nothingOverdue.toggle()
+        }
           .onChange(of: nothingOverdue) { _, on in
             if on {
               alreadyDone = Set(payload.overdue.map(\.id))
@@ -139,12 +146,33 @@ struct ArgonPlannerView: View {
               Text([item.subject, stale].filter { !$0.isEmpty }.joined(separator: " · "))
                 .font(.caption2).foregroundStyle(.orange)
             }
-            Picker("", selection: overdueChoice(item.id)) {
-              Text("Still to do").tag(OverdueChoice.todo)
-              Text("Done").tag(OverdueChoice.done)
-              Text("Skip").tag(OverdueChoice.skip)
+            HStack(spacing: 8) {
+              ForEach(
+                [
+                  (OverdueChoice.todo, "Still to do"),
+                  (OverdueChoice.done, "Done"),
+                  (OverdueChoice.skip, "Skip"),
+                ],
+                id: \.0
+              ) { choice, label in
+                Button {
+                  overdueChoice(item.id).wrappedValue = choice
+                } label: {
+                  Text(label)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(
+                      overdueChoice(item.id).wrappedValue == choice
+                        ? ArgonPalette.ink : ArgonPalette.mutedInk
+                    )
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+                    .argonSelectable(overdueChoice(item.id).wrappedValue == choice, cornerRadius: 10)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+              }
             }
-            .pickerStyle(.segmented)
+            .opacity(nothingOverdue ? 0.4 : 1)
             .disabled(nothingOverdue)
           }
           .padding(.vertical, 4)
@@ -229,13 +257,12 @@ struct ArgonPlannerView: View {
   }
 
   private func selectRow(title: String, caption: String, isOn: Binding<Bool>) -> some View {
-    Toggle(isOn: isOn) {
-      VStack(alignment: .leading, spacing: 2) {
-        Text(title).font(.subheadline)
-        if !caption.isEmpty {
-          Text(caption).font(.caption2).foregroundStyle(.secondary)
-        }
-      }
+    ArgonChoiceButton(
+      title: title,
+      caption: caption,
+      isSelected: isOn.wrappedValue
+    ) {
+      isOn.wrappedValue.toggle()
     }
   }
 
