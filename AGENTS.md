@@ -91,6 +91,18 @@ always stubbed.
 The server is `agentneon@192.168.68.72`; the repo lives at `~/argon` and the
 service runs as `argon.service`.
 
+**Always `ssh agentneon`.** That host is configured to the LAN address
+directly, which is the only route that should ever be used. `agentneon-cf`
+exists as an off-LAN fallback through cloudflared and needs a browser login
+that has to be approved by hand every time — never reach for it just because a
+connection failed. If `ssh agentneon` starts closing the connection before key
+exchange (`kex_exchange_identification`), that is the machine refusing, not the
+route being wrong: wait, or ask him. Switching to the tunnel to work around it
+turns a thirty-second pause into a login prompt in his face.
+
+The HTTP API stays reachable when ssh does not, so `/v1/...` with the token
+from `~/.config/argon/desktop.json` reads live state without a shell.
+
 ```sh
 git pull                                              # on the server
 kill $(systemctl show argon.service -p MainPID --value)   # Restart=always

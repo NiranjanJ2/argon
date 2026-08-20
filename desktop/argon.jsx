@@ -260,7 +260,6 @@ export const render = ({ output }) => {
   }
 
   const groups = v.groups || [];
-  const inbox = v.inbox || [];
   const focus = v.focus || {};
   const phone = v.phone || {};
 
@@ -301,30 +300,6 @@ export const render = ({ output }) => {
               Anything you or Argon adds shows up here on the same shared list.
             </div>
           )}
-        </div>
-      )}
-
-      {inbox.length > 0 && (
-        <div>
-          <div className="section">
-            <span className="dot" style={{ background: "#65D8FF",
-                                           boxShadow: "0 0 5px #65D8FF" }} />
-            <span className="display name">Argon asked</span>
-            <span className="count">{inbox.length}</span>
-          </div>
-          {inbox.map((q) => (
-            <div key={q.id} className="q">
-              <div className="qtext">{q.text}</div>
-              <div className="qacts">
-                {q.actions.filter((a) => a.task_id).map((a) => (
-                  <span key={a.action} className="qbtn"
-                        onClick={(e) => act(e, a.action, a.task_id)}>
-                    {a.label}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ))}
         </div>
       )}
 

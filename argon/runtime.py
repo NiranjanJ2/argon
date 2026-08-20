@@ -301,6 +301,82 @@ def build_runtime(config: Config) -> Runtime:
         here in silence while the log said "Check-in spoke".
         """
         delivery_key = key or f"notify:{int(_now_ms())}"
+        channel, chat_id = pick_target()
+
+        async def _silent(*_a, **_kw):
+            pass
+
+        resp = await heartbeat_agent.process_direct(
+            prompt, session_key="heartbeat", channel=channel, chat_id=chat_id,
+            on_progress=_silent,
+            origin="checkin", background=True,
+        )
+        session = heartbeat_agent.sessions.get_or_create("heartbeat")
+        session.retain_recent_legal_suffix(hb_cfg.keep_recent_messages)
+        heartbeat_agent.sessions.save(session)
+        return resp.content if resp else ""
+
+    async def run_background_turn(prompt: str) -> str:
+        """Serialize background work through its shared AgentLoop and tools."""
+        async with background_turn_lock:
+            return await _run_background_turn(prompt)
+
+    async def on_button(action: dict[str, Any]) -> str:
+        """A button was pressed. Do exactly that, with no model involved.
+
+        This is the whole reason buttons are worth building. "yeah in a bit" has
+        to be interpreted, and interpretation is where Argon decided he had
+        started work he had not started. A press carries a verb chosen by code
+        and a task id chosen by code, so the state change is precisely what he
+        tapped — and `start_task`/`complete_task` stay interactive-only, because
+        this is him acting, not automation acting for him.
+        """
+        from argon.google.tasks_store import GoogleTasksStore
+        from argon.productivity.log import DailyLog
+        from argon.productivity.state import DailyState
+
+        verb = str(action.get("action") or "")
+        task_id = str(action.get("task_id") or "")
+        title = str(action.get("title") or "that")
+        workspace = config.workspace_path
+        state = DailyState(workspace)
+
+        if verb == "start":
+            store = GoogleTasksStore(workspace)
+            task = await asyncio.to_thread(store.start_task, task_id)
+            if task is None:
+                return f"Couldn't find {title} any more — it may have been removed."
+            state.start_session(task_id=task_id, title=task.get("title") or title)
+            DailyLog(workspace).append(f"Started: {task.get('title') or title}", tag="task")
+            return f"Started {task.get('title') or title}."
+
+        if verb == "complete":
+            store = GoogleTasksStore(workspace)
+            session = state.get_session()
+            minutes = session.get("elapsed_min") if session else None
+            done = await asyncio.to_thread(store.complete_task, task_id, actual_min=minutes)
+            if done is None:
+                return f"Couldn't find {title} any more — it may already be done."
+            state.end_session_if_task(task_id, title=done.get("title"))
+            DailyLog(workspace).append(f"Completed: {done.get('title') or title}", tag="task")
+            return f"Done — {done.get('title') or title} is off the list."
+
+        if verb == "defer":
+            # Not a state change. He answered, which is all the follow-up
+            # wanted; the ledger already recorded that this item was asked
+            # about, so nothing chases it again today.
+            return f"Fine — leaving {title} for now."
+
+        return f"Don't know how to do '{verb}'."
+
+    async def notify(response: str, *, key: str | None = None, actions: Any = None) -> Any:
+        """Deliver something Niranjan did not ask for. Returns whether it landed.
+
+        This used to return None whether it sent, dropped, or failed — and the
+        check-in ledger recorded "said" regardless. Two days of check-ins died
+        here in silence while the log said "Check-in spoke".
+        """
+        delivery_key = key or f"notify:{int(_now_ms())}"
         # Recorded before delivery and regardless of its outcome. The phone is a
         # surface in its own right, and it is exactly where you want the message
         # when Discord is the thing that is down. Recording under the delivery

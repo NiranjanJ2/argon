@@ -181,66 +181,9 @@ export const render = ({ output }) => {
 
   const now = v.now || {};
   const agenda = v.agenda || [];
-  const inbox = v.inbox || [];
 
   return (
     <div>
-      {inbox.length > 0 && (
-        <div className="asked">
-          <div className="eyebrow">Argon asked</div>
-          {inbox.map((q) => (
-            <div key={q.id} className="q">
-              <div className="qtext">{q.text}</div>
-              <div className="qacts">
-                {q.actions.filter((a) => a.task_id).map((a) => (
-                  <span key={a.action} className="qbtn"
-                        onClick={(e) => act(e, a.action, a.task_id)}>
-                    {a.label}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {now.state === "running" ? (
-        <div className="panel">
-          <div className="eyebrow">Working on</div>
-          <div className="live">
-            <div className="pulse" />
-            <div className="display title">{now.title}</div>
-          </div>
-          <div className={now.over ? "sub over" : "sub"}>
-            {[now.elapsed, now.subject, now.estimate].filter(Boolean).join(" · ")}
-            {now.over && " · over estimate"}
-          </div>
-          <div className="actions">
-            <div className="btn done" onClick={(e) => act(e, "complete", now.id, now.title)}>
-              <Icon name="check" /> Done
-            </div>
-            <div className="btn" onClick={(e) => act(e, "stop", now.id)}>
-              <Icon name="pause" /> Put down
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="panel">
-          <div className="eyebrow">Start working on</div>
-          {now.picker && now.picker.length ? (
-            now.picker.map((t) => (
-              <div key={t.id} className="row" onClick={(e) => act(e, "start", t.id)}>
-                <span className="dot" style={{ background: t.tint }} />
-                <span className="name">{t.title}</span>
-                <span className="when">{t.meta}</span>
-              </div>
-            ))
-          ) : (
-            <div className="empty">Nothing on the list.</div>
-          )}
-        </div>
-      )}
-
       {agenda.length > 0 && (
         <div className="agenda">
           <div className="eyebrow">Coming up</div>

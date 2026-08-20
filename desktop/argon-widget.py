@@ -231,14 +231,6 @@ def collect():
         status["tasks_cached"] = False
         status["tasks_error"] = str(e)
 
-    # Argon's open questions. Also allowed to fail alone: an older server has no
-    # /v1/inbox at all, and the readout predates it, so a 404 here must leave
-    # everything else on screen.
-    try:
-        payload = reach(bases, token, lambda b: get(b, token, "/v1/inbox"))
-        status["inbox"] = payload.get("items", [])
-    except Exception:  # noqa: BLE001
-        status["inbox"] = []
     return status
 
 
@@ -377,20 +369,6 @@ def build_view(d):
         },
         "groups": group_tasks(d.get("tasks") or []),
         "now": now_panel(d),
-        # Argon's open questions, drawn above everything else. This is the only
-        # thing on the desktop waiting on him rather than informing him, and it
-        # was the one thing the readout could not show at all.
-        "inbox": [
-            {"id": i.get("id"), "text": i.get("text") or "",
-             "actions": [
-                 {"label": a.get("label") or a.get("action") or "?",
-                  "action": a.get("action") or "",
-                  "task_id": a.get("task_id") or ""}
-                 for a in (i.get("actions") or [])
-             ]}
-            for i in (d.get("inbox") or [])
-            if not i.get("answered") and i.get("actions")
-        ],
         # `plan` and `due` are gone, deliberately.
         #
         # Plan drew timed blocks. He does not work in blocks — that model was
@@ -639,20 +617,6 @@ def render_swiftbar(view):
             label = item["title"] + (" · " + item["meta"] if item["meta"] else "")
             out.append(bar(label, size=12, color=item["tint"], sfimage="play.circle",
                            **action_params("start", item["id"])))
-
-    # -- Argon's open questions ---------------------------------------------
-    # Above the task list, because this is the part waiting on an answer.
-    if view.get("inbox"):
-        out.append("---")
-        out.append(bar("Argon asked", color=PALETTE["mutedInk"], size=11))
-        for item in view["inbox"]:
-            out.append(bar(item["text"][:80], size=12, color=PALETTE["ink"]))
-            for action in item["actions"]:
-                if action["task_id"]:
-                    out.append(bar(
-                        "--" + action["label"], size=11,
-                        **action_params(action["action"], action["task_id"])
-                    ))
 
     # -- agenda ------------------------------------------------------------
     if view.get("agenda"):
@@ -933,22 +897,6 @@ def selftest():
     plain = build_view({"tasks": [{"id": "x", "title": "Long", "running": True,
                                    "running_minutes": 900}]})
     assert plain["now"]["over"] is False
-
-    # -- Argon's open questions --------------------------------------------
-    # An answered item is history and must not sit there looking like a
-    # question; one with no buttons is a statement, not a request.
-    asked = build_view({
-        "tasks": [],
-        "inbox": [
-            {"id": "k1", "text": "Have you started APUSH?",
-             "actions": [{"label": "Starting now", "action": "start", "task_id": "t1"}]},
-            {"id": "k2", "text": "Answered already", "answered": {"verb": "start"},
-             "actions": [{"label": "Starting now", "action": "start", "task_id": "t2"}]},
-            {"id": "k3", "text": "Your meeting starts in 15 minutes.", "actions": []},
-        ],
-    })["inbox"]
-    assert [i["text"] for i in asked] == ["Have you started APUSH?"]
-    assert asked[0]["actions"][0]["action"] == "start"
 
     # -- reaching the server -----------------------------------------------
     # Home is direct; school goes out through Cloudflare and back. Trying the
