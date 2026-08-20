@@ -63,18 +63,18 @@ import argon_activity  # noqa: E402
 # ---------------------------------------------------------------------------
 
 PALETTE = {
-    "canvas": "#040812",
-    "canvasLifted": "#081326",
-    "surface": "#0C1729",
-    "surfaceRaised": "#12213A",
-    "electricBlue": "#5DA9FF",
-    "iceBlue": "#A9DDFF",
-    "cobalt": "#275DFF",
-    "cyan": "#65D8FF",
-    "ink": "#F4F8FF",
-    "mutedInk": "#9BAAC0",
-    "warning": "#FF9F45",
-    "danger": "#FF6B6B",
+    "canvas": "#14171C",
+    "canvasLifted": "#1A1E25",
+    "surface": "#21262E",
+    "surfaceRaised": "#2A313A",
+    "electricBlue": "#4D9EFF",
+    "iceBlue": "#8FC2FF",
+    "cobalt": "#2F6FD0",
+    "cyan": "#63C8E8",
+    "ink": "#E9EDF2",
+    "mutedInk": "#98A2B0",
+    "warning": "#EDA24C",
+    "danger": "#E4645E",
 }
 
 #: Session mode -> (hero label, status-card label, SF Symbol).

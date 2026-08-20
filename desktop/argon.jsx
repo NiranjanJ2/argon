@@ -37,15 +37,12 @@ export const className = `
   width: 344px;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
   font-size: 12px;
-  color: #F4F8FF;
+  color: #E9EDF2;
   -webkit-font-smoothing: antialiased;
 
   /* ArgonBackdrop: canvas gradient, electric-blue bloom top-trailing,
      cobalt wash bottom-leading. */
-  background:
-    radial-gradient(120% 90% at 100% 0%, rgba(93,169,255,0.20), rgba(93,169,255,0.04) 45%, transparent 70%),
-    radial-gradient(110% 80% at 0% 100%, rgba(39,93,255,0.12), transparent 65%),
-    linear-gradient(135deg, #040812 0%, #081326 50%, #040812 100%);
+  background: #1A1E25;
   border-radius: 28px;
   border: 1px solid rgba(255,255,255,0.10);
   box-shadow: 0 22px 44px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06);
@@ -58,83 +55,83 @@ export const className = `
         stroke-linecap: round; stroke-linejoin: round; }
 
   .eyebrow { font-size: 10px; font-weight: 700; letter-spacing: 1.8px;
-             color: #A9DDFF; text-transform: uppercase; }
+             color: #8FC2FF; text-transform: uppercase; }
   .display { font-family: ui-serif, Georgia, "Times New Roman", serif;
-             font-weight: 600; color: #F4F8FF; }
+             font-weight: 600; color: #E9EDF2; }
 
   .hero { display: flex; align-items: flex-start; gap: 14px; }
   .hero .title { font-size: 23px; line-height: 1.18; margin-top: 5px;
                  display: -webkit-box; -webkit-line-clamp: 2;
                  -webkit-box-orient: vertical; overflow: hidden; }
-  .hero .caption { font-size: 11px; color: #9BAAC0; margin-top: 5px; }
+  .hero .caption { font-size: 11px; color: #98A2B0; margin-top: 5px; }
 
   /* ArgonStatusCard's mode badge: blurred halo behind a hairline circle. */
   .orb { position: relative; flex: 0 0 auto; width: 42px; height: 42px;
          border-radius: 50%; background: rgba(255,255,255,0.055);
-         border: 1px solid rgba(93,169,255,0.28);
+         border: 1px solid rgba(77,158,255,0.28);
          display: flex; align-items: center; justify-content: center; }
   .orb::before { content: ""; position: absolute; inset: -6px; border-radius: 50%;
-                 background: rgba(93,169,255,0.15); filter: blur(7px); z-index: -1; }
-  .orb svg { width: 17px; height: 17px; stroke: #A9DDFF; fill: none;
+                 background: rgba(77,158,255,0.15); filter: blur(7px); z-index: -1; }
+  .orb svg { width: 17px; height: 17px; stroke: #8FC2FF; fill: none;
              stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 
   .metrics { display: flex; gap: 8px; margin-top: 16px; }
   .metric { flex: 1; padding: 10px 11px; border-radius: 15px;
             background: rgba(0,0,0,0.19); border: 1px solid rgba(255,255,255,0.055); }
-  .metric svg { width: 11px; height: 11px; stroke: #A9DDFF; fill: none;
+  .metric svg { width: 11px; height: 11px; stroke: #8FC2FF; fill: none;
                 stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
   .metric .value { font-size: 18px; margin-top: 5px; }
   .metric .label { font-size: 8px; font-weight: 700; letter-spacing: 1px;
-                   color: #9BAAC0; margin-top: 2px; }
+                   color: #98A2B0; margin-top: 2px; }
 
   .alert { display: flex; gap: 8px; align-items: flex-start; margin-top: 14px;
            padding: 10px 12px; border-radius: 14px; font-size: 11px;
-           color: #FF9F45; background: rgba(255,159,69,0.09);
+           color: #EDA24C; background: rgba(255,159,69,0.09);
            border: 1px solid rgba(255,159,69,0.22); }
 
   /* Today's plan — the blocks that decide when Argon speaks. A readout that
      does not show them describes a different day from the one Argon runs. */
   .blk { display: flex; align-items: center; gap: 10px; padding: 6px 9px;
-         border-radius: 9px; color: #C7D4E6; font-size: 12px; }
-  .blk.live { background: rgba(101,216,255,0.12); color: #F4F8FF; }
-  .blk.gone { color: #6C7A8D; }
-  .blk .span { font-size: 10.5px; color: #9BAAC0; flex: none; width: 82px; }
+         border-radius: 9px; color: #C3CBD6; font-size: 12px; }
+  .blk.live { background: rgba(99,200,232,0.12); color: #E9EDF2; }
+  .blk.gone { color: #6B7480; }
+  .blk .span { font-size: 10.5px; color: #98A2B0; flex: none; width: 82px; }
   .blk .what { flex: 1; min-width: 0; overflow: hidden;
                text-overflow: ellipsis; white-space: nowrap; }
-  .blk .tick { font-size: 10px; color: #65D8FF; cursor: pointer; flex: none;
+  .blk .tick { font-size: 10px; color: #63C8E8; cursor: pointer; flex: none;
                opacity: 0; transition: opacity 120ms ease; }
   .blk:hover .tick { opacity: 1; }
-  .blk .mark { font-size: 10px; color: #6C7A8D; flex: none; }
+  .blk .mark { font-size: 10px; color: #6B7480; flex: none; }
 
   .hw { display: flex; align-items: center; gap: 10px; padding: 5px 9px;
-        color: #C7D4E6; font-size: 12px; }
+        color: #C3CBD6; font-size: 12px; }
   .hw .name { flex: 1; min-width: 0; overflow: hidden;
               text-overflow: ellipsis; white-space: nowrap; }
-  .hw .course { font-size: 10px; color: #6C7A8D; }
-  .hw .when { font-size: 10.5px; color: #9BAAC0; flex: none; }
-  .hw.urgent .when { color: #FF9F45; }
+  .hw .course { font-size: 10px; color: #6B7480; }
+  .hw .when { font-size: 10.5px; color: #98A2B0; flex: none; }
+  .hw.urgent .when { color: #EDA24C; }
 
   .section { display: flex; align-items: center; gap: 8px; margin: 18px 0 8px; }
   .section .dot { width: 6px; height: 6px; border-radius: 50%; }
   .section .name { font-size: 16px; }
-  .section .count { font-size: 11px; font-weight: 600; color: #9BAAC0; }
+  .section .count { font-size: 11px; font-weight: 600; color: #98A2B0; }
 
   /* ArgonTaskRow */
   .task { display: flex; align-items: center; gap: 12px; padding: 11px 13px;
           margin-bottom: 7px; border-radius: 18px;
-          background: rgba(12,23,41,0.82);
+          background: rgba(33,38,46,0.82);
           border: 1px solid rgba(255,255,255,0.07); }
   .ring { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%;
           border: 1.5px solid; display: flex; align-items: center;
           justify-content: center; }
-  .ring.started { box-shadow: 0 0 7px rgba(93,169,255,0.55); }
+  .ring.started { box-shadow: 0 0 7px rgba(77,158,255,0.55); }
   /* A solid glyph, so it must beat the stroked base rule above — CSS wins over
      SVG presentation attributes, so setting fill inline would not work. */
-  .ring svg { width: 8px; height: 8px; fill: #A9DDFF; stroke: none; }
+  .ring svg { width: 8px; height: 8px; fill: #8FC2FF; stroke: none; }
   .task .body { flex: 1; min-width: 0; }
   .task .name { font-size: 14px; overflow: hidden; text-overflow: ellipsis;
                 white-space: nowrap; }
-  .task .meta { font-size: 10px; font-weight: 500; color: #9BAAC0; margin-top: 3px;
+  .task .meta { font-size: 10px; font-weight: 500; color: #98A2B0; margin-top: 3px;
                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pill { flex: 0 0 auto; font-size: 8px; font-weight: 700; letter-spacing: 0.9px;
           padding: 4px 7px; border-radius: 99px; }
@@ -143,7 +140,7 @@ export const className = `
   /* Interactive affordances. The ring starts a task, the tick completes it —
      the same two gestures the app binds to tap and swipe. */
   .ring, .tick, .btn { cursor: pointer; }
-  .ring:hover { background: rgba(169,221,255,0.12); }
+  .ring:hover { background: rgba(143,194,255,0.12); }
   .tick { flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%;
           display: flex; align-items: center; justify-content: center;
           opacity: 0; transition: opacity 120ms ease; }
@@ -154,42 +151,42 @@ export const className = `
   .actions { display: flex; gap: 7px; margin-top: 13px; }
   .btn { flex: 1; display: flex; align-items: center; justify-content: center;
          gap: 6px; padding: 8px 6px; border-radius: 13px; font-size: 10.5px;
-         font-weight: 600; color: #A9DDFF; background: rgba(255,255,255,0.045);
+         font-weight: 600; color: #8FC2FF; background: rgba(255,255,255,0.045);
          border: 1px solid rgba(255,255,255,0.07); }
-  .btn:hover { background: rgba(93,169,255,0.14); border-color: rgba(93,169,255,0.30); }
+  .btn:hover { background: rgba(77,158,255,0.14); border-color: rgba(77,158,255,0.30); }
   .btn svg { width: 11px; height: 11px; }
 
   /* Argon's open questions: the only thing here waiting on an answer. */
   .q { margin: 4px 0 10px; }
-  .qtext { font-size: 12px; color: #F4F8FF; line-height: 1.35; }
+  .qtext { font-size: 12px; color: #E9EDF2; line-height: 1.35; }
   .qacts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
   .qbtn { padding: 5px 10px; border-radius: 8px; cursor: pointer; font-size: 11px;
-          border: 1px solid rgba(169,221,255,0.16);
-          background: rgba(18,33,58,0.75); color: #A9DDFF;
+          border: 1px solid rgba(143,194,255,0.16);
+          background: rgba(42,49,58,0.75); color: #8FC2FF;
           transition: background 120ms ease; }
-  .qbtn:hover { background: rgba(39,93,255,0.30); }
+  .qbtn:hover { background: rgba(47,111,208,0.30); }
 
   .dormant { opacity: 0.55; }
   .empty { text-align: center; padding: 22px 8px; }
-  .empty svg { width: 28px; height: 28px; stroke: #A9DDFF; stroke-width: 1.7;
-               filter: drop-shadow(0 0 9px rgba(93,169,255,0.46)); }
+  .empty svg { width: 28px; height: 28px; stroke: #8FC2FF; stroke-width: 1.7;
+               filter: drop-shadow(0 0 9px rgba(77,158,255,0.46)); }
   .empty .headline { font-size: 19px; margin-top: 10px; }
-  .empty .sub { font-size: 11px; color: #9BAAC0; margin-top: 5px; line-height: 1.5; }
+  .empty .sub { font-size: 11px; color: #98A2B0; margin-top: 5px; line-height: 1.5; }
 
   .rule { height: 1px; margin: 16px 0 12px;
           background: linear-gradient(90deg, rgba(255,255,255,0.10), transparent); }
   .kv { display: flex; justify-content: space-between; gap: 12px;
         font-size: 11px; padding: 2px 0; }
-  .kv .k { color: #9BAAC0; }
-  .kv .v { color: #F4F8FF; text-align: right; }
-  .kv .v.warn { color: #FF9F45; }
+  .kv .k { color: #98A2B0; }
+  .kv .v { color: #E9EDF2; text-align: right; }
+  .kv .v.warn { color: #EDA24C; }
 
   .foot { margin-top: 12px; font-size: 9.5px; letter-spacing: 0.5px;
           color: #55606F; text-align: right; }
   .offline { text-align: center; padding: 10px 4px; }
   .offline .orb { margin: 0 auto; }
   .offline .headline { font-size: 19px; margin-top: 11px; }
-  .offline .msg { font-size: 11px; color: #9BAAC0; margin-top: 6px;
+  .offline .msg { font-size: 11px; color: #98A2B0; margin-top: 6px;
                   line-height: 1.5; word-break: break-word; }
 `;
 
