@@ -217,3 +217,34 @@ class TestLongTermWork:
 
         assert all(i["id"] != "over" for i in view["long_term"])
         assert [i["id"] for i in view["overdue"]] == ["over"]
+
+
+class TestUndatedClassroomWork:
+    """Teachers post notices as coursework, and notices have no due date."""
+
+    def test_an_undated_classroom_item_is_not_a_project(self):
+        rows = [{
+            "id": "notice",
+            "title": "Reminder:  chapter 2 InQuizitive due tonight!",
+            "due": None,
+            "source": "classroom",
+        }]
+
+        view = planner.build(rows, now=_at(16, 0))
+
+        assert view["long_term"] == []
+
+    def test_his_own_undated_work_still_is(self):
+        rows = [{"id": "sat", "title": "SAT reading study", "due": None, "source": "tasks"}]
+
+        view = planner.build(rows, now=_at(16, 0))
+
+        assert [i["id"] for i in view["long_term"]] == ["sat"]
+
+    def test_dated_classroom_work_far_out_is_still_long_term(self):
+        rows = [{"id": "essay", "title": "Research essay", "due": "2026-09-30",
+                 "source": "classroom"}]
+
+        view = planner.build(rows, now=_at(16, 0))
+
+        assert [i["id"] for i in view["long_term"]] == ["essay"]

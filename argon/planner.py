@@ -135,6 +135,13 @@ def build(board_rows: list[dict[str, Any]], lang_posts: list[dict[str, Any]] | N
         due = str(row.get("due") or "")[:10]
         if due and due <= horizon:
             continue
+        # An undated Classroom item is almost never long-term work. Teachers
+        # post reminders and notices as coursework — "Reminder: chapter 2
+        # InQuizitive due tonight!" arrived here with no due date and was
+        # offered as a project. Real long-term work is his own: SAT prep, the
+        # UCLA paper. Classroom work that genuinely runs long carries a date.
+        if not due and row.get("source") == "classroom":
+            continue
         long_term.append({
             "id": row.get("id"),
             "title": row.get("title"),
