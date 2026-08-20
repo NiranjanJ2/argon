@@ -37,6 +37,10 @@ OPENS_AFTER = time(15, 36)
 CHEM_MINUTES = 60
 CHEM_TITLE = "AP Chem homework"
 
+#: Anything due further out than this counts as long-term rather than as this
+#: week's work. Three days keeps "due Friday" out of it on a Tuesday.
+LONG_TERM_HORIZON_DAYS = 3
+
 #: Pulls the homework out of an AP Lang daily post. The teacher's format is
 #: stable: an "HW:" line, then numbered items, and "None :)" for a free night.
 _HW_BLOCK = re.compile(r"\bHW\s*:?\s*\n?(.+)", re.IGNORECASE | re.DOTALL)
@@ -120,6 +124,24 @@ def build(board_rows: list[dict[str, Any]], lang_posts: list[dict[str, Any]] | N
         elif due == today_key:
             today.append(entry)
 
+    # Work with no deadline forcing it: SAT prep, the UCLA paper. It never
+    # surfaces on its own, because every other view sorts by what is due — so
+    # left to the board alone it loses to whatever is on fire, every day.
+    long_term: list[dict[str, Any]] = []
+    horizon = (now + timedelta(days=LONG_TERM_HORIZON_DAYS)).strftime("%Y-%m-%d")
+    for row in board_rows:
+        if row.get("done"):
+            continue
+        due = str(row.get("due") or "")[:10]
+        if due and due <= horizon:
+            continue
+        long_term.append({
+            "id": row.get("id"),
+            "title": row.get("title"),
+            "subject": row.get("subject") or row.get("course") or "",
+            "due": due or None,
+        })
+
     suggestions: list[dict[str, Any]] = [
         {
             "kind": "chem",
@@ -148,6 +170,7 @@ def build(board_rows: list[dict[str, Any]], lang_posts: list[dict[str, Any]] | N
         "today_key": today_key,
         "overdue": overdue,
         "today": today,
+        "long_term": long_term,
         "suggestions": suggestions,
     }
 

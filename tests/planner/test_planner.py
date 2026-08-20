@@ -188,3 +188,32 @@ class TestStartTime:
 
         # Yesterday's plan must not silently govern today.
         assert planner.start_time() is None
+
+
+class TestLongTermWork:
+    """Work with no deadline forcing it, which every other view buries."""
+
+    ROWS = [
+        {"id": "sat", "title": "SAT reading study", "due": None},
+        {"id": "ucla", "title": "UCLA survey paper", "due": "2026-09-30"},
+        {"id": "hw", "title": "HW 3", "due": "2026-08-19"},
+        {"id": "soon", "title": "Chapter 2 key terms", "due": "2026-08-21"},
+        {"id": "over", "title": "Old thing", "due": "2026-08-15"},
+    ]
+
+    def test_undated_and_far_off_work_is_offered(self):
+        view = planner.build(self.ROWS, now=_at(16, 0))
+
+        assert {i["id"] for i in view["long_term"]} == {"sat", "ucla"}
+
+    def test_this_weeks_work_is_not_long_term(self):
+        # Due Friday on a Wednesday is this week's problem, not a project.
+        view = planner.build(self.ROWS, now=_at(16, 0))
+
+        assert all(i["id"] != "soon" for i in view["long_term"])
+
+    def test_overdue_work_is_never_long_term(self):
+        view = planner.build(self.ROWS, now=_at(16, 0))
+
+        assert all(i["id"] != "over" for i in view["long_term"])
+        assert [i["id"] for i in view["overdue"]] == ["over"]
