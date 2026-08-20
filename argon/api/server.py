@@ -709,6 +709,109 @@ def ios_diagnostics_clear() -> Any:
     return jsonify({"cleared": diagnostics.clear()})
 
 
+@app.get("/v1/planner")
+@require_token
+def planner_get() -> Any:
+    """What the afternoon planning screen should show."""
+    from argon import planner
+    from argon.commitments import load_board
+
+    store, state, _log, _habits = _task_dependencies()
+    board = load_board(store.workspace, store=store)
+
+    # AP Lang posts the day's homework as a Material rather than an assignment,
+    # so it is not on the board and has to be read straight from Classroom.
+    lang_posts: list[dict[str, Any]] = []
+    try:
+        from argon.google.classroom import posts_across_courses
+        from argon.google.service import build_google_service
+
+        svc = build_google_service(store.workspace, "classroom", "v1", "school")
+        lang_posts, _ = posts_across_courses(svc, days_back=2, courses=["Lang"])
+    except Exception as exc:  # noqa: BLE001 - a planner without Lang still plans
+        logger.warning("Could not read AP Lang posts for the planner: {}", exc)
+
+    return jsonify(planner.build(board.as_dicts(), lang_posts=lang_posts))
+
+
+@app.post("/v1/planner")
+@require_token
+def planner_post() -> Any:
+    """Apply what he decided, and record that today has been planned.
+
+    Everything routes through the same task tools the rest of Argon uses, so a
+    Classroom assignment gets its overlay, a completion gets its disposition,
+    and the daily log and habit stats see it — a second write path here is how
+    the board and the record start disagreeing.
+    """
+    from argon import planner
+    from argon.tools.tasks import (
+        AddTaskTool,
+        CompleteTaskTool,
+        UpdateTaskTool,
+        overlay_for_classroom,
+    )
+
+    body = _body()
+    store, state, log, habits = _task_dependencies()
+    today = _now().strftime("%Y-%m-%d")
+    result: dict[str, Any] = {"completed": [], "carried": [], "added": [], "errors": []}
+
+    def resolve(task_id: str) -> str:
+        """A Classroom row has no task behind it until something needs one."""
+        if overlay := overlay_for_classroom(store, task_id):
+            return overlay["id"]
+        return task_id
+
+    for task_id in body.get("done") or []:
+        try:
+            out = asyncio.run(
+                CompleteTaskTool(store, state, log, habits).execute(task_id=str(task_id))
+            )
+            result["completed"].append(str(out))
+        except Exception as exc:  # noqa: BLE001 - one bad id must not lose the rest
+            result["errors"].append(f"done {task_id}: {exc}")
+
+    for task_id in body.get("carry") or []:
+        try:
+            out = asyncio.run(
+                UpdateTaskTool(store).execute(task_id=resolve(str(task_id)), due=today)
+            )
+            result["carried"].append(str(out))
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"carry {task_id}: {exc}")
+
+    additions = list(body.get("add") or [])
+    if body.get("chem"):
+        additions.append({
+            "title": planner.CHEM_TITLE,
+            "subject": "AP Chemistry",
+            "estimate_min": planner.CHEM_MINUTES,
+        })
+    for item in additions:
+        if not isinstance(item, dict) or not str(item.get("title") or "").strip():
+            continue
+        try:
+            out = asyncio.run(AddTaskTool(store, log).execute(
+                title=str(item["title"]).strip(),
+                subject=item.get("subject") or None,
+                due=item.get("due") or today,
+                time_estimate_min=item.get("estimate_min"),
+            ))
+            result["added"].append(str(out))
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"add {item.get('title')}: {exc}")
+
+    # Recorded even when nothing changed: "I looked and there is nothing to
+    # move" is an answer, and without it the screen reopens on the next launch.
+    result["planned_for"] = planner.mark_planned(today)
+    try:
+        log.append(planner.summarise(result), tag="plan")
+    except Exception:  # noqa: BLE001
+        pass
+    return jsonify(result)
+
+
 @app.errorhandler(Exception)
 def _on_error(exc: Exception) -> Any:
     """Answer in JSON always, and never leak a traceback or a config value."""
