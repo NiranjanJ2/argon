@@ -198,6 +198,21 @@ def chat(
 # ---------------------------------------------------------------------------
 
 
+@app.command("migrate-tasks")
+def migrate_tasks(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Copy Google Tasks into Argon's own database. Safe to run twice."""
+    from argon.tasks.local_store import migrate_from_google
+
+    cfg = _load(config)
+    out = migrate_from_google(cfg.workspace_path)
+    console.print(f"[green]OK[/green] read {out['read_from_google']} from Google")
+    console.print(f"     imported {out['imported']}, already present {out['already_present']}")
+    console.print(f"     local now: {out['local_pending']} pending, {out['local_total']} total")
+    console.print("[yellow]Nothing was deleted from Google.[/yellow]")
+
+
 @app.command("google-auth")
 def google_auth(
     account: str = typer.Argument(help="personal | work | school"),
