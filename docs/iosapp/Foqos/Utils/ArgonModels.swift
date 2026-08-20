@@ -49,59 +49,6 @@ struct ArgonDesiredMode: Codable, Equatable {
   }
 }
 
-/// One button Argon offered with a message. The verb and the task id are chosen
-/// on the server, so a tap is unambiguous in a way typing a reply is not.
-struct ArgonInboxAction: Codable, Equatable, Identifiable {
-  let label: String
-  let action: String
-  let taskId: String?
-  let title: String?
-
-  var id: String { "\(action):\(taskId ?? "-")" }
-
-  enum CodingKeys: String, CodingKey {
-    case label
-    case action
-    case taskId = "task_id"
-    case title
-  }
-}
-
-struct ArgonInboxAnswer: Codable, Equatable {
-  let verb: String
-  let at: String?
-  let result: String?
-}
-
-/// Something Argon said unprompted, as the phone sees it.
-struct ArgonInboxItem: Codable, Equatable, Identifiable {
-  let id: String
-  let text: String
-  let sentAt: String?
-  let actions: [ArgonInboxAction]
-  let answered: ArgonInboxAnswer?
-
-  enum CodingKeys: String, CodingKey {
-    case id
-    case text
-    case sentAt = "sent_at"
-    case actions
-    case answered
-  }
-
-  var sentDate: Date? {
-    guard let sentAt else { return nil }
-    return ArgonServerDate.parse(sentAt)
-  }
-
-  var isWaiting: Bool { answered == nil && !actions.isEmpty }
-}
-
-struct ArgonInboxResponse: Codable, Equatable {
-  let items: [ArgonInboxItem]
-  let unanswered: Int
-}
-
 enum ArgonServerDate {
   static func parse(_ value: String) -> Date? {
     let fractional = ISO8601DateFormatter()
