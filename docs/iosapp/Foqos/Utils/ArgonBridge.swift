@@ -816,11 +816,22 @@ final class ArgonBridge: ObservableObject {
   /// everywhere else, including on cellular, which reads as "the server is
   /// down" rather than "this address only exists at home".
   ///
-  /// The public address is always in the list and is not editable, so it
-  /// cannot be lost by typing over it.
+  /// The public address leads whenever the configured one is a LAN address. A
+  /// private address is a shortcut that happens to be faster at home, not the
+  /// place Argon lives, and ordering it first buys a couple of hundred
+  /// milliseconds at home in exchange for a timeout everywhere else. A
+  /// genuinely different remote is still honoured first — that is somebody
+  /// pointing the app at another server, which is a real intent.
   var bases: [URL] {
+    let configured = normalizedServerURL
+    let publicBase = normalized(Self.publicURL)
+    let ordered: [URL?] =
+      (configured.map(Self.isPrivate) ?? false)
+      ? [publicBase, configured]
+      : [configured, publicBase]
+
     var found: [URL] = []
-    for candidate in [normalizedServerURL, normalized(Self.publicURL)] {
+    for candidate in ordered {
       guard let candidate else { continue }
       if !found.contains(candidate) { found.append(candidate) }
     }
@@ -828,6 +839,21 @@ final class ArgonBridge: ObservableObject {
   }
 
   static let publicURL = "https://argon.agentneon.dev"
+
+  /// A LAN address: only reachable from the house, whatever it is set to.
+  static func isPrivate(_ url: URL) -> Bool {
+    guard let host = url.host?.lowercased() else { return false }
+    if host == "localhost" || host.hasSuffix(".local") { return true }
+    if host.hasPrefix("192.168.") || host.hasPrefix("10.") { return true }
+    // 172.16.0.0 – 172.31.255.255
+    if host.hasPrefix("172.") {
+      let parts = host.split(separator: ".")
+      if parts.count > 1, let second = Int(parts[1]), (16...31).contains(second) {
+        return true
+      }
+    }
+    return false
+  }
 
   private func makeRequest(path: String, method: String = "GET") -> URLRequest? {
     // Whichever base answered last, so the usual request is a single attempt.
@@ -843,7 +869,7 @@ final class ArgonBridge: ObservableObject {
     // Short: a LAN address that is not on this network has to fail fast so the
     // fallback is tried while he is still looking at the screen. Two minutes
     // of spinner is indistinguishable from broken.
-    request.timeoutInterval = baseURL.host?.hasPrefix("192.168.") == true ? 4 : 30
+    request.timeoutInterval = Self.isPrivate(baseURL) ? 4 : 30
     request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
     return request
   }
@@ -859,7 +885,7 @@ final class ArgonBridge: ObservableObject {
     }
     var copy = request
     copy.url = url
-    copy.timeoutInterval = base.host?.hasPrefix("192.168.") == true ? 4 : 30
+    copy.timeoutInterval = Self.isPrivate(base) ? 4 : 30
     return copy
   }
 
