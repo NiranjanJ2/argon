@@ -145,6 +145,16 @@ class LocalTaskStore:
             ).fetchone()
             if row is not None:
                 return _row_to_task(row)
+            # A migrated row still answers to the Google id it came from. The
+            # board prefers that id when a row has one, so without this a task
+            # imported from Google resolves only by title — which is the guess
+            # the ambiguity error exists to refuse, and it silently completed
+            # the wrong "Math homework" the last time it was relied on.
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE google_task_id = ?", (task_id,)
+            ).fetchone()
+            if row is not None:
+                return _row_to_task(row)
             rows = conn.execute("SELECT * FROM tasks WHERE done = 0").fetchall()
 
         needle = _normalized_task_title(task_id)

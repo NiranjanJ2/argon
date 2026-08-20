@@ -124,15 +124,35 @@ class TestStartTime:
     """The time he says he will begin, and the two jobs that hang off it."""
 
     class FakeCron:
+        """Mirrors CronService's real surface.
+
+        The first version of this exposed a `.jobs` attribute, which the real
+        service does not have — so the code read an empty list, never cleared
+        anything, and the test passed anyway. A fake that invents a nicer API
+        than the real one tests nothing.
+        """
+
+        class _Job:
+            def __init__(self, job_id, name):
+                self.id = job_id
+                self.name = name
+
         def __init__(self):
-            self.jobs = []
+            self._jobs = []
             self.added = []
+            self.removed = []
+
+        def list_jobs(self, include_disabled: bool = False):
+            return list(self._jobs)
 
         def add_job(self, *, name, schedule, message, kind, delete_after_run):
             self.added.append({"name": name, "at_ms": schedule.at_ms, "kind": kind})
+            self._jobs.append(self._Job(f"j{len(self._jobs)}", name))
 
         def remove_job(self, job_id):
-            self.jobs = [j for j in self.jobs if j.id != job_id]
+            self.removed.append(job_id)
+            self._jobs = [j for j in self._jobs if j.id != job_id]
+            return True
 
     def test_it_arms_a_warning_and_a_block(self):
         cron = self.FakeCron()
@@ -264,3 +284,28 @@ class TestTheHorizon:
                  "source": "classroom"}]
 
         assert [i["id"] for i in planner.build(rows, now=_at(16, 0))["long_term"]] == ["essay"]
+
+
+class TestReschedulingClearsTheOldPair:
+    """Changing his mind must cancel, not stack."""
+
+    def test_a_second_start_time_removes_the_first(self):
+        cron = TestStartTime.FakeCron()
+        planner.schedule_start(cron, "17:00", now=_at(16, 0))
+        assert len(cron.list_jobs()) == 2
+
+        cron.added.clear()
+        planner.schedule_start(cron, "18:00", now=_at(16, 0))
+
+        # Two removed, two added — not four armed jobs blocking at both times.
+        assert len(cron.removed) == 2
+        assert len(cron.list_jobs()) == 2
+        assert [j["name"] for j in cron.added] == [planner.NOTIFY_JOB, planner.BLOCK_JOB]
+
+    def test_clearing_removes_everything(self):
+        cron = TestStartTime.FakeCron()
+        planner.schedule_start(cron, "17:00", now=_at(16, 0))
+
+        planner.schedule_start(cron, None, now=_at(16, 0))
+
+        assert cron.list_jobs() == []

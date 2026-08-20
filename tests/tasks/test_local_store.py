@@ -195,3 +195,42 @@ class TestMigration:
         done = [t for t in store.get_all(include_done=True) if t["done"]]
 
         assert [t["title"] for t in done] == ["Old finished thing"]
+
+
+class TestMigratedIdentity:
+    """A migrated row keeps answering to the id the board shows for it."""
+
+    def _with_google_id(self, tasks, title, gid):
+        from argon.core import store as doc_store
+        made = tasks.add_task(title)
+        with doc_store.txn() as conn:
+            conn.execute("UPDATE tasks SET google_task_id = ? WHERE id = ?", (gid, made["id"]))
+        return made
+
+    def test_the_board_id_of_a_migrated_task_resolves(self, tasks):
+        from argon.commitments import _from_task
+
+        self._with_google_id(tasks, "Send Vasquez email", "g_legacy")
+        board_id = _from_task(tasks.get_all()[0]).as_dict()["id"]
+
+        # The board prefers the Google id where a row has one, so the store has
+        # to recognise it — otherwise starting the task falls back to matching
+        # on title, which is precisely the guess it must never make.
+        assert board_id == "g_legacy"
+        assert tasks._resolve(board_id) is not None
+
+    def test_it_does_not_fall_back_to_a_title_guess(self, tasks):
+        self._with_google_id(tasks, "Math homework Monday", "g1")
+        self._with_google_id(tasks, "Math homework Tuesday", "g2")
+
+        # Both resolve exactly, with no ambiguity, because the id is real.
+        assert tasks._resolve("g1")["title"] == "Math homework Monday"
+        assert tasks._resolve("g2")["title"] == "Math homework Tuesday"
+
+    def test_completing_by_board_id_completes_the_right_row(self, tasks):
+        self._with_google_id(tasks, "Math homework Monday", "g1")
+        self._with_google_id(tasks, "Math homework Tuesday", "g2")
+
+        tasks.complete_task("g2")
+
+        assert [t["title"] for t in tasks.get_all()] == ["Math homework Monday"]

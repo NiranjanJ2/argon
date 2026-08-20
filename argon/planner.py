@@ -260,7 +260,10 @@ def schedule_start(cron: Any, hhmm: str | None, now: datetime | None = None) -> 
     service bounced is worse.
     """
     removed = 0
-    for job in list(getattr(cron, "jobs", []) or []):
+    # list_jobs(), not a .jobs attribute — CronService has no such attribute, so
+    # getattr(cron, "jobs", []) quietly returned nothing and every earlier pair
+    # stayed armed. Moving 5pm to 6pm blocked the phone at both.
+    for job in list(cron.list_jobs(include_disabled=True)):
         if str(job.name).startswith(JOB_PREFIX):
             try:
                 cron.remove_job(job.id)
