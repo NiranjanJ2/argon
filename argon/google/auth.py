@@ -44,6 +44,10 @@ ACCOUNT_SCOPES: dict[str, list[str]] = {
         "https://www.googleapis.com/auth/classroom.courses.readonly",
         "https://www.googleapis.com/auth/classroom.student-submissions.me.readonly",
         "https://www.googleapis.com/auth/classroom.announcements.readonly",
+        # Some teachers post the work as a Material rather than an assignment.
+        # AP Lang posts every day this way, and without this scope the API
+        # answers 403 — so that class looked like it had no homework at all.
+        "https://www.googleapis.com/auth/classroom.courseworkmaterials.readonly",
         "https://www.googleapis.com/auth/classroom.rosters.readonly",
         "https://www.googleapis.com/auth/drive.readonly",
         "https://www.googleapis.com/auth/gmail.readonly",

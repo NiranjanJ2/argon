@@ -420,3 +420,165 @@ class GetCourseStreamTool(ClassroomTool):
         ]
         items.sort(key=lambda x: x.get("updated") or "", reverse=True)
         return json.dumps({"course_id": course_id, "stream": items[:limit]}, indent=2)
+
+
+#: Posts older than this are history, not homework.
+POSTS_LOOKBACK_DAYS = 7
+
+
+def _post_text(item: dict) -> str:
+    """The readable body of an announcement or a material post."""
+    text = (item.get("text") or item.get("description") or "").strip()
+    title = (item.get("title") or "").strip()
+    if title and title.lower() not in text.lower():
+        text = f"{title}\n{text}".strip()
+    return text
+
+
+def recent_posts(
+    svc,
+    course_id: str,
+    course_name: str = "",
+    *,
+    days_back: int = POSTS_LOOKBACK_DAYS,
+    limit: int = 10,
+) -> tuple[list[dict], str | None]:
+    """Announcements and materials a teacher posted lately.
+
+    Not every teacher uses assignments. AP Lang posts the day's work as a
+    Material every afternoon, so that class read as having no homework at all
+    while the work was sitting in Classroom the whole time — and APUSH puts real
+    deadlines in announcements ("chapter 2 InQuizitive due tonight").
+
+    Returns ``(posts, error)``. These are deliberately *not* turned into tasks:
+    a post is prose, and inventing an assignment out of it is the one thing he
+    has asked Argon never to do. They are context for answering "what do I have
+    for Lang", not commitments.
+    """
+    from googleapiclient.errors import HttpError
+
+    cutoff = datetime.now(LOCAL_TZ) - timedelta(days=days_back)
+    posts: list[dict] = []
+    error: str | None = None
+
+    sources = (
+        ("announcement", lambda: svc.courses().announcements().list(
+            courseId=course_id, pageSize=limit, orderBy="updateTime desc"
+        ).execute().get("announcements", [])),
+        ("material", lambda: svc.courses().courseWorkMaterials().list(
+            courseId=course_id, pageSize=limit, orderBy="updateTime desc"
+        ).execute().get("courseWorkMaterial", [])),
+    )
+
+    for kind, call in sources:
+        try:
+            items = call()
+        except HttpError as exc:
+            # One source failing must not hide the other: materials 403 until
+            # the new scope is granted, and announcements still work meanwhile.
+            error = f"{kind}s unreadable ({exc.resp.status})" if exc.resp else str(exc)
+            continue
+        except Exception as exc:  # noqa: BLE001 — a dead class is not fatal
+            error = str(exc)
+            continue
+
+        for item in items:
+            stamp = item.get("updateTime") or item.get("creationTime") or ""
+            try:
+                posted = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if posted < cutoff:
+                continue
+            body = _post_text(item)
+            if not body:
+                continue
+            posts.append({
+                "kind": kind,
+                "course": course_name,
+                "course_id": course_id,
+                "id": item.get("id"),
+                "posted_at": posted.astimezone(LOCAL_TZ).isoformat(),
+                "text": body,
+                "link": item.get("alternateLink"),
+            })
+
+    posts.sort(key=lambda p: p["posted_at"], reverse=True)
+    return posts[:limit], error
+
+
+def posts_across_courses(
+    svc, *, days_back: int = POSTS_LOOKBACK_DAYS, courses: list[str] | None = None
+) -> tuple[list[dict], list[str]]:
+    """Recent posts from every active course, or only the named ones."""
+    found: list[dict] = []
+    unreadable: list[str] = []
+    for course in active_courses(svc):
+        name = course.get("name", "")
+        if courses and not any(c.lower() in name.lower() for c in courses):
+            continue
+        posts, error = recent_posts(svc, course["id"], name, days_back=days_back)
+        found.extend(posts)
+        if error:
+            unreadable.append(f"{name}: {error}")
+    found.sort(key=lambda p: p["posted_at"], reverse=True)
+    return found, unreadable
+
+
+# ---------------------------------------------------------------------------
+
+class GetClassPostsTool(ClassroomTool):
+    """Read what teachers posted, not just what they assigned."""
+
+    @property
+    def name(self) -> str:
+        return "get_class_posts"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Read recent Google Classroom posts — announcements and materials — "
+            "for one class or all of them. Not every teacher creates assignments: "
+            "AP Lang posts the day's homework as a daily Material, so it never "
+            "appears in get_all_assignments or on the board. APUSH puts real "
+            "deadlines in announcements. Use this when he asks what he has for a "
+            "class that looks empty, or when a class is known to work this way. "
+            "These are posts, not assignments — read them and say what they say. "
+            "Never turn one into a task on your own."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "course": {
+                    "type": "string",
+                    "description": (
+                        "Part of a course name, e.g. 'Lang' or 'APUSH'. Omit for "
+                        "every active course."
+                    ),
+                },
+                "days_back": {
+                    "type": "integer",
+                    "description": f"How far back to look. Default {POSTS_LOOKBACK_DAYS}.",
+                },
+            },
+            "required": [],
+        }
+
+    def _run(self, kwargs: dict[str, Any]) -> str:
+        course = (kwargs.get("course") or "").strip()
+        days_back = int(kwargs.get("days_back") or POSTS_LOOKBACK_DAYS)
+        posts, unreadable = posts_across_courses(
+            self._svc(),
+            days_back=days_back,
+            courses=[course] if course else None,
+        )
+        payload: dict[str, Any] = {"posts": posts, "count": len(posts)}
+        if unreadable:
+            # Surfaced rather than swallowed: a 403 here means a missing scope,
+            # and a class that silently returns nothing looks like a class with
+            # no homework, which is the exact failure this tool exists to fix.
+            payload["unreadable"] = unreadable
+        return json.dumps(payload, indent=2)
