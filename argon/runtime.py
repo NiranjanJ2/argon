@@ -302,7 +302,7 @@ def build_runtime(config: Config) -> Runtime:
         tapped — and `start_task`/`complete_task` stay interactive-only, because
         this is him acting, not automation acting for him.
         """
-        from argon.google.tasks_store import GoogleTasksStore
+        from argon.tasks.local_store import LocalTaskStore
         from argon.productivity.log import DailyLog
         from argon.productivity.state import DailyState
 
@@ -313,7 +313,7 @@ def build_runtime(config: Config) -> Runtime:
         state = DailyState(workspace)
 
         if verb == "start":
-            store = GoogleTasksStore(workspace)
+            store = LocalTaskStore(workspace)
             task = await asyncio.to_thread(store.start_task, task_id)
             if task is None:
                 return f"Couldn't find {title} any more — it may have been removed."
@@ -322,7 +322,7 @@ def build_runtime(config: Config) -> Runtime:
             return f"Started {task.get('title') or title}."
 
         if verb == "complete":
-            store = GoogleTasksStore(workspace)
+            store = LocalTaskStore(workspace)
             session = state.get_session()
             minutes = session.get("elapsed_min") if session else None
             done = await asyncio.to_thread(store.complete_task, task_id, actual_min=minutes)

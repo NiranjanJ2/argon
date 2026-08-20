@@ -256,7 +256,7 @@ class AgentLoop:
 
     def _register_productivity_tools(self) -> None:
         """Register schedule, task, status, log, and memory tools."""
-        from argon.google.tasks_store import GoogleTasksStore
+        from argon.tasks.local_store import LocalTaskStore
         from argon.productivity.habits import HabitsTracker
         from argon.productivity.log import DailyLog
         from argon.productivity.state import DailyState
@@ -271,7 +271,7 @@ class AgentLoop:
             UpdateTaskTool,
         )
 
-        store = GoogleTasksStore(self.workspace)
+        store = LocalTaskStore(self.workspace)
         state = DailyState(self.workspace)
         log = DailyLog(self.workspace)
         habits = HabitsTracker(self.workspace)

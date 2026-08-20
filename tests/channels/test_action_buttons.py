@@ -78,7 +78,7 @@ class TestPressingOne:
         from argon.productivity.state import DailyState
 
         monkeypatch.setattr(
-            "argon.google.tasks_store.GoogleTasksStore.start_task",
+            "argon.tasks.local_store.LocalTaskStore.start_task",
             lambda self, task_id: {"id": task_id, "title": "Chemistry reading"},
         )
         rt = self._runtime(tmp_path, monkeypatch)
@@ -102,7 +102,7 @@ class TestPressingOne:
             return {"id": task_id, "title": "Chemistry reading"}
 
         monkeypatch.setattr(
-            "argon.google.tasks_store.GoogleTasksStore.complete_task", complete
+            "argon.tasks.local_store.LocalTaskStore.complete_task", complete
         )
         rt = self._runtime(tmp_path, monkeypatch)
         DailyState(tmp_path).start_session(task_id="t1", title="Chemistry reading")
@@ -117,7 +117,7 @@ class TestPressingOne:
 
     async def test_a_task_that_vanished_is_reported_not_faked(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "argon.google.tasks_store.GoogleTasksStore.start_task",
+            "argon.tasks.local_store.LocalTaskStore.start_task",
             lambda self, task_id: None,
         )
         rt = self._runtime(tmp_path, monkeypatch)

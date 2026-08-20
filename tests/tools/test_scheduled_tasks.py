@@ -83,7 +83,7 @@ class TestTheGateGoesQuiet:
 
         svc = ReminderService(tmp_path, "America/Los_Angeles", on_check_in=_never)
         monkeypatch.setattr(
-            "argon.google.tasks_store.GoogleTasksStore.get_all",
+            "argon.tasks.local_store.LocalTaskStore.get_all",
             lambda self, **kw: [{"id": "a", "title": "Math homework"}],
         )
         monkeypatch.setattr(agenda, "upcoming", lambda ws: [_entry("Start Math homework")])
@@ -100,7 +100,7 @@ class TestTheGateGoesQuiet:
 
         svc = ReminderService(tmp_path, "America/Los_Angeles", on_check_in=_never)
         monkeypatch.setattr(
-            "argon.google.tasks_store.GoogleTasksStore.get_all",
+            "argon.tasks.local_store.LocalTaskStore.get_all",
             lambda self, **kw: [{"id": "b", "title": "SAT prep"}],
         )
         monkeypatch.setattr(agenda, "upcoming", lambda ws: [_entry("Start Math homework")])
@@ -118,7 +118,7 @@ class TestTheGateGoesQuiet:
 
         svc = ReminderService(tmp_path, "America/Los_Angeles", on_check_in=_never)
         monkeypatch.setattr(
-            "argon.google.tasks_store.GoogleTasksStore.get_all",
+            "argon.tasks.local_store.LocalTaskStore.get_all",
             lambda self, **kw: [{"id": "a", "title": "Math homework"}],
         )
 

@@ -518,9 +518,9 @@ def tasks_snapshot(workspace: Path, *, store: Any = None) -> SourceSnapshot:
     """Pending Google Tasks. Not cached here — see ``CLASSROOM_TTL_S``."""
     try:
         if store is None:
-            from argon.google.tasks_store import GoogleTasksStore
+            from argon.tasks.local_store import LocalTaskStore
 
-            store = GoogleTasksStore(workspace)
+            store = LocalTaskStore(workspace)
         items = store.get_all()
     except Exception as exc:  # noqa: BLE001 — offline must not become a guess
         return _degraded("tasks", exc, "work")

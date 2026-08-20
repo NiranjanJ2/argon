@@ -159,13 +159,13 @@ def read_screentime(day: str | None = None, limit: int = 200) -> list[dict[str, 
 
 def _task_dependencies() -> tuple[Any, Any, Any, Any]:
     """Build the same task-side dependencies used by the agent's tools."""
-    from argon.google.tasks_store import GoogleTasksStore
+    from argon.tasks.local_store import LocalTaskStore
     from argon.productivity.habits import HabitsTracker
     from argon.productivity.log import DailyLog
     from argon.productivity.state import DailyState
 
     ws = _rt.config.workspace_path if _rt.config else argon_home()
-    return GoogleTasksStore(ws), DailyState(ws), DailyLog(ws), HabitsTracker(ws)
+    return LocalTaskStore(ws), DailyState(ws), DailyLog(ws), HabitsTracker(ws)
 
 
 def _cached_tasks(store: Any, *, fresh: bool = False) -> tuple[list[Any], dict[str, Any]]:
@@ -775,21 +775,31 @@ def planner_post() -> Any:
             return overlay["id"]
         return task_id
 
+    def record(bucket: str, label: str, task_id: str, out: Any) -> None:
+        """File a tool's answer under what actually happened.
+
+        The tools report a miss by returning an unsuccessful result rather than
+        raising, so a bad id was landing in "completed" and being reported back
+        as work he had finished.
+        """
+        if getattr(out, "success", True):
+            result[bucket].append(str(out))
+        else:
+            result["errors"].append(f"{label} {task_id}: {out}")
+
     for task_id in body.get("done") or []:
         try:
-            out = asyncio.run(
+            record("completed", "done", str(task_id), asyncio.run(
                 CompleteTaskTool(store, state, log, habits).execute(task_id=str(task_id))
-            )
-            result["completed"].append(str(out))
+            ))
         except Exception as exc:  # noqa: BLE001 - one bad id must not lose the rest
             result["errors"].append(f"done {task_id}: {exc}")
 
     for task_id in body.get("carry") or []:
         try:
-            out = asyncio.run(
+            record("carried", "carry", str(task_id), asyncio.run(
                 UpdateTaskTool(store).execute(task_id=resolve(str(task_id)), due=today)
-            )
-            result["carried"].append(str(out))
+            ))
         except Exception as exc:  # noqa: BLE001
             result["errors"].append(f"carry {task_id}: {exc}")
 
