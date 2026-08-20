@@ -14,7 +14,7 @@ import pytest
 
 from argon.productivity import history as history_mod
 from argon.productivity import plan as plan_mod
-from argon.productivity.history import MIN_OCCURRENCES, PlanHistory
+from argon.productivity.history import PlanHistory
 from argon.productivity.plan import DayPlan
 
 LA = ZoneInfo("America/Los_Angeles")

@@ -159,10 +159,10 @@ def read_screentime(day: str | None = None, limit: int = 200) -> list[dict[str, 
 
 def _task_dependencies() -> tuple[Any, Any, Any, Any]:
     """Build the same task-side dependencies used by the agent's tools."""
-    from argon.tasks.local_store import LocalTaskStore
     from argon.productivity.habits import HabitsTracker
     from argon.productivity.log import DailyLog
     from argon.productivity.state import DailyState
+    from argon.tasks.local_store import LocalTaskStore
 
     ws = _rt.config.workspace_path if _rt.config else argon_home()
     return LocalTaskStore(ws), DailyState(ws), DailyLog(ws), HabitsTracker(ws)

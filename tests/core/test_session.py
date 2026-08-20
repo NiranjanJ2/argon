@@ -9,8 +9,6 @@ grown to 14MB.
 
 from __future__ import annotations
 
-import pytest
-
 from argon.core.session import Session, SessionManager
 
 

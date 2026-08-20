@@ -302,9 +302,9 @@ def build_runtime(config: Config) -> Runtime:
         tapped — and `start_task`/`complete_task` stay interactive-only, because
         this is him acting, not automation acting for him.
         """
-        from argon.tasks.local_store import LocalTaskStore
         from argon.productivity.log import DailyLog
         from argon.productivity.state import DailyState
+        from argon.tasks.local_store import LocalTaskStore
 
         verb = str(action.get("action") or "")
         task_id = str(action.get("task_id") or "")

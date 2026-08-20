@@ -256,10 +256,10 @@ class AgentLoop:
 
     def _register_productivity_tools(self) -> None:
         """Register schedule, task, status, log, and memory tools."""
-        from argon.tasks.local_store import LocalTaskStore
         from argon.productivity.habits import HabitsTracker
         from argon.productivity.log import DailyLog
         from argon.productivity.state import DailyState
+        from argon.tasks.local_store import LocalTaskStore
         from argon.tools.bell import ScheduleTool
         from argon.tools.overview import GetDailyOverviewTool
         from argon.tools.status import GetStatusTool, LogNoteTool, ReadLogTool, SetModeTool
