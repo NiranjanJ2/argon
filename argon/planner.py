@@ -37,9 +37,11 @@ OPENS_AFTER = time(15, 36)
 CHEM_MINUTES = 60
 CHEM_TITLE = "AP Chem homework"
 
-#: Anything due further out than this counts as long-term rather than as this
-#: week's work. Three days keeps "due Friday" out of it on a Tuesday.
-LONG_TERM_HORIZON_DAYS = 3
+#: Anything due further out than this counts as long-term rather than as
+#: near-term work. Two weeks, because the point of this list is work no
+#: deadline is forcing — three days caught the Sunday InQuizitive, which is
+#: simply this week's homework and turns up on its own.
+LONG_TERM_HORIZON_DAYS = 14
 
 #: Pulls the homework out of an AP Lang daily post. The teacher's format is
 #: stable: an "HW:" line, then numbered items, and "None :)" for a free night.

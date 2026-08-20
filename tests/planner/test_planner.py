@@ -248,3 +248,19 @@ class TestUndatedClassroomWork:
         view = planner.build(rows, now=_at(16, 0))
 
         assert [i["id"] for i in view["long_term"]] == ["essay"]
+
+
+class TestTheHorizon:
+    def test_this_weeks_homework_is_not_a_project(self):
+        # The Sunday InQuizitive is four days out. It arrives on its own and
+        # does not need to compete with SAT prep for attention.
+        rows = [{"id": "iq", "title": "Chapter 2 InQuizitive", "due": "2026-08-23",
+                 "source": "classroom"}]
+
+        assert planner.build(rows, now=_at(16, 0))["long_term"] == []
+
+    def test_work_a_month_out_still_counts(self):
+        rows = [{"id": "essay", "title": "Research essay", "due": "2026-09-30",
+                 "source": "classroom"}]
+
+        assert [i["id"] for i in planner.build(rows, now=_at(16, 0))["long_term"]] == ["essay"]
