@@ -510,10 +510,14 @@ final class ArgonBridge: ObservableObject {
     done: [String],
     carry: [String],
     add: [[String: Any]],
-    chem: Bool
+    chem: Bool,
+    startAt: String? = nil
   ) async -> Bool {
     guard var request = makeRequest(path: "/v1/planner", method: "POST") else { return false }
-    let body: [String: Any] = ["done": done, "carry": carry, "add": add, "chem": chem]
+    var body: [String: Any] = ["done": done, "carry": carry, "add": add, "chem": chem]
+    // Sent even as null: clearing the time has to cancel the armed jobs, not
+    // leave a block waiting for a moment he has moved away from.
+    body["start_at"] = startAt as Any? ?? NSNull()
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try? JSONSerialization.data(withJSONObject: body)
     do {

@@ -80,12 +80,18 @@ struct ArgonPlannerPayload: Codable, Equatable, Identifiable {
   let lastPlanned: String?
   let overdue: [ArgonPlannerItem]
   let today: [ArgonPlannerItem]
+  let longTerm: [ArgonPlannerItem]
   let suggestions: [ArgonPlannerSuggestion]
+  let startAt: String?
+  let warningMinutes: Int
 
   enum CodingKeys: String, CodingKey {
     case needed, overdue, today, suggestions
     case opensAfter = "opens_after"
     case lastPlanned = "last_planned"
+    case longTerm = "long_term"
+    case startAt = "start_at"
+    case warningMinutes = "warning_minutes"
   }
 
   init(from decoder: Decoder) throws {
@@ -96,6 +102,9 @@ struct ArgonPlannerPayload: Codable, Equatable, Identifiable {
     overdue = (try? c.decode([ArgonPlannerItem].self, forKey: .overdue)) ?? []
     today = (try? c.decode([ArgonPlannerItem].self, forKey: .today)) ?? []
     suggestions = (try? c.decode([ArgonPlannerSuggestion].self, forKey: .suggestions)) ?? []
+    longTerm = (try? c.decode([ArgonPlannerItem].self, forKey: .longTerm)) ?? []
+    startAt = try? c.decode(String.self, forKey: .startAt)
+    warningMinutes = (try? c.decode(Int.self, forKey: .warningMinutes)) ?? 30
   }
 
   static let empty = ArgonPlannerPayload()
@@ -106,12 +115,15 @@ struct ArgonPlannerPayload: Codable, Equatable, Identifiable {
     lastPlanned = nil
     overdue = []
     today = []
+    longTerm = []
     suggestions = []
+    startAt = nil
+    warningMinutes = 30
   }
 
   var id: String { lastPlanned ?? opensAfter }
 
   var hasAnythingToDecide: Bool {
-    !overdue.isEmpty || !suggestions.isEmpty
+    !overdue.isEmpty || !suggestions.isEmpty || !longTerm.isEmpty
   }
 }
