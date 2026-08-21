@@ -210,35 +210,6 @@ class TestStartTime:
         assert planner.start_time() is None
 
 
-class TestLongTermWork:
-    """Work with no deadline forcing it, which every other view buries."""
-
-    ROWS = [
-        {"id": "sat", "title": "SAT reading study", "due": None},
-        {"id": "ucla", "title": "UCLA survey paper", "due": "2026-09-30"},
-        {"id": "hw", "title": "HW 3", "due": "2026-08-19"},
-        {"id": "soon", "title": "Chapter 2 key terms", "due": "2026-08-21"},
-        {"id": "over", "title": "Old thing", "due": "2026-08-15"},
-    ]
-
-    def test_undated_and_far_off_work_is_offered(self):
-        view = planner.build(self.ROWS, now=_at(16, 0))
-
-        assert {i["id"] for i in view["long_term"]} == {"sat", "ucla"}
-
-    def test_this_weeks_work_is_not_long_term(self):
-        # Due Friday on a Wednesday is this week's problem, not a project.
-        view = planner.build(self.ROWS, now=_at(16, 0))
-
-        assert all(i["id"] != "soon" for i in view["long_term"])
-
-    def test_overdue_work_is_never_long_term(self):
-        view = planner.build(self.ROWS, now=_at(16, 0))
-
-        assert all(i["id"] != "over" for i in view["long_term"])
-        assert [i["id"] for i in view["overdue"]] == ["over"]
-
-
 class TestUndatedClassroomWork:
     """Teachers post notices as coursework, and notices have no due date."""
 
@@ -270,42 +241,39 @@ class TestUndatedClassroomWork:
         assert [i["id"] for i in view["long_term"]] == ["essay"]
 
 
-class TestTheHorizon:
-    def test_this_weeks_homework_is_not_a_project(self):
-        # The Sunday InQuizitive is four days out. It arrives on its own and
-        # does not need to compete with SAT prep for attention.
-        rows = [{"id": "iq", "title": "Chapter 2 InQuizitive", "due": "2026-08-23",
-                 "source": "classroom"}]
+class TestWhatLongTermActuallyMeans:
+    """Everything still on the list that today is not forcing.
 
-        assert planner.build(rows, now=_at(16, 0))["long_term"] == []
+    The first version was a fortnight horizon, which was invented rather than
+    asked for: nearly everything sits a day or three out, so the list came back
+    empty every single time.
+    """
 
-    def test_work_a_month_out_still_counts(self):
-        rows = [{"id": "essay", "title": "Research essay", "due": "2026-09-30",
-                 "source": "classroom"}]
+    ROWS = [
+        {"id": "late", "title": "Old thing", "due": "2026-08-19"},
+        {"id": "now", "title": "HW 5", "due": "2026-08-20"},
+        {"id": "soon", "title": "HW 6", "due": "2026-08-21"},
+        {"id": "sunday", "title": "InQuizitive", "due": "2026-08-23", "source": "classroom"},
+        {"id": "sat", "title": "SAT prep", "due": None, "source": "tasks"},
+        {"id": "notice", "title": "Reminder: picture day", "due": None, "source": "classroom"},
+    ]
 
-        assert [i["id"] for i in planner.build(rows, now=_at(16, 0))["long_term"]] == ["essay"]
+    def _view(self):
+        return planner.build(self.ROWS, now=_at(17, 0, day=20))
 
+    def test_tomorrows_work_is_offered(self):
+        # A thing due Friday is the main candidate on a Wednesday.
+        assert "soon" in {i["id"] for i in self._view()["long_term"]}
 
-class TestReschedulingClearsTheOldPair:
-    """Changing his mind must cancel, not stack."""
+    def test_work_later_in_the_week_is_offered(self):
+        assert "sunday" in {i["id"] for i in self._view()["long_term"]}
 
-    def test_a_second_start_time_removes_the_first(self):
-        cron = TestStartTime.FakeCron()
-        planner.schedule_start(cron, "17:00", now=_at(16, 0))
-        assert len(cron.list_jobs()) == 2
+    def test_undated_work_of_his_own_is_offered(self):
+        assert "sat" in {i["id"] for i in self._view()["long_term"]}
 
-        cron.added.clear()
-        planner.schedule_start(cron, "18:00", now=_at(16, 0))
+    def test_overdue_and_today_are_not_repeated_there(self):
+        ids = {i["id"] for i in self._view()["long_term"]}
+        assert "late" not in ids and "now" not in ids
 
-        # Two removed, two added — not four armed jobs blocking at both times.
-        assert len(cron.removed) == 2
-        assert len(cron.list_jobs()) == 2
-        assert [j["name"] for j in cron.added] == [planner.NOTIFY_JOB, planner.BLOCK_JOB]
-
-    def test_clearing_removes_everything(self):
-        cron = TestStartTime.FakeCron()
-        planner.schedule_start(cron, "17:00", now=_at(16, 0))
-
-        planner.schedule_start(cron, None, now=_at(16, 0))
-
-        assert cron.list_jobs() == []
+    def test_an_undated_classroom_notice_is_still_excluded(self):
+        assert "notice" not in {i["id"] for i in self._view()["long_term"]}

@@ -325,16 +325,64 @@ def _match(
     return hits[0] if len(hits) == 1 else None
 
 
+#: Classes whose real deadline is earlier than the date Classroom shows, in
+#: days. Machado's Math Analysis/Calc A is collected the lesson *before* the
+#: date on the assignment, so an item Classroom calls Thursday is actually due
+#: Wednesday — and the board showed it under Today on the day it was already
+#: late.
+#:
+#: This is a work-by date, which is exactly the field's purpose: Classroom owns
+#: the official deadline and it stays untouched, while work_by carries when he
+#: actually has to have it done.
+CLASS_DUE_OFFSETS_DAYS: dict[str, int] = {
+    "math analysis": 1,
+    "calc a": 1,
+}
+
+
+def _class_offset_days(subject: Any) -> int:
+    """How many days early this class really wants the work."""
+    if not isinstance(subject, str):
+        return 0
+    lowered = subject.lower()
+    for needle, days in CLASS_DUE_OFFSETS_DAYS.items():
+        if needle in lowered:
+            return days
+    return 0
+
+
+def _shifted_work_by(subject: Any, official_due: Any) -> str | None:
+    """The official deadline pulled forward for classes that collect early."""
+    days = _class_offset_days(subject)
+    if not days:
+        return None
+    day = _day(official_due)
+    if not day:
+        return None
+    from datetime import date, timedelta
+
+    try:
+        return (date.fromisoformat(day) - timedelta(days=days)).isoformat()
+    except ValueError:
+        return None
+
+
 def _from_assignment(
     item: dict[str, Any], overlay: dict[str, Any] | None
 ) -> Commitment:
     over = overlay or {}
-    work_by = over.get("work_by") or _day(over.get("due"))
+    subject = item.get("course_name") or item.get("course") or over.get("subject")
+    # A date he set for himself always wins; the class rule only fills the gap.
+    work_by = (
+        over.get("work_by")
+        or _day(over.get("due"))
+        or _shifted_work_by(subject, item.get("due"))
+    )
     return Commitment(
         key=_assignment_key(item),
         title=item.get("title") or "(untitled)",
         origin="classroom",
-        subject=item.get("course_name") or item.get("course") or over.get("subject"),
+        subject=subject,
         official_due=item.get("due"),
         official_due_when=item.get("due_when") or _when(item.get("due")),
         work_by=work_by,

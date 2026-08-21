@@ -37,11 +37,7 @@ OPENS_AFTER = time(15, 36)
 CHEM_MINUTES = 60
 CHEM_TITLE = "AP Chem homework"
 
-#: Anything due further out than this counts as long-term rather than as
-#: near-term work. Two weeks, because the point of this list is work no
-#: deadline is forcing — three days caught the Sunday InQuizitive, which is
-#: simply this week's homework and turns up on its own.
-LONG_TERM_HORIZON_DAYS = 14
+
 
 #: Pulls the homework out of an AP Lang daily post. The teacher's format is
 #: stable: an "HW:" line, then numbered items, and "None :)" for a free night.
@@ -126,22 +122,23 @@ def build(board_rows: list[dict[str, Any]], lang_posts: list[dict[str, Any]] | N
         elif due == today_key:
             today.append(entry)
 
-    # Work with no deadline forcing it: SAT prep, the UCLA paper. It never
-    # surfaces on its own, because every other view sorts by what is due — so
-    # left to the board alone it loses to whatever is on fire, every day.
+    # Everything else still on the list: not overdue, not due today. Work he
+    # could pull forward.
+    #
+    # This was a horizon at first — only things further out than a fortnight —
+    # which was an invented rule and wrong. Nearly everything on the list sits
+    # a day or three out, so the list was empty every time. "What do you want
+    # to work on today" is asked of exactly the work that is not already
+    # forced, and a thing due Friday is the main candidate on a Wednesday.
     long_term: list[dict[str, Any]] = []
-    horizon = (now + timedelta(days=LONG_TERM_HORIZON_DAYS)).strftime("%Y-%m-%d")
     for row in board_rows:
         if row.get("done"):
             continue
         due = str(row.get("due") or "")[:10]
-        if due and due <= horizon:
-            continue
-        # An undated Classroom item is almost never long-term work. Teachers
-        # post reminders and notices as coursework — "Reminder: chapter 2
-        # InQuizitive due tonight!" arrived here with no due date and was
-        # offered as a project. Real long-term work is his own: SAT prep, the
-        # UCLA paper. Classroom work that genuinely runs long carries a date.
+        if due and due <= today_key:
+            continue  # overdue or due today; both are handled above
+        # An undated Classroom item is almost never work. Teachers post notices
+        # as coursework, and those have no date at all.
         if not due and row.get("source") == "classroom":
             continue
         long_term.append({
