@@ -56,43 +56,104 @@ struct ArgonBackdrop: View {
   }
 }
 
-/// Selection, as a blue outline that glows.
+/// Light that comes from inside the button, not off it.
 ///
-/// One treatment, used everywhere something can be picked, so "selected" looks
-/// the same on a task row, a wizard option and a mode toggle. Unselected is a
-/// plain hairline — the difference has to be obvious at a glance, and colour
-/// alone is not enough, so the border also thickens.
-struct ArgonSelectable: ViewModifier {
-  let isSelected: Bool
+/// The obvious way to show a live control is a coloured drop shadow, which
+/// throws light outward onto the page. It reads as the button hovering above
+/// the screen, and on a dark ground it smears into whatever is behind it.
+///
+/// This does the opposite. The footprint never changes — nothing reflows and
+/// nothing jumps — but the face insets, so the control looks pressed into the
+/// surface. The lip that reveals is where the light sits, and the glow is
+/// masked to the face so it falls inward across the button rather than out
+/// into the page.
+struct ArgonInsetGlow: ViewModifier {
+  var isActive: Bool
   var cornerRadius: CGFloat = 12
+  /// How far the face sits below the rim. Enough that the lip reads as a
+  /// recess rather than as a slightly thick border.
+  var inset: CGFloat = 4
+  var tint: Color = ArgonPalette.electricBlue
+
+  private var faceRadius: CGFloat { max(2, cornerRadius - inset) }
 
   func body(content: Content) -> some View {
     content
-      .background(
-        isSelected
-          ? ArgonPalette.electricBlue.opacity(0.12)
-          : ArgonPalette.surface,
-        in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-      )
-      .overlay {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-          .stroke(
-            isSelected ? ArgonPalette.electricBlue : ArgonPalette.hairline,
-            lineWidth: isSelected ? 1.5 : 1
-          )
+      // Deliberately no padding on the content: padding it would grow the
+      // whole control by twice the inset the moment it lit up, which is the
+      // layout jump this effect exists to avoid. The face insets instead, so
+      // the footprint is identical lit or dark.
+      .background {
+        ZStack {
+          // The well. Darker than the page, so the lip around the face reads
+          // as depth rather than as a gap someone forgot to fill.
+          RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(isActive ? Color.black.opacity(0.45) : Color.clear)
+
+          faceShape
+            .fill(isActive ? ArgonPalette.surfaceRaised : ArgonPalette.surface)
+            .overlay { innerGlow }
+            .overlay {
+              // strokeBorder, not stroke: stroke straddles the path and spills
+              // half its width into the lip, filling the recess it is meant to
+              // sit inside.
+              faceShape.strokeBorder(
+                isActive ? tint.opacity(0.95) : ArgonPalette.hairline,
+                lineWidth: isActive ? 1 : 1
+              )
+            }
+            .padding(isActive ? inset : 0)
+        }
       }
-      .shadow(
-        color: isSelected ? ArgonPalette.electricBlue.opacity(0.45) : .clear,
-        radius: isSelected ? 10 : 0
-      )
-      .animation(.easeOut(duration: 0.15), value: isSelected)
+      .animation(.easeOut(duration: 0.16), value: isActive)
+  }
+
+  private var faceShape: RoundedRectangle {
+    RoundedRectangle(cornerRadius: isActive ? faceRadius : cornerRadius, style: .continuous)
+  }
+
+  /// Light entering from the rim and falling off toward the middle.
+  ///
+  /// Three borders of increasing width and decreasing opacity, each blurred and
+  /// all clipped to the face. The clip is the whole trick: without it the blur
+  /// spills past the rim and becomes the outward halo this exists to avoid.
+  /// strokeBorder keeps every pass inside the face to begin with, so the mask
+  /// is trimming the blur rather than half the stroke.
+  @ViewBuilder
+  private var innerGlow: some View {
+    if isActive {
+      ZStack {
+        faceShape.strokeBorder(tint.opacity(0.85), lineWidth: 2).blur(radius: 2)
+        faceShape.strokeBorder(tint.opacity(0.40), lineWidth: 6).blur(radius: 6)
+        faceShape.strokeBorder(tint.opacity(0.16), lineWidth: 14).blur(radius: 12)
+      }
+      .mask(faceShape.fill())
+      .allowsHitTesting(false)
+    }
   }
 }
 
 extension View {
+  /// Light from the rim, inward. Use for a control that is live or chosen.
+  func argonInsetGlow(
+    _ isActive: Bool,
+    cornerRadius: CGFloat = 12,
+    inset: CGFloat = 3,
+    tint: Color = ArgonPalette.electricBlue
+  ) -> some View {
+    modifier(
+      ArgonInsetGlow(
+        isActive: isActive, cornerRadius: cornerRadius, inset: inset, tint: tint
+      )
+    )
+  }
+
   /// Mark this as pickable, and show whether it is picked.
+  ///
+  /// Selection uses the same inward light as a live button, so "this one" looks
+  /// the same wherever it appears.
   func argonSelectable(_ isSelected: Bool, cornerRadius: CGFloat = 12) -> some View {
-    modifier(ArgonSelectable(isSelected: isSelected, cornerRadius: cornerRadius))
+    argonInsetGlow(isSelected, cornerRadius: cornerRadius)
   }
 }
 
@@ -136,33 +197,45 @@ struct ArgonChoiceButton: View {
 }
 
 /// The primary action on a screen.
+///
+/// Lit while it is actually actionable, dark while it is not, so "can I press
+/// this yet" is answered by looking rather than by pressing and seeing nothing
+/// happen. Pressing sinks it further rather than flashing a highlight — the
+/// control already reads as recessed, so going deeper is the honest gesture.
 struct ArgonPrimaryButtonStyle: ButtonStyle {
   func makeBody(configuration: Configuration) -> some View {
-    configuration.label
-      .font(.system(size: 16, weight: .semibold))
-      .foregroundStyle(ArgonPalette.canvas)
-      .frame(maxWidth: .infinity)
-      .frame(height: 50)
-      .background(ArgonPalette.electricBlue, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-      .opacity(configuration.isPressed ? 0.75 : 1)
+    Face(configuration: configuration)
+  }
+
+  private struct Face: View {
+    @Environment(\.isEnabled) private var isEnabled
+    let configuration: Configuration
+
+    var body: some View {
+      configuration.label
+        .font(.system(size: 16, weight: .semibold))
+        .foregroundStyle(isEnabled ? ArgonPalette.ink : ArgonPalette.mutedInk)
+        .frame(maxWidth: .infinity)
+        .frame(height: 50)
+        .argonInsetGlow(
+          isEnabled,
+          inset: configuration.isPressed ? 5 : 3
+        )
+    }
   }
 }
 
-/// A secondary action: outlined, never filled, so it cannot be mistaken for
-/// the primary one at a glance.
+/// A secondary action. Never lit, so it cannot be mistaken for the primary one
+/// at a glance even when both are available.
 struct ArgonSecondaryButtonStyle: ButtonStyle {
   func makeBody(configuration: Configuration) -> some View {
     configuration.label
       .font(.system(size: 16, weight: .medium))
-      .foregroundStyle(ArgonPalette.ink)
+      .foregroundStyle(ArgonPalette.mutedInk)
       .frame(maxWidth: .infinity)
       .frame(height: 50)
-      .background(ArgonPalette.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-      .overlay {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-          .stroke(ArgonPalette.hairline, lineWidth: 1)
-      }
-      .opacity(configuration.isPressed ? 0.75 : 1)
+      .argonInsetGlow(false)
+      .opacity(configuration.isPressed ? 0.7 : 1)
   }
 }
 

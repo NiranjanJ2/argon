@@ -83,7 +83,6 @@ struct ArgonPlannerView: View {
       }
       .buttonStyle(ArgonPrimaryButtonStyle())
       .disabled(isSaving || !canAdvance)
-      .opacity(canAdvance ? 1 : 0.45)
     }
     .padding(16)
   }
