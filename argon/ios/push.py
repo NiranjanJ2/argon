@@ -142,7 +142,12 @@ class APNsClient:
 
     @staticmethod
     def payload(
-        title: str, body: str, *, data: dict[str, Any] | None = None, category: str | None = None
+        title: str,
+        body: str,
+        *,
+        data: dict[str, Any] | None = None,
+        category: str | None = None,
+        badge: int | None = None,
     ) -> dict[str, Any]:
         aps: dict[str, Any] = {
             "alert": {"title": title, "body": body},
@@ -151,6 +156,12 @@ class APNsClient:
         }
         if category:
             aps["category"] = category
+        # Sent as an absolute count, never incremented on the device: the phone
+        # cannot know what he has already read on Discord or on the Mac, and a
+        # badge that only ever counts up is one nobody trusts. Zero is a real
+        # value and clears it.
+        if badge is not None:
+            aps["badge"] = max(0, int(badge))
         return {"aps": aps, **(data or {})}
 
     async def send(
@@ -161,6 +172,7 @@ class APNsClient:
         data: dict[str, Any] | None = None,
         category: str | None = None,
         collapse_id: str | None = None,
+        badge: int | None = None,
     ) -> PushResult:
         """Push one notification. Never raises for an ordinary failure."""
         if not self.configured:
@@ -189,7 +201,7 @@ class APNsClient:
                     f"{host}/3/device/{token}",
                     headers=headers,
                     content=json.dumps(
-                        self.payload(title, body, data=data, category=category)
+                        self.payload(title, body, data=data, category=category, badge=badge)
                     ).encode(),
                 )
         except Exception as exc:  # noqa: BLE001 — a dead network is not a crash

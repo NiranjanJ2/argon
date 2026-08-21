@@ -41,6 +41,7 @@ class ChannelManager:
     def _init_channels(self) -> None:
         """Initialize the channels enabled in config."""
         from argon.channels.discord import DiscordChannel
+        from argon.channels.push import PushChannel
         from argon.channels.whatsapp import WhatsAppChannel
 
         # Two channels, named explicitly. The upstream pkgutil + entry_points
@@ -49,27 +50,39 @@ class ChannelManager:
         available: dict[str, type[BaseChannel]] = {
             "discord": DiscordChannel,
             "whatsapp": WhatsAppChannel,
+            # The phone. Enabled by default, because the app is the thing he
+            # carries and Discord was only ever the channel that happened to
+            # be able to receive an unprompted message first.
+            "push": PushChannel,
         }
         groq = self.config.providers.get("groq")
         groq_key = groq.api_key if groq else ""
 
         for name, cls in available.items():
             section = getattr(self.config.channels, name, None)
-            if section is None:
+            if section is None and name != "push":
                 continue
+            # Push has no credentials of its own — it rides the APNs config —
+            # so it is on unless he turns it off, rather than off until
+            # configured like a chat platform with an account behind it.
+            default_enabled = name == "push"
             enabled = (
-                section.get("enabled", False)
+                section.get("enabled", default_enabled)
                 if isinstance(section, dict)
-                else getattr(section, "enabled", False)
+                else getattr(section, "enabled", default_enabled)
+                if section is not None
+                else default_enabled
             )
             if not enabled:
                 continue
             try:
-                channel = (
-                    cls(section, self.bus, webhook_port=self.config.api.port)
-                    if name == "whatsapp"
-                    else cls(section, self.bus)
-                )
+                if name == "whatsapp":
+                    channel = cls(section, self.bus, webhook_port=self.config.api.port)
+                elif name == "push":
+                    channel = cls(section or {}, self.bus, workspace=self.config.workspace_path)
+                    channel.argon_config = self.config
+                else:
+                    channel = cls(section, self.bus)
                 channel.transcription_api_key = groq_key
                 self.channels[name] = channel
                 logger.info("{} channel enabled", cls.display_name)

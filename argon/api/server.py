@@ -857,6 +857,53 @@ def planner_post() -> Any:
     return jsonify(result)
 
 
+@app.get("/v1/messages")
+@require_token
+def messages_get() -> Any:
+    """The app's own conversation, newest last.
+
+    A push notification is gone the moment it is dismissed, so the app needs
+    somewhere the message still exists. This is that place — the same session
+    the chat tab writes to, so what Argon said unprompted and what he replied
+    sit in one thread rather than two.
+    """
+    from argon.core.session import SessionManager
+    from argon.ios import unread
+
+    limit = min(200, max(1, request.args.get("limit", type=int) or 50))
+    ws = _rt.config.workspace_path if _rt.config else argon_home()
+    session = SessionManager(ws).get_or_create(IOS_SESSION)
+
+    shown = []
+    for message in session.messages[-limit:]:
+        role = message.get("role")
+        content = message.get("content")
+        # Tool traffic is machinery, not conversation.
+        if role not in ("user", "assistant") or not isinstance(content, str) or not content.strip():
+            continue
+        shown.append({
+            "role": role,
+            "text": content,
+            "at": message.get("timestamp"),
+        })
+
+    return jsonify({"messages": shown, "unread": unread.count()})
+
+
+@app.post("/v1/ios/read")
+@require_token
+def ios_mark_read() -> Any:
+    """He opened the app. Clear the badge.
+
+    The count lives on the server rather than on the device because the device
+    cannot know what he already read on the Mac or answered in Discord, and a
+    badge that only counts up is one nobody trusts.
+    """
+    from argon.ios import unread
+
+    return jsonify({"cleared": unread.clear(), "unread": 0})
+
+
 @app.errorhandler(Exception)
 def _on_error(exc: Exception) -> Any:
     """Answer in JSON always, and never leak a traceback or a config value."""

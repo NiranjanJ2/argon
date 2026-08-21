@@ -136,7 +136,21 @@ def build_runtime(config: Config) -> Runtime:
     channels = ChannelManager(config, bus, outbox=outbox)
 
     def pick_target() -> tuple[str, str]:
-        """Where to deliver a message Niranjan did not ask for."""
+        """Where to deliver a message Niranjan did not ask for.
+
+        The phone first. It is the thing he carries, and Discord was only ever
+        the default because it was the one channel that could receive an
+        unprompted message at all — the app could answer but never be spoken
+        to first.
+
+        It falls back the moment there is no device registered, so a phone that
+        has never opened the app, or has notifications switched off, does not
+        silently swallow every check-in.
+        """
+        push = channels.get_channel("push")
+        if push is not None and getattr(push, "has_device", False):
+            return "push", "phone"
+
         enabled = set(channels.enabled_channels)
         if remembered := target.recall(config.workspace_path, enabled):
             return remembered
