@@ -142,6 +142,8 @@ final class ArgonBridge: ObservableObject {
   @Published private(set) var taskMutationIDs: Set<String> = []
   private(set) var nextEvent: ArgonWidgetSnapshot.Event?
   @Published private(set) var acUnitsCache: [ArgonACUnit] = []
+  @Published private(set) var messages: [ArgonMessage] = []
+  @Published private(set) var unreadCount = 0
   /// Which address actually answered. Shown in Settings because "it works at
   /// home and not on cellular" was invisible for weeks: the app had one
   /// address, and nothing on screen said which one it was using.
@@ -537,6 +539,41 @@ final class ArgonBridge: ObservableObject {
       lastError = "Could not save the plan: \(error.localizedDescription)"
       return false
     }
+  }
+
+  /// The conversation as the server holds it: what Argon said unprompted and
+  /// what he replied, in one thread.
+  ///
+  /// The app used to keep chat only on the device, so anything Argon started
+  /// existed as a notification and nowhere else — dismiss it and it was gone.
+  @discardableResult
+  func refreshMessages() async -> [ArgonMessage] {
+    guard let request = makeRequest(path: "/v1/messages") else { return [] }
+    do {
+      let response = try JSONDecoder().decode(
+        ArgonMessagesResponse.self, from: try await perform(request)
+      )
+      messages = response.messages
+      unreadCount = response.unread
+      applyBadge(response.unread)
+      return response.messages
+    } catch {
+      return []
+    }
+  }
+
+  /// He is looking at it. Clear the badge on both sides.
+  func markMessagesRead() async {
+    unreadCount = 0
+    applyBadge(0)
+    guard let request = makeRequest(path: "/v1/ios/read", method: "POST") else { return }
+    _ = try? await perform(request)
+  }
+
+  /// The number on the app icon. Set from the server's count rather than
+  /// incremented here, so it matches what is actually waiting.
+  private func applyBadge(_ count: Int) {
+    UNUserNotificationCenter.current().setBadgeCount(max(0, count)) { _ in }
   }
 
   /// Every adopted air conditioner, with live state.

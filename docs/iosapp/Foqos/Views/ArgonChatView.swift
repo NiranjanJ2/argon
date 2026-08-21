@@ -73,6 +73,12 @@ struct ArgonChatView: View {
         .padding(.vertical, 18)
       }
       .scrollDismissesKeyboard(.interactively)
+      .task {
+        // Everything Argon started arrives as a push and lives on the server;
+        // opening the chat is what pulls it in and clears the badge.
+        chat.merge(await bridge.refreshMessages())
+        await bridge.markMessagesRead()
+      }
       .onChange(of: chat.messages.count) { _, _ in
         scrollToBottom(proxy)
       }

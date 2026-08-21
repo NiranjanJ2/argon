@@ -13,6 +13,12 @@ struct FoqosWidgetAttributes: ActivityAttributes {
     var isPauseActive: Bool = false
     var pauseStartTime: Date?
     var pauseEndTime: Date?
+    /// What he is actually working on. The activity showed a profile name and
+    /// a timer, which says the phone is locked but not why — and "why" is the
+    /// only part worth reading from the lock screen.
+    ///
+    /// Defaulted so an activity started by an older build still decodes.
+    var taskTitle: String? = nil
 
     func getTimeIntervalSinceNow() -> Double {
       // Calculate the break duration to subtract from elapsed time
@@ -75,13 +81,27 @@ struct FoqosWidgetLiveActivity: Widget {
             foqosLogo(size: 20)
           }
 
-          Text(context.attributes.name)
-            .font(.subheadline)
-            .foregroundColor(.primary)
+          // The task leads when there is one. A profile name and a timer say
+          // the phone is locked; only this says why, which is the part worth
+          // reading from a lock screen.
+          if let task = context.state.taskTitle, !task.isEmpty {
+            Text(task)
+              .font(.subheadline.weight(.semibold))
+              .foregroundColor(.primary)
+              .lineLimit(2)
 
-          Text(context.attributes.message)
-            .font(.caption)
-            .foregroundColor(.secondary)
+            Text(context.attributes.name)
+              .font(.caption)
+              .foregroundColor(.secondary)
+          } else {
+            Text(context.attributes.name)
+              .font(.subheadline)
+              .foregroundColor(.primary)
+
+            Text(context.attributes.message)
+              .font(.caption)
+              .foregroundColor(.secondary)
+          }
         }
 
         Spacer()

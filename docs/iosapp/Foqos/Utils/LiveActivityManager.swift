@@ -194,7 +194,11 @@ class LiveActivityManager: ObservableObject {
       usedBreakDurationInSeconds: session.usedBreakDurationInSeconds,
       isPauseActive: session.isPauseActive,
       pauseStartTime: session.pauseStartTime,
-      pauseEndTime: session.pauseEndTime
+      pauseEndTime: session.pauseEndTime,
+      // From the shared snapshot rather than the bridge: this runs off the
+      // main actor, and the snapshot is a plain file the widgets already read
+      // for exactly this reason.
+      taskTitle: ArgonWidgetStore.read().currentTask
     )
   }
 }

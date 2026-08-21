@@ -39,6 +39,37 @@ final class ArgonChatStore: ObservableObject {
     await deliver(id, through: bridge)
   }
 
+  /// Fold in anything Argon said while the app was closed.
+  ///
+  /// A push notification is gone once dismissed, so messages Argon started
+  /// live on the server. Without this the chat only ever showed conversations
+  /// he began, and everything Argon opened existed nowhere after the banner
+  /// disappeared.
+  func merge(_ incoming: [ArgonMessage]) {
+    // Matched on text: the local copy has no server id, and Argon does not
+    // repeat itself verbatim within a conversation. Timestamps cannot be the
+    // key because the local copy is stamped when it arrived, not when it was
+    // sent.
+    let known = Set(messages.map(\.text))
+    let additions = incoming
+      .filter { $0.isFromArgon && !known.contains($0.text) }
+      .map {
+        ArgonChatMessage(
+          id: UUID(),
+          role: .argon,
+          text: $0.text,
+          sentAt: $0.sentDate ?? Date(),
+          delivered: true
+        )
+      }
+    guard !additions.isEmpty else { return }
+
+    messages.append(contentsOf: additions)
+    messages.sort { $0.sentAt < $1.sentAt }
+    messages = Array(messages.suffix(100))
+    persist()
+  }
+
   func clear() {
     messages = []
     persist()
