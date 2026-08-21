@@ -176,6 +176,10 @@ class CronService:
         self._last_mtime: float = 0.0
         self._timer_task: asyncio.Task | None = None
         self._running = False
+        #: The loop the service runs on, captured when it starts. Jobs get added
+        #: from the Flask thread as well as from the agent, and arming a timer
+        #: is only legal on the loop.
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def _load_store(self) -> CronStore:
         """Load jobs from disk. Reloads automatically if file was modified externally."""
@@ -319,6 +323,7 @@ class CronService:
     async def start(self) -> None:
         """Start the cron service."""
         self._running = True
+        self._loop = asyncio.get_running_loop()
         self._load_store()
         self._recompute_next_runs()
         self._save_store()
@@ -377,7 +382,22 @@ class CronService:
         return min(times) if times else None
 
     def _arm_timer(self) -> None:
-        """Schedule the next timer tick."""
+        """Schedule the next timer tick.
+
+        Safe to call from any thread. The HTTP API runs Flask in a daemon
+        thread beside the agent's loop, so ``add_job`` from a request reached
+        ``asyncio.create_task`` with no running loop in that thread and raised
+        — which surfaced as a 500 on the planner, with the start time saved and
+        the day left unmarked, so the wizard reopened every launch.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loop = self._loop
+            if loop is not None and loop.is_running():
+                loop.call_soon_threadsafe(self._arm_timer)
+            return
+
         if self._timer_task:
             self._timer_task.cancel()
 

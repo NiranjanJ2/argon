@@ -829,13 +829,23 @@ def planner_post() -> Any:
     # than leaving a block armed for a time he has moved away from.
     if "start_at" in body:
         start_at = body.get("start_at")
-        if _rt.cron is not None:
-            result["start"] = planner.schedule_start(
-                _rt.cron, str(start_at) if start_at else None
-            )
-        else:
+        # Arming the jobs must never cost him the plan. When this raised, the
+        # request 500'd after the time was written but before the day was
+        # marked planned — so the wizard reopened on every launch with the time
+        # already set, which is the most confusing possible failure.
+        try:
+            if _rt.cron is not None:
+                result["start"] = planner.schedule_start(
+                    _rt.cron, str(start_at) if start_at else None
+                )
+            else:
+                planner.set_start_time(str(start_at) if start_at else None)
+                result["start"] = {"start_at": start_at, "scheduled": []}
+        except Exception as exc:  # noqa: BLE001 - the plan outranks the alarm
+            logger.exception("Could not schedule the start time")
             planner.set_start_time(str(start_at) if start_at else None)
             result["start"] = {"start_at": start_at, "scheduled": []}
+            result["errors"].append(f"start {start_at}: {exc}")
 
     # Recorded even when nothing changed: "I looked and there is nothing to
     # move" is an answer, and without it the screen reopens on the next launch.

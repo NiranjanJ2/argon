@@ -55,3 +55,24 @@ class TestMarkingTheDayPlanned:
         assert response.status_code == 200
         assert response.json["planned_for"]
         assert response.json["errors"]
+
+
+class TestSchedulingFailureDoesNotLoseThePlan:
+    def test_a_broken_scheduler_still_marks_the_day(self, client, monkeypatch):
+        """The bug: the request 500'd between saving the time and marking the
+        day, so the wizard reopened every launch with the time already set."""
+        from argon import planner
+
+        class ExplodingCron:
+            def list_jobs(self, include_disabled: bool = False):
+                raise RuntimeError("no running event loop")
+
+        monkeypatch.setattr(srv._rt, "cron", ExplodingCron())
+
+        response = client.post("/v1/planner", json={"start_at": "18:00"}, headers=AUTH)
+
+        assert response.status_code == 200
+        assert response.json["planned_for"]
+        assert response.json["errors"], "the failure should be reported, not hidden"
+        # The time he chose is still his, even though the alarm could not be set.
+        assert planner.start_time() == "18:00"
