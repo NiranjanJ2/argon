@@ -84,6 +84,7 @@ struct ArgonStatusResponse: Decodable {
   let lockInMinutes: Int?
   let ios: ArgonIOSState?
   let agenda: [ArgonAgendaEvent]?
+  let routine: ArgonRoutine?
 
   enum CodingKeys: String, CodingKey {
     case mode
@@ -92,6 +93,7 @@ struct ArgonStatusResponse: Decodable {
     case lockInMinutes = "lock_in_minutes"
     case ios
     case agenda
+    case routine
   }
 
   init(from decoder: Decoder) throws {
@@ -102,6 +104,9 @@ struct ArgonStatusResponse: Decodable {
     lockInMinutes = try? container.decode(Int.self, forKey: .lockInMinutes)
     ios = try? container.decode(ArgonIOSState.self, forKey: .ios)
     agenda = try? container.decode([ArgonAgendaEvent].self, forKey: .agenda)
+    // Optional on purpose: a server that predates the routine must not make the
+    // whole status payload undecodable and take the shield down with it.
+    routine = try? container.decode(ArgonRoutine.self, forKey: .routine)
   }
 }
 
@@ -282,6 +287,10 @@ final class ArgonBridge: ObservableObject {
         ArgonServerDate.parse(event.start).map {
           ArgonWidgetSnapshot.Event(summary: event.summary, start: $0)
         }
+      }
+
+      if let routine = status.routine {
+        applyRoutine(routine)
       }
 
       if let desired = status.ios?.desired {
@@ -697,6 +706,40 @@ final class ArgonBridge: ObservableObject {
     _ = try? await perform(request)
   }
 
+  /// Which APNs environment this build actually has.
+  ///
+  /// This was `#if DEBUG`, which is a *build configuration* and not an APNs
+  /// environment: a Release build installed from Xcode still carries
+  /// `aps-environment: development`, so it reported "production", the server
+  /// pushed to the production host with a sandbox token, and every push came
+  /// back `403 BadEnvironmentKeyInToken`. The entitlement in the provisioning
+  /// profile is the only thing that actually knows, and it is right for Xcode,
+  /// TestFlight and the App Store alike.
+  static var apnsEnvironment: String {
+    guard
+      let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+      let data = try? Data(contentsOf: url),
+      // The profile is CMS-signed; the plist sits in the clear inside it.
+      let text = String(data: data, encoding: .isoLatin1),
+      let start = text.range(of: "<?xml"),
+      let end = text.range(of: "</plist>"),
+      let plist = String(text[start.lowerBound..<end.upperBound]).data(using: .isoLatin1),
+      let parsed = try? PropertyListSerialization.propertyList(from: plist, format: nil)
+        as? [String: Any],
+      let entitlements = parsed["Entitlements"] as? [String: Any],
+      let aps = entitlements["aps-environment"] as? String
+    else {
+      // No profile means the App Store stripped it, which is production.
+      return "production"
+    }
+    return aps == "development" ? "sandbox" : "production"
+  }
+
+  private func applyRoutine(_ routine: ArgonRoutine) {
+    guard let profileId = ArgonReconciler.shared.profileId(named: profileName) else { return }
+    ArgonRoutineScheduler.apply(routine, profileId: profileId)
+  }
+
   private func registerDevice() async {
     guard !deviceToken.isEmpty,
       var request = makeRequest(path: "/v1/ios/register", method: "POST")
@@ -704,11 +747,7 @@ final class ArgonBridge: ObservableObject {
       return
     }
 
-    #if DEBUG
-      let environment = "sandbox"
-    #else
-      let environment = "production"
-    #endif
+    let environment = Self.apnsEnvironment
 
     request.httpBody = try? JSONSerialization.data(
       withJSONObject: [

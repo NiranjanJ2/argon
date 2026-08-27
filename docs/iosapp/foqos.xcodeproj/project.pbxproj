@@ -154,6 +154,7 @@
 				Models/Schedule.swift,
 				Models/Shared.swift,
 				Models/SoftUnblockGrant.swift,
+				Models/Timers/ArgonRoutineActivity.swift,
 				Models/Timers/BreakTimerActivity.swift,
 				Models/Timers/PauseTimerActivity.swift,
 				Models/Timers/ScheduleTimerActivity.swift,

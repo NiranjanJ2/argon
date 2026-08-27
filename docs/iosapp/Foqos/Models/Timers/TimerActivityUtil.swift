@@ -53,6 +53,8 @@ class TimerActivityUtil {
       return PauseTimerActivity()
     case SoftUnblockGrantTimerActivity.id:
       return SoftUnblockGrantTimerActivity()
+    case ArgonRoutineActivity.id:
+      return ArgonRoutineActivity()
     default:
       return nil
     }

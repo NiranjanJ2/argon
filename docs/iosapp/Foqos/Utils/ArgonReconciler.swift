@@ -43,6 +43,20 @@ final class ArgonReconciler {
     self.container = container
   }
 
+  /// The id of the profile Argon drives, for callers that need to name it
+  /// without reaching for the container themselves.
+  func profileId(named profileName: String) -> UUID? {
+    guard let container,
+      let profiles = try? BlockedProfiles.fetchProfiles(in: container.mainContext)
+    else {
+      return nil
+    }
+    return profiles.first(where: {
+      $0.name.compare(profileName, options: [.caseInsensitive, .diacriticInsensitive])
+        == .orderedSame
+    })?.id ?? (profiles.count == 1 ? profiles.first?.id : nil)
+  }
+
   /// Never returns nil: a failure the server does not hear about is
   /// indistinguishable from a phone that is switched off, which would leave
   /// Argon believing it had locked a device that is wide open.
