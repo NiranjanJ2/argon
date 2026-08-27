@@ -319,6 +319,11 @@ def status() -> Any:
     data["plan"] = {
         "blocks": [b.as_dict() for b in plan.blocks()],
     }
+    # The phone builds its own DeviceActivitySchedule from this, so the routine
+    # survives a backgrounded app, a dead server and a dropped push.
+    from argon import planner
+
+    data["routine"] = planner.routine()
     data["schoolwork"] = [
         {"title": a["title"], "course": a["course"], "due": a["due"],
          "due_when": a["due_when"], "days_left": a["days_left"]}

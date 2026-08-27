@@ -553,146 +553,142 @@ def test_calendar_commitments_do_not_become_plan_blocks(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Chasing work he has not claimed
+# The one follow-up
 #
-# He does want pushing — "if I haven't told it about my stuff I do want it to
-# push and ask me to start or when I plan to start". What he does not want is
-# being told he has started, or being asked twice. The brief asks once; there is
-# exactly one follow-up, and only into silence.
+# He does want pushing. What he does not want is being asked, item by item, when
+# he plans to start each thing on the board — that shipped thirteen identical
+# "When do you plan to start X?" messages in eight days and he answered none of
+# them. The follow-up is now about starting at all: once, and only into an
+# evening where nothing has begun.
 # ---------------------------------------------------------------------------
 
 
-def _unclaimed_board(monkeypatch, rows):
-    from argon.commitments import SourceSnapshot
-
-    monkeypatch.setattr(
-        "argon.commitments.classroom_snapshot",
-        lambda *a, **k: SourceSnapshot("classroom", (), None, ()),
-    )
-    monkeypatch.setattr(
-        "argon.commitments.tasks_snapshot",
-        lambda *a, **k: SourceSnapshot("tasks", tuple(rows), None, ()),
-    )
-    monkeypatch.setattr("argon.services.agenda.upcoming", lambda *a, **k: [])
-
-
 class TestTheOneFollowUp:
-    def _service(self, tmp_path, monkeypatch, at):
-        service, clock = _service(tmp_path, monkeypatch, at)
-        monkeypatch.setattr(service, "_pending_event", lambda: None)
-        return service, clock
+    """Asking about starting, not about assignments."""
 
-    def test_the_brief_asks_when_he_plans_to_start_the_unclaimed_item(
+    @staticmethod
+    def _after_the_brief(service, clock, monkeypatch, start="18:00"):
+        """Four o'clock: the brief has gone out and the gap has elapsed."""
+        monkeypatch.setattr("argon.planner.start_time", lambda: start)
+        sent = clock.now.replace(hour=16, minute=5)
+        service.ledger.record_fired("daily_brief", sent)
+        service.ledger.record_said("daily_brief", "here is tonight", sent)
+
+    def test_nothing_is_asked_before_the_start_time(self, tmp_path, monkeypatch):
+        service, clock = _service(tmp_path, monkeypatch, _at(17, 30))
+        self._after_the_brief(service, clock, monkeypatch)
+        assert service.pick_occasion() is None
+
+    def test_nothing_is_asked_inside_the_hour_of_grace(self, tmp_path, monkeypatch):
+        """He naps after school. A late start is a choice, not a failure."""
+        service, clock = _service(tmp_path, monkeypatch, _at(18, 45))
+        self._after_the_brief(service, clock, monkeypatch)
+        assert service.pick_occasion() is None
+
+    def test_an_hour_after_the_start_it_asks(self, tmp_path, monkeypatch):
+        service, clock = _service(tmp_path, monkeypatch, _at(19, 5))
+        self._after_the_brief(service, clock, monkeypatch)
+        occasion = service.pick_occasion()
+        assert occasion is not None and occasion.kind == "start"
+
+    def test_it_never_names_an_assignment(self, tmp_path, monkeypatch):
+        """The whole defect in one assertion."""
+        service, clock = _service(tmp_path, monkeypatch, _at(19, 5))
+        self._after_the_brief(service, clock, monkeypatch)
+        headline = service._headline(service.pick_occasion())
+        assert "not started anything" in headline.lower()
+        assert "do not name a task" in headline.lower()
+
+    def test_starting_something_ends_it(self, tmp_path, monkeypatch):
+        from argon.productivity.log import DailyLog
+
+        service, clock = _service(tmp_path, monkeypatch, _at(19, 5))
+        self._after_the_brief(service, clock, monkeypatch)
+        DailyLog(tmp_path).log_task_started("HW 9")
+        assert service.pick_occasion() is None
+
+    def test_a_session_in_flight_ends_it(self, tmp_path, monkeypatch):
+        service, clock = _service(tmp_path, monkeypatch, _at(19, 5))
+        self._after_the_brief(service, clock, monkeypatch)
+        _mode(service, "working")
+        assert service.pick_occasion() is None
+
+    def test_it_is_asked_once_a_day_and_no_more(self, tmp_path, monkeypatch):
+        """The bug: `pick_occasion` gated the brief on `_ready` and the nudge on
+        nothing, so a zero cooldown meant "once a day" in the table and nothing
+        at all in practice. It walked the board one item per tick."""
+        service, clock = _service(tmp_path, monkeypatch, _at(19, 5))
+        self._after_the_brief(service, clock, monkeypatch)
+        first = service.pick_occasion()
+        assert first is not None and first.kind == "start"
+
+        service.ledger.record_fired("start", clock.now)
+        service.ledger.record_said("start", "getting started?", clock.now)
+        for _ in range(6):
+            clock.advance(10)
+            assert service.pick_occasion() is None
+
+    def test_a_suppressed_follow_up_does_not_retry_on_the_next_tick(
         self, tmp_path, monkeypatch
     ):
-        service, _ = self._service(tmp_path, monkeypatch, _at(16, 30))
-        _unclaimed_board(monkeypatch, [
-            {"id": "t1", "title": "Chemistry reading", "source": "manual",
-             "due": "2026-07-30", "due_when": "Thu 07/30"},
-        ])
-
-        occasion = service.pick_occasion()
-        prompt = service.build_prompt(occasion)
-
-        assert occasion.kind == "daily_brief"
-        assert "Chemistry reading" in prompt
-        assert "when he plans to start" in prompt
-        assert "Do not propose a time for him" in prompt
-
-    def test_a_follow_up_chases_only_into_silence(self, tmp_path, monkeypatch):
-        service, clock = self._service(tmp_path, monkeypatch, _at(16, 30))
-        _unclaimed_board(monkeypatch, [
-            {"id": "t1", "title": "Chemistry reading", "source": "manual",
-             "due": "2026-07-30", "due_when": "Thu 07/30"},
-        ])
-        service.ledger.record_fired("daily_brief", clock.now)
-        service.ledger.record_said("daily_brief", "when are you starting chem?", clock.now)
-        monkeypatch.setattr(service, "_he_has_spoken_since", lambda _when: False)
-
-        clock.advance(90)
-        occasion = service.pick_occasion()
-
-        assert occasion is not None and occasion.kind == "nudge"
-        prompt = service.build_prompt(occasion)
-        assert "single follow-up" in prompt
-        assert "do not ask again" in prompt.lower()
-
-    def test_answering_ends_it(self, tmp_path, monkeypatch):
-        """If he replied at all, the question has been answered."""
-        service, clock = self._service(tmp_path, monkeypatch, _at(16, 30))
-        _unclaimed_board(monkeypatch, [
-            {"id": "t1", "title": "Chemistry reading", "source": "manual",
-             "due": "2026-07-30", "due_when": "Thu 07/30"},
-        ])
-        service.ledger.record_fired("daily_brief", clock.now)
-        service.ledger.record_said("daily_brief", "when are you starting chem?", clock.now)
-        monkeypatch.setattr(service, "_he_has_spoken_since", lambda _when: True)
-
-        clock.advance(90)
+        """Suppression used to record `fired` but not `said`, and the sixty
+        minute gap is measured from `said` — so the gate reopened ten minutes
+        later with the next item and hunted for wording that got past the
+        filter. `_ready` now closes it for the day either way."""
+        service, clock = _service(tmp_path, monkeypatch, _at(19, 5))
+        self._after_the_brief(service, clock, monkeypatch)
+        assert service.pick_occasion().kind == "start"
+        service.ledger.record_fired("start", clock.now)  # suppressed: no `said`
+        clock.advance(10)
         assert service.pick_occasion() is None
 
-    def test_the_same_item_is_never_asked_about_twice(self, tmp_path, monkeypatch):
-        service, clock = self._service(tmp_path, monkeypatch, _at(16, 30))
-        rows = [{"id": "t1", "title": "Chemistry reading", "source": "manual",
-                 "due": "2026-07-30", "due_when": "Thu 07/30"}]
-        _unclaimed_board(monkeypatch, rows)
-        service.ledger.record_fired("daily_brief", clock.now)
-        service.ledger.record_said("daily_brief", "asked once", clock.now)
-        monkeypatch.setattr(service, "_he_has_spoken_since", lambda _when: False)
+    def test_the_default_start_applies_when_he_never_filled_the_form(
+        self, tmp_path, monkeypatch
+    ):
+        """No form means six o'clock — the hour the phone locks on."""
+        service, clock = _service(tmp_path, monkeypatch, _at(19, 5))
+        self._after_the_brief(service, clock, monkeypatch, start=None)
+        assert service._start_hhmm() == reminder_mod.DEFAULT_START_HHMM
+        assert service.pick_occasion().kind == "start"
 
-        clock.advance(90)
-        first = service.pick_occasion()
-        assert first.kind == "nudge"
-        service._consume_pending(first)          # the follow-up went out
-        service.ledger.record_said("nudge", "still planning to?", clock.now)
-
-        clock.advance(90)
-        assert service.pick_occasion() is None, "never a third time"
-
-    def test_work_he_has_given_a_time_is_not_chased(self, tmp_path, monkeypatch):
-        """Deciding when to do something is doing something about it."""
-        service, clock = self._service(tmp_path, monkeypatch, _at(16, 30))
-        _unclaimed_board(monkeypatch, [
-            {"id": "t1", "title": "Chemistry reading", "source": "manual",
-             "due": "2026-07-30", "due_when": "Thu 07/30"},
-        ])
-        monkeypatch.setattr(
-            "argon.services.agenda.upcoming",
-            lambda *a, **k: [{"summary": "Chemistry reading",
-                              "start": _at(19, 0), "kind": "event"}],
-        )
-        service.ledger.record_fired("daily_brief", clock.now)
-        service.ledger.record_said("daily_brief", "brief", clock.now)
-        monkeypatch.setattr(service, "_he_has_spoken_since", lambda _when: False)
-
-        clock.advance(90)
+    def test_friday_and_saturday_evenings_are_silent(self, tmp_path, monkeypatch):
+        friday = datetime(2026, 7, 31, 19, 5, tzinfo=LA)
+        service, clock = _service(tmp_path, monkeypatch, friday)
+        self._after_the_brief(service, clock, monkeypatch)
         assert service.pick_occasion() is None
 
-    def test_nothing_is_chased_before_the_brief_has_gone_out(self, tmp_path, monkeypatch):
-        service, clock = self._service(tmp_path, monkeypatch, _at(16, 30))
-        _unclaimed_board(monkeypatch, [
-            {"id": "t1", "title": "Chemistry reading", "source": "manual",
-             "due": "2026-07-30", "due_when": "Thu 07/30"},
-        ])
-        monkeypatch.setattr(service, "_he_has_spoken_since", lambda _when: False)
-        # No daily_brief in the ledger: the follow-up has nothing to follow.
-        occasion = service.pick_occasion()
-        assert occasion is None or occasion.kind == "daily_brief"
 
-    def test_a_dead_task_list_is_never_chased(self, tmp_path, monkeypatch):
-        """An outage is absence of evidence, not an empty plate."""
-        from argon.commitments import SourceSnapshot
+class TestAnOutageIsNotAMessage:
+    """On 2026-08-22 the 4 PM brief he received read
+    "Error calling LLM: Error code: 504"."""
 
-        service, clock = self._service(tmp_path, monkeypatch, _at(16, 30))
-        monkeypatch.setattr(
-            "argon.commitments.classroom_snapshot",
-            lambda *a, **k: SourceSnapshot("classroom", (), None, ()),
-        )
-        monkeypatch.setattr(
-            "argon.commitments.tasks_snapshot",
-            lambda *a, **k: SourceSnapshot("tasks", (), "tasks unreachable", ()),
-        )
-        assert service._unclaimed() == []
+    @pytest.mark.parametrize("reply", [
+        "Error calling LLM: Error code: 504",
+        "Error code: 502 - upstream unavailable",
+        "error: connection reset",
+    ])
+    def test_provider_failures_are_recognised(self, reply):
+        assert reminder_mod.is_provider_error(reply)
+
+    @pytest.mark.parametrize("reply", [
+        "Error 404 is what the page showed you — want me to look again?",
+        "Getting started?",
+    ])
+    def test_real_messages_are_not(self, reply):
+        assert not reminder_mod.is_provider_error(reply)
+
+    def test_an_outage_does_not_consume_the_day(self, tmp_path, monkeypatch):
+        async def broken(_prompt):
+            return "Error calling LLM: Error code: 504"
+
+        service, clock = _service(tmp_path, monkeypatch, _at(16, 5), broken)
+        import asyncio
+
+        assert asyncio.run(service.tick()) == ""
+        # Not fired, not said: the brief is still owed and retries after the
+        # attempt backoff rather than being spent on a 504.
+        assert service.ledger.fired_at("daily_brief") is None
+        assert service.ledger.said_today() == []
 
 
 class TestTheReasoningNeverReachesHim:

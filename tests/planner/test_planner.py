@@ -154,42 +154,57 @@ class TestStartTime:
             self._jobs = [j for j in self._jobs if j.id != job_id]
             return True
 
-    def test_it_arms_a_warning_and_a_block(self):
+    def test_it_arms_nothing_because_the_phone_owns_the_clock(self):
+        """The server stopped deciding *when*.
+
+        A cron pair could only publish a desired mode and hope the phone was
+        listening; the app polls on a `Timer.scheduledTimer` that iOS suspends
+        on backgrounding, so for six days it was not. The block is a
+        `DeviceActivitySchedule` on the device now — it fires with the app
+        closed, the server down and the network off.
+        """
         cron = self.FakeCron()
-        now = _at(16, 0)
 
-        out = planner.schedule_start(cron, "18:00", now=now)
+        out = planner.schedule_start(cron, "18:00", now=_at(16, 0))
 
-        names = [j["name"] for j in cron.added]
-        assert names == [planner.NOTIFY_JOB, planner.BLOCK_JOB]
+        assert cron.added == []
         assert out["start_at"] == "18:00"
 
-    def test_the_warning_lands_half_an_hour_early(self):
+    def test_it_still_clears_a_pair_an_older_version_armed(self):
+        """An upgrade must not leave a block firing at a time he has changed."""
         cron = self.FakeCron()
+        cron._jobs.append(cron._Job("legacy", planner.BLOCK_JOB))
 
-        planner.schedule_start(cron, "18:00", now=_at(16, 0))
+        out = planner.schedule_start(cron, "20:00", now=_at(16, 0))
 
-        warn, block = cron.added
-        gap_minutes = (block["at_ms"] - warn["at_ms"]) / 60000
-        assert gap_minutes == planner.WARNING_MINUTES
+        assert cron.removed == ["legacy"]
+        assert out["cleared"] == 1
 
-    def test_a_start_inside_the_warning_window_still_blocks(self):
-        # Chosen 18:00 at 17:45: there is no time to warn him, but the block
-        # he asked for must still happen.
-        cron = self.FakeCron()
+    def test_the_routine_tells_the_phone_what_to_schedule(self):
+        planner.set_start_time("20:00")
 
-        planner.schedule_start(cron, "18:00", now=_at(17, 45))
+        routine = planner.routine(now=_at(16, 0))
 
-        assert [j["name"] for j in cron.added] == [planner.BLOCK_JOB]
+        assert routine["start_at"] == "20:00"
+        assert routine["chosen"] is True
+        assert routine["window_minutes"] == planner.BLOCK_WINDOW_MIN
 
-    def test_a_time_that_has_already_passed_arms_nothing(self):
+    def test_an_unplanned_day_falls_back_to_six(self):
+        """The lock at six is what makes him fill the form: it lifts when he does."""
+        planner.set_start_time(None)
+
+        routine = planner.routine(now=_at(16, 0))
+
+        assert routine["start_at"] == planner.DEFAULT_START_HHMM
+        assert routine["chosen"] is False
+
+    def test_a_time_that_has_already_passed_is_still_recorded(self):
         cron = self.FakeCron()
 
         out = planner.schedule_start(cron, "09:00", now=_at(16, 0))
 
         assert cron.added == []
-        assert out["note"] == "already passed"
-        # Still recorded — it is what he intended, and the screen should show it.
+        # It is what he intended, and the screen should show it.
         assert out["start_at"] == "09:00"
 
     def test_clearing_the_time_cancels_instead_of_leaving_a_block_armed(self):

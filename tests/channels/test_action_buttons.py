@@ -21,28 +21,20 @@ class TestTheButtonsOffered:
     def _service(self, tmp_path):
         return ReminderService(tmp_path, "America/Los_Angeles", _silent)
 
-    def test_the_item_being_asked_about_gets_start_done_and_defer(self, tmp_path):
+    def test_the_follow_up_offers_no_buttons(self, tmp_path):
+        """It is about starting at all, so there is no task id to attach.
+
+        The buttons existed for the per-item nudge — "Starting now / Done / Not
+        tonight" against one assignment. That question is gone: thirteen of them
+        went out over eight days and none was answered. The phone lock is what
+        does the forcing now.
+        """
         service = self._service(tmp_path)
-        service._pending_unclaimed = {
-            "id": "t1", "google_task_id": "t1", "title": "Chemistry reading",
-        }
 
-        actions = service._actions_for(OCCASIONS["nudge"])
-
-        assert [a["action"] for a in actions] == ["start", "complete", "defer"]
-        assert all(a["task_id"] == "t1" for a in actions)
-        assert actions[0]["label"] == "Starting now"
-
-    def test_an_item_with_no_task_to_act_on_gets_no_buttons(self, tmp_path):
-        """A Classroom assignment with no Google Task cannot be started."""
-        service = self._service(tmp_path)
-        service._pending_unclaimed = {"key": "course:work", "title": "Essay"}
-
-        assert service._actions_for(OCCASIONS["nudge"]) is None
+        assert service._actions_for(OCCASIONS["start"]) is None
 
     def test_an_imminent_event_gets_no_buttons(self, tmp_path):
         service = self._service(tmp_path)
-        service._pending_unclaimed = {"id": "t1", "google_task_id": "t1", "title": "x"}
 
         assert service._actions_for(OCCASIONS["upcoming"]) is None
 

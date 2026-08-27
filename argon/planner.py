@@ -18,7 +18,7 @@ nag; before school lets out he does not yet know the answer.
 from __future__ import annotations
 
 import re
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from typing import Any
 
 from loguru import logger
@@ -212,6 +212,13 @@ BLOCK_JOB = f"{JOB_PREFIX}:block"
 #: he went out is the failure worth avoiding.
 BLOCK_WINDOW_MIN = 90
 
+#: When the evening starts if he never fills in the form. The lock at this hour
+#: is the thing that makes him fill it in: it lifts as soon as he does.
+DEFAULT_START_HHMM = "18:00"
+
+#: Sun-Thu, the evenings with a school day after them. Python weekday numbers.
+SCHOOL_NIGHTS = (6, 0, 1, 2, 3)
+
 #: Tagged so start_task's own block cleanly supersedes it, and so finishing a
 #: task never clears a block he did not raise from a task.
 BLOCK_SOURCE = "planner"
@@ -248,13 +255,36 @@ def start_datetime(hhmm: str | None = None, now: datetime | None = None) -> date
     return when if when > now else None
 
 
-def schedule_start(cron: Any, hhmm: str | None, now: datetime | None = None) -> dict[str, Any]:
-    """Arm the warning and the block for *hhmm*, replacing any earlier pair.
+def routine(now: datetime | None = None) -> dict[str, Any]:
+    """What the phone needs to build tonight's schedule for itself.
 
-    Cron sleeps until the next job rather than polling, so these fire on the
-    minute and survive a restart — which matters, because a block that starts
-    ten minutes late is not a start time, and one that never starts because the
-    service bounced is worse.
+    The clock moved to the device. A `DeviceActivitySchedule` fires with the app
+    closed, the server down and the network off; the server's cron could only
+    publish a desired mode and hope the phone was listening, and for six days it
+    was not — the app polls on a `Timer.scheduledTimer` that iOS suspends the
+    moment it backgrounds. So the server no longer decides *when*. It says what
+    time he chose and lets the phone keep it.
+    """
+    now = now or clock.now()
+    chosen = start_time()
+    return {
+        "start_at": chosen or DEFAULT_START_HHMM,
+        "chosen": chosen is not None,
+        "default_start": DEFAULT_START_HHMM,
+        "planned_today": last_planned() == clock.today_key(),
+        "school_nights": list(SCHOOL_NIGHTS),
+        "window_minutes": BLOCK_WINDOW_MIN,
+        "warning_minutes": WARNING_MINUTES,
+    }
+
+
+def schedule_start(cron: Any, hhmm: str | None, now: datetime | None = None) -> dict[str, Any]:
+    """Record the start he chose and clear any cron pair still armed for it.
+
+    This used to arm a warning job and a block job. Both are the phone's now —
+    see `routine`. What is left is the record and the cleanup, so an upgrade
+    from a version that armed them does not leave a block firing at a time he
+    has since changed.
     """
     removed = 0
     # list_jobs(), not a .jobs attribute — CronService has no such attribute, so
@@ -272,32 +302,4 @@ def schedule_start(cron: Any, hhmm: str | None, now: datetime | None = None) -> 
     if not hhmm:
         return {"start_at": None, "scheduled": [], "cleared": removed}
 
-    begins = start_datetime(hhmm, now=now)
-    if begins is None:
-        # Already past. The time is still recorded — it is what he intended —
-        # but arming a job for a moment that has gone would fire immediately.
-        return {"start_at": hhmm, "scheduled": [], "cleared": removed, "note": "already passed"}
-
-    from argon.services.cron import CronSchedule
-
-    scheduled = []
-    warn_at = begins - timedelta(minutes=WARNING_MINUTES)
-    if warn_at > (now or clock.now()):
-        cron.add_job(
-            name=NOTIFY_JOB,
-            schedule=CronSchedule(kind="at", at_ms=int(warn_at.timestamp() * 1000)),
-            message=hhmm,
-            kind="system_event",
-            delete_after_run=True,
-        )
-        scheduled.append({"job": NOTIFY_JOB, "at": warn_at.isoformat()})
-
-    cron.add_job(
-        name=BLOCK_JOB,
-        schedule=CronSchedule(kind="at", at_ms=int(begins.timestamp() * 1000)),
-        message=hhmm,
-        kind="system_event",
-        delete_after_run=True,
-    )
-    scheduled.append({"job": BLOCK_JOB, "at": begins.isoformat()})
-    return {"start_at": hhmm, "scheduled": scheduled, "cleared": removed}
+    return {"start_at": hhmm, "cleared": removed, "routine": routine(now)}

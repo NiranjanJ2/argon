@@ -74,6 +74,22 @@ def extract_message(raw: str) -> str:
     return text
 
 
+#: How a provider failure arrives here. `base.py` returns the exception as the
+#: response *content* with ``finish_reason="error"``, and only the string
+#: survives the trip through `on_check_in` - so on 2026-08-22 the 4 PM brief
+#: Niranjan received read "Error calling LLM: Error code: 504".
+#:
+#: ponytail: prefix match, because the structured signal is two layers away.
+#: Plumb `finish_reason` through `on_check_in` if a provider ever phrases a
+#: failure differently and one reaches him again.
+_PROVIDER_ERROR_PREFIXES = ("error calling llm:", "error code:", "error:")
+
+
+def is_provider_error(text: str) -> bool:
+    """Did the model fail rather than answer? Never deliverable."""
+    return (text or "").strip().lower().startswith(_PROVIDER_ERROR_PREFIXES)
+
+
 def is_silence(text: str) -> bool:
     """Is this a refusal rather than a message worth sending?"""
     stripped = (text or "").strip().strip('"').strip()
@@ -98,17 +114,26 @@ OCCASIONS: dict[str, Occasion] = {
     for o in (
         Occasion("upcoming", "something on his calendar starts shortly", 0),
         Occasion("daily_brief", "the after-school secretary brief is due", 0),
-        # The one follow-up. Work that is due soon and that he has said nothing
-        # about is the thing he actually wants chasing — but once, per item, per
-        # day. See `_unclaimed`.
-        Occasion("nudge", "work is due soon that he has not claimed a time for", 0),
+        # The one follow-up, and it is about starting at all - never about a
+        # particular assignment. The per-item version sent thirteen identical
+        # "When do you plan to start X?" messages in eight days and he answered
+        # none of them: it walked the board because `pick_occasion` gated the
+        # brief on `_ready` and the nudge on nothing, so the only thing consumed
+        # was the item. Scheduling was never the question he would answer.
+        Occasion("start", "his start time has passed and nothing has begun", 0),
     )
 }
 
-#: How far ahead something has to be due before it is worth asking about. Two
-#: days: tonight and tomorrow are real, and anything past that is not yet a
-#: question he needs to answer this evening.
-UNCLAIMED_WITHIN_DAYS = 2
+#: When the phone locks if he has not filled in the daily form. The schedule
+#: that enforces this lives on the device (DeviceActivitySchedule), which is
+#: what makes it land with the app closed; this constant is only so the server
+#: knows which moment to measure the follow-up from.
+DEFAULT_START_HHMM = "18:00"
+
+#: How long after the start he gets the one question. He naps after school and
+#: aims to begin around eight; an hour is long enough that a late start is a
+#: real choice rather than a slow evening.
+START_GRACE_MINUTES = 60
 
 #: Why there is no "your block is starting" occasion.
 #:
@@ -333,8 +358,6 @@ class ReminderService:
         self.ledger = CheckInLedger(workspace)
         #: The event that caused an `upcoming` occasion, handed to build_prompt.
         self._pending: dict[str, Any] | None = None
-        #: The one commitment a `nudge` (or the brief's question) is about.
-        self._pending_unclaimed: dict[str, Any] | None = None
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -442,49 +465,25 @@ class ReminderService:
                 "His board, verified just now:\n{}\n\n{}"
                 "Put overdue items or real conflicts first; otherwise use "
                 "deadline order. Two or three items is usually right.\n\n"
-                "{}"
             ).format(
                 self._schoolwork_lines(),
                 "Past due and still open:\n{}\n\n".format(overdue) if overdue else "",
-                self._ask_when_line(),
             )
 
-        if occasion.kind == "nudge" and self._pending_unclaimed:
-            row = self._pending_unclaimed
+        if occasion.kind == "start":
             return (
-                "HE HAS NOT CLAIMED THIS ONE: {}{}.\n"
-                "You already sent the brief and he has not said anything since. "
-                "This is the single follow-up you get on it — ask when he is "
-                "planning to start, and leave it there. Do not restate the whole "
-                "board, do not tell him to start now, and do not ask again "
-                "later: if he does not answer, that is his answer.\n\n"
-                .format(
-                    row.get("title"),
-                    " — due {}".format(row["due_when"]) if row.get("due_when") else "",
-                )
+                "HE HAS NOT STARTED ANYTHING TONIGHT. His start time was {} and "
+                "it passed over an hour ago.\n"
+                "This is the only follow-up you get, and it is about starting - "
+                "not about any one assignment. Do not name a task, do not list "
+                "the board, do not ask him to schedule anything: he has already "
+                "seen all of it in the brief. One short line asking whether he "
+                "is getting started, and leave it there. If he does not answer, "
+                "that is his answer.\n\n"
+                .format(self._start_hhmm())
             )
 
         return ""
-
-    def _ask_when_line(self) -> str:
-        """The brief's one question, about the one thing he has not claimed.
-
-        He does want chasing — that is most of the point — but about work he has
-        said nothing about, not about everything. Anything he has already given
-        a time is settled, and asking about it reads as arguing with a decision
-        he already made.
-        """
-        row = self._pending_unclaimed
-        if not row:
-            return ""
-        return (
-            "One thing has no time set aside for it yet: {}{}. End by asking "
-            "when he plans to start that one — a real question, only about "
-            "this. Do not propose a time for him.\n\n".format(
-                row.get("title"),
-                " (due {})".format(row["due_when"]) if row.get("due_when") else "",
-            )
-        )
 
     def _schoolwork_lines(self) -> str:
         """Classroom assignments due soon, as prompt lines. Never raises.
@@ -569,54 +568,57 @@ class ReminderService:
         event = agenda.starting_soon(self.workspace, ignore=self.ledger.announced)
         return event if event and event.get("id") else None
 
-    @staticmethod
-    def _nudge_key(row: dict[str, Any]) -> str:
-        """Dedupe key for asking about one commitment. Once per item per day."""
-        return "nudge:{}".format(row.get("key") or row.get("id") or row.get("title"))
+    def _start_hhmm(self) -> str:
+        """The time tonight is supposed to begin.
 
-    def _unclaimed(self) -> list[dict[str, Any]]:
-        """Work due soon that he has not said anything about.
-
-        This is the thing he actually wants chased. "Unclaimed" is deliberately
-        narrow: it is on the verified board, it is due inside
-        :data:`UNCLAIMED_WITHIN_DAYS`, and he has set no time for it — no
-        calendar entry, no block, no reminder. Deciding when to do something is
-        doing something about it, so anything with a time is left alone; the old
-        gate ignored that and told him to start work it had itself scheduled for
-        three hours later.
+        His own answer to the daily form if he gave one, otherwise the default
+        the phone locks on. Both are real starts - the second is the one he
+        chose by not choosing.
         """
-        from argon.services import agenda
-        from argon.tools.tasks import mark_scheduled, unscheduled
-
         try:
-            from argon.commitments import load_board
+            from argon import planner
 
-            board = load_board(self.workspace)
-        except Exception:  # noqa: BLE001 — never invent work from a failure
-            return []
-        if not board.source("tasks").ok:
-            return []   # absence of evidence is not an empty list
+            return planner.start_time() or DEFAULT_START_HHMM
+        except Exception:  # noqa: BLE001 - a planner fault is not a start time
+            return DEFAULT_START_HHMM
 
-        rows = board.as_dicts()
+    def _school_night(self, now: datetime) -> bool:
+        """Sunday through Thursday evening, when tomorrow is a school day.
+
+        ponytail: weekday only, no school calendar - it will be wrong on breaks
+        and holidays. Wire in the district calendar when a wrong evening in
+        December actually costs something.
+        """
+        return now.weekday() in (6, 0, 1, 2, 3)
+
+    def _has_started_today(self) -> bool:
+        """Has he begun anything today?
+
+        Two sources because they fail differently: a session in flight is the
+        live answer, and the day's log catches work he started and finished
+        before the follow-up came due. `start_task` is interactive-only, so
+        both of these mean he said so himself - which is the point. A block
+        Argon scheduled is not evidence that he began.
+        """
+        if self._state.get().get("mode") in ("working", "lock_in"):
+            return True
         try:
-            rows = mark_scheduled(
-                rows, agenda.upcoming(self.workspace) + self._plan.as_entries()
-            )
-        except Exception:  # noqa: BLE001 — a calendar outage must not invent a nudge
-            return []
+            from argon.productivity.log import DailyLog
 
-        horizon = (
-            datetime.fromisoformat(clock.today_key())
-            + timedelta(days=UNCLAIMED_WITHIN_DAYS)
-        ).strftime("%Y-%m-%d")
-        open_soon = [
-            row for row in unscheduled(rows)
-            if (due := (row.get("due") or "")[:10])
-            and due <= horizon
-            and not self.ledger.announced(self._nudge_key(row))
-        ]
-        open_soon.sort(key=lambda row: (row.get("due") or "9999", row.get("title") or ""))
-        return open_soon
+            return "Started:" in (DailyLog(self.workspace).read() or "")
+        except Exception:  # noqa: BLE001 - if we cannot tell, do not chase
+            return True
+
+    def _start_overdue(self, now: datetime) -> bool:
+        """Start time gone by an hour with nothing begun."""
+        try:
+            hour, minute = (int(part) for part in self._start_hhmm().split(":"))
+        except (ValueError, TypeError):
+            return False
+        began = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now < began + timedelta(minutes=START_GRACE_MINUTES):
+            return False
+        return not self._has_started_today()
 
     def _he_has_spoken_since(self, when: datetime) -> bool:
         """Has Niranjan said anything since *when*? Read from today's journal.
@@ -718,19 +720,22 @@ class ReminderService:
             and self._ready("daily_brief", now)
             and self.has_material()
         ):
-            self._pending_unclaimed = (self._unclaimed() or [None])[0]
             return OCCASIONS["daily_brief"]
 
-        # The one follow-up. Only after the brief has actually gone out, only
-        # while he has said nothing at all since it, and only for an item that
-        # is still unclaimed — answering, or giving it a time, ends it. Each
-        # item is asked about once a day and no more, which is the difference
-        # between chasing a loose end and the twelve-message evening.
-        brief_at = self.ledger.fired_at("daily_brief")
-        if brief_at is not None and not self._he_has_spoken_since(brief_at):
-            if unclaimed := self._unclaimed():
-                self._pending_unclaimed = unclaimed[0]
-                return OCCASIONS["nudge"]
+        # The one follow-up, gated on its own cooldown as well as everything
+        # above. `_ready` is the line that was missing before: without it a
+        # zero cooldown means "once per day" in the table and nothing at all in
+        # practice, and the occasion re-fires every tick it can find material.
+        # A follow-up needs something to follow. If the brief never went out —
+        # a provider outage, a day with no verified material — there is nothing
+        # for this to be the second half of.
+        if (
+            self.ledger.fired_at("daily_brief") is not None
+            and self._school_night(now)
+            and self._ready("start", now)
+            and self._start_overdue(now)
+        ):
+            return OCCASIONS["start"]
 
         return None
 
@@ -860,6 +865,13 @@ class ReminderService:
 
         said = await self.on_check_in(self.build_prompt(occasion))
         text = extract_message(said if isinstance(said, str) else "")
+        if is_provider_error(text):
+            # An outage is not a message and not a decision to stay quiet. The
+            # attempt recorded above holds the occasion for ATTEMPT_BACKOFF_MINUTES
+            # so this retries; consuming it here would spend the day's brief on a
+            # 504 - which is exactly what happened on 08/22.
+            logger.warning("Check-in ({}) failed upstream: {}", occasion.kind, text[:120])
+            return ""
         if is_silence(text):
             # The model genuinely had nothing to say. That is a real outcome for
             # a discretionary check-in, so it consumes the occasion.
@@ -917,10 +929,6 @@ class ReminderService:
         """
         if occasion.kind == "upcoming" and self._pending:
             self.ledger.record_announced(self._pending["id"])
-        # Asked about once, whether it was the brief's question or the one
-        # follow-up. "Never a third time" is enforced here, not by the model.
-        if occasion.kind in ("nudge", "daily_brief") and self._pending_unclaimed:
-            self.ledger.record_announced(self._nudge_key(self._pending_unclaimed))
 
     @staticmethod
     def _block_key(block: Any) -> str:
@@ -937,31 +945,17 @@ class ReminderService:
 
 
     def _actions_for(self, occasion: Occasion) -> list[dict[str, Any]] | None:
-        """Buttons for the item being asked about, if the channel can show them.
+        """Buttons, when the occasion is about one concrete thing.
 
-        A tap is the only unambiguous answer Argon gets: it carries a verb and a
-        task id chosen here, so "starting now" cannot be read as anything else.
-        Typing the same thing has to be interpreted, and interpretation is where
-        it decided he had begun work he had not begun.
+        ponytail: none for `start` - it is about starting at all, so there is no
+        task id to attach and the phone lock is what does the forcing. Add a
+        "starting now" tap if the one line turns out not to be enough.
         """
-        row = self._pending_unclaimed
-        if occasion.kind not in ("daily_brief", "nudge") or not row:
-            return None
-        task_id = row.get("google_task_id") or row.get("id")
-        if not task_id:
-            return None   # a Classroom item with no task to act on
-        title = row.get("title") or "it"
-        return [
-            {"label": "Starting now", "action": "start", "task_id": task_id, "title": title},
-            {"label": "Done", "action": "complete", "task_id": task_id, "title": title},
-            {"label": "Not tonight", "action": "defer", "task_id": task_id, "title": title},
-        ]
+        return None
 
     def _delivery_key(self, occasion: Occasion, now: datetime) -> str | None:
         """Idempotency key so a retry cannot deliver the same brief twice."""
         day = clock.today_key()
         if occasion.kind == "upcoming" and self._pending:
             return f"checkin:{day}:upcoming:{self._pending['id']}"
-        if occasion.kind == "nudge" and self._pending_unclaimed:
-            return f"checkin:{day}:{self._nudge_key(self._pending_unclaimed)}"
         return f"checkin:{day}:{occasion.kind}"
