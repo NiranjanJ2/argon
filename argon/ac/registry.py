@@ -11,6 +11,7 @@ declared broken.
 from __future__ import annotations
 
 import socket
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -20,9 +21,36 @@ from argon.core import store
 
 _DOC = "ac_units"
 
-#: The LAN is a /22. Broadcast alone missed two of three units, so discovery
-#: also probes the addresses already in the neighbour table.
+#: The LAN is a /22. Broadcast alone reaches nothing here - this AP drops
+#: client-to-client broadcast - so discovery also probes `_neighbours()`.
 BROADCASTS = ("255.255.255.255", "192.168.71.255")
+
+#: An ARP entry with these flags means nothing answered at that address.
+_ARP_INCOMPLETE = "0x0"
+
+
+def _neighbours() -> list[str]:
+    """Addresses the kernel has already resolved.
+
+    A unit whose DHCP lease moves is unreachable at its cached host, and the
+    re-find in `refresh_host` was meant to cover exactly that. It could not:
+    the only targets were two broadcasts this AP does not forward and the
+    stale address itself, so the scan found nothing and the unit stayed
+    "unreachable" while sitting two addresses away answering pings.
+
+    ponytail: /proc/net/arp, not a subnet sweep - a /22 is 1024 probes, and a
+    unit on this LAN has almost always answered an ARP already. If one ever
+    goes cold in the table before we look, sweep the /24 instead.
+    """
+    try:
+        rows = Path("/proc/net/arp").read_text().splitlines()[1:]
+    except OSError:  # not Linux, or /proc unmounted
+        return []
+    return [
+        fields[0]
+        for line in rows
+        if len(fields := line.split()) >= 3 and fields[2] != _ARP_INCOMPLETE
+    ]
 
 
 def _saved() -> dict[str, dict[str, Any]]:
@@ -73,6 +101,7 @@ def discover(timeout_s: float = 5.0, hosts: list[str] | None = None) -> list[dic
 
     targets = list(BROADCASTS) + list(hosts or [])
     targets += [u["host"] for u in known()]
+    targets += _neighbours()
     for target in targets:
         try:
             sock.sendto(b'{"t":"scan"}', (target, 7000))
