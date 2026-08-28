@@ -173,7 +173,6 @@ struct ArgonDashboardView: View {
         ForEach(tasks) { task in
           ArgonTaskRow(
             task: task,
-            isMutating: bridge.taskMutationIDs.contains(task.id),
             onToggle: { Task { await bridge.completeTask(task) } }
           )
           .contentShape(Rectangle())
@@ -330,7 +329,6 @@ struct ArgonDashboardView: View {
 /// thumb along, which is what a checklist is for.
 private struct ArgonTaskRow: View {
   let task: ArgonTask
-  let isMutating: Bool
   /// Ticking the circle. Separate from tapping the row, which starts the task.
   var onToggle: () -> Void = {}
 
@@ -362,8 +360,7 @@ private struct ArgonTaskRow: View {
         .contentShape(Rectangle())
       }
       .buttonStyle(.plain)
-      .disabled(isMutating)
-      .accessibilityLabel(task.isStarted ? "Complete \(task.title)" : "Complete \(task.title)")
+      .accessibilityLabel("Complete \(task.title)")
 
       VStack(alignment: .leading, spacing: 3) {
         Text(task.title)
@@ -394,11 +391,7 @@ private struct ArgonTaskRow: View {
 
       Spacer(minLength: 4)
 
-      if isMutating {
-        ProgressView()
-          .tint(ArgonPalette.iceBlue)
-          .padding(.top, 11)
-      } else if task.priority == "high" {
+      if task.priority == "high" {
         // Importance reads as one mark, the way a starred item does, instead of
         // a label on every row repeating what "medium" means.
         Image(systemName: "star.fill")

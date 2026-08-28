@@ -121,7 +121,15 @@ struct ArgonChatView: View {
       }
 
       VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 5) {
-        Text(message.text)
+        // Argon gets the full surface — bold, lists, checkboxes, rules. What he
+        // types is his own words and stays as he typed them, asterisks and all.
+        Group {
+          if message.role == .argon {
+            ArgonRichText(text: message.text, messageID: message.id.uuidString)
+          } else {
+            Text(message.text)
+          }
+        }
           .font(.system(size: 16, design: message.role == .argon ? .serif : .default))
           .foregroundStyle(ArgonPalette.ink)
           .textSelection(.enabled)
