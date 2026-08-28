@@ -824,7 +824,10 @@ final class ArgonBridge: ObservableObject {
         shielded: shielded,
         items: items,
         nextEvent: nextEvent,
-        waitingMessages: 0
+        // Was hardcoded 0, so the widget's unread badge could never appear -
+        // it renders `if snapshot.waitingMessages > 0`. There was nothing to
+        // count until the server grew a mailbox; now there is.
+        waitingMessages: unreadCount
       )
     )
     WidgetCenter.shared.reloadAllTimelines()
