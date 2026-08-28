@@ -274,6 +274,37 @@ def chat() -> Any:
     return _run_turn(message, IOS_SESSION)
 
 
+@app.get("/v1/messages")
+@require_token
+def messages() -> Any:
+    """Unprompted messages waiting for the app.
+
+    Collecting is not confirming. The app acks separately, because a response
+    lost on the way back would otherwise mark the brief delivered and he would
+    never see it — the same reason `argon.core.outbox` waits for the channel
+    rather than trusting the queue write.
+    """
+    from argon.ios import inbox
+
+    limit = min(int(request.args.get("limit", 20) or 20), 100)
+    return jsonify({
+        "pending": inbox.pending(),
+        "recent": inbox.recent(limit),
+    })
+
+
+@app.post("/v1/messages/ack")
+@require_token
+def messages_ack() -> Any:
+    """The app has these. This is the only thing that means delivered."""
+    from argon.ios import inbox
+
+    ids = _body().get("ids")
+    if not isinstance(ids, list):
+        return jsonify({"error": "ids must be a list"}), 400
+    return jsonify({"acknowledged": inbox.mark_fetched([str(i) for i in ids])})
+
+
 @app.post("/v1/webhook/<name>")
 @require_token
 def webhook(name: str) -> Any:

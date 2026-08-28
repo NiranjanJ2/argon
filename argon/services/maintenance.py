@@ -1,4 +1,4 @@
-"""Memory upkeep, on its own clock.
+"""Upkeep that must not sit behind the check-in switch.
 
 Consolidation used to ride the check-in loop: `ReminderService` was handed an
 `on_day_rollover` callback and called it once per tick. But `ReminderService.
@@ -10,6 +10,11 @@ the logs to say so.
 
 Remembering is not part of the unsolicited-message policy, so it does not live
 behind its switch. This lifecycle runs whenever the gateway runs.
+
+The app mailbox relay is here for the same reason and no other. Argon delivers
+unprompted messages to the iOS app now, but a mailbox cannot push: if he has not
+opened the app, a brief sitting in it is the same as no brief. Anything the app
+has not collected after `RELAY_AFTER_MINUTES` goes to Discord instead, once.
 
 Idempotence is the journal's, not this module's: `pending_day()` names the
 oldest finished day nobody has folded in yet, and `consolidate_day` marks it
@@ -31,6 +36,11 @@ from argon.core.journal import Journal
 #: it rode the check-in loop, so a backlog drains at the same rate.
 TICK_MINUTES = 10
 
+#: How long the app gets to collect its own mail before Discord is used. Long
+#: enough that opening the app after dinner keeps the evening in one place;
+#: short enough that a 4 PM brief is still about tonight when it lands.
+RELAY_AFTER_MINUTES = 90
+
 
 class MaintenanceService:
     """Folds finished days into long-term memory and sweeps the old pages.
@@ -47,9 +57,14 @@ class MaintenanceService:
         on_consolidate: Callable[[Journal, str], Awaitable[Any]],
         *,
         interval_minutes: int = TICK_MINUTES,
+        on_relay: Callable[..., Awaitable[Any]] | None = None,
     ) -> None:
         self.workspace = workspace
         self.on_consolidate = on_consolidate
+        #: Delivers a message the app never collected. Injected for the same
+        #: reason as `on_consolidate`: this service owns *which* messages are
+        #: overdue, the caller owns how to send one.
+        self.on_relay = on_relay
         self.interval_minutes = interval_minutes
         self.journal = Journal(workspace)
         self._running = False
@@ -88,6 +103,39 @@ class MaintenanceService:
 
     # -- work --------------------------------------------------------------
 
+    async def _relay_uncollected_mail(self) -> int:
+        """Send on anything the app has not come for. Never raises.
+
+        Marked relayed *after* the send is acknowledged, and only then, so a
+        failed relay is retried next tick instead of being recorded as sent.
+        That is the whole distinction the outbox exists to keep.
+        """
+        if self.on_relay is None:
+            return 0
+        from argon.ios import inbox
+
+        try:
+            overdue = inbox.stale(RELAY_AFTER_MINUTES)
+        except Exception:  # noqa: BLE001 - a store fault must not end upkeep
+            logger.exception("Could not read the app mailbox")
+            return 0
+
+        relayed = 0
+        for row in overdue:
+            try:
+                result = await self.on_relay(row["text"], key=f"relay:{row['id']}")
+            except Exception:  # noqa: BLE001 - next tick tries again
+                logger.exception("Relay of app message {} failed", row["id"])
+                continue
+            if result is False or getattr(result, "ok", True) is False:
+                logger.warning("Relay of app message {} was not delivered", row["id"])
+                continue
+            inbox.mark_relayed([row["id"]])
+            relayed += 1
+        if relayed:
+            logger.info("Relayed {} message(s) the app did not collect", relayed)
+        return relayed
+
     async def tick(self) -> str | None:
         """Fold at most one finished day in, then sweep. Returns the day, if any.
 
@@ -96,6 +144,8 @@ class MaintenanceService:
         unmarked so the next tick retries it, and says so in the log rather
         than losing the day quietly.
         """
+        await self._relay_uncollected_mail()
+
         day = self.journal.pending_day()
         if day is not None:
             try:

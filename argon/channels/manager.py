@@ -41,6 +41,7 @@ class ChannelManager:
     def _init_channels(self) -> None:
         """Initialize the channels enabled in config."""
         from argon.channels.discord import DiscordChannel
+        from argon.channels.ios import IOSChannel
         from argon.channels.whatsapp import WhatsAppChannel
 
         # Two channels, named explicitly. The upstream pkgutil + entry_points
@@ -48,6 +49,7 @@ class ChannelManager:
         # does not have.
         available: dict[str, type[BaseChannel]] = {
             "discord": DiscordChannel,
+            "ios": IOSChannel,
             "whatsapp": WhatsAppChannel,
         }
         groq = self.config.providers.get("groq")

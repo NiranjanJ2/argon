@@ -20,13 +20,24 @@ from pathlib import Path
 from loguru import logger
 
 #: Channels a message can actually be pushed to. An allowlist, not a denylist:
-#: ``cli``, ``ios``, ``webhook``, ``cron`` and ``heartbeat`` all arrive as
-#: inbound turns, and any of them recorded as the target would silently
-#: displace the one address Argon can reach Niranjan at.
-DELIVERABLE = {"discord", "whatsapp"}
+#: ``cli``, ``webhook``, ``cron`` and ``heartbeat`` all arrive as inbound turns,
+#: and any of them recorded as the target would silently displace the one
+#: address Argon can reach Niranjan at.
+DELIVERABLE = {"discord", "ios", "whatsapp"}
 
 #: Kept for callers that reason about the other direction.
-UNREACHABLE = {"cli", "system", "heartbeat", "ios", "webhook", "cron"}
+UNREACHABLE = {"cli", "system", "heartbeat", "webhook", "cron"}
+
+#: Where an unprompted message goes when more than one channel could take it.
+#: The app is where the day lives — the brief, the board, the daily form — so a
+#: message anywhere else is asking him to check a second place. Discord is not
+#: removed: `ios` cannot push, and a mailbox he has not opened is not a
+#: delivery, so `inbox.stale` relays what the app never came for.
+PREFERRED = ("ios", "discord", "whatsapp")
+
+#: The app's mailbox is one device, so the address is a constant rather than
+#: something learned from where he last spoke.
+IOS_CHAT_ID = "app"
 
 
 def _path(workspace: Path) -> Path:
@@ -34,8 +45,13 @@ def _path(workspace: Path) -> Path:
 
 
 def remember(workspace: Path, channel: str, chat_id: str) -> None:
-    """Record where Niranjan last spoke from. Never raises."""
-    if channel not in DELIVERABLE or not chat_id:
+    """Record where Niranjan last spoke from. Never raises.
+
+    ``ios`` is deliverable but never remembered: its address is a constant, and
+    recording it would displace the Discord DM that is the fallback when the app
+    does not collect its mail.
+    """
+    if channel not in DELIVERABLE or channel == "ios" or not chat_id:
         return
     path = _path(workspace)
     try:

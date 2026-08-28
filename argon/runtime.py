@@ -136,8 +136,17 @@ def build_runtime(config: Config) -> Runtime:
     channels = ChannelManager(config, bus, outbox=outbox)
 
     def pick_target() -> tuple[str, str]:
-        """Where to deliver a message Niranjan did not ask for."""
+        """Where to deliver a message Niranjan did not ask for.
+
+        The app outranks whatever he last happened to type on. Everything the
+        message is *about* — the board, the daily form, the block — is in the
+        app, so delivering the brief to Discord asks him to hold two places in
+        his head. The mailbox cannot push, so `inbox.stale` relays anything the
+        app does not come for; that is the fallback, not this.
+        """
         enabled = set(channels.enabled_channels)
+        if "ios" in enabled:
+            return "ios", target.IOS_CHAT_ID
         if remembered := target.recall(config.workspace_path, enabled):
             return remembered
         # Nothing recorded yet — fall back to the newest live session so a
@@ -383,7 +392,31 @@ def build_runtime(config: Config) -> Runtime:
 
         await consolidate_day(journal, hb_provider, hb_model, day)
 
-    maintenance = MaintenanceService(config.workspace_path, fold_day_into_memory)
+    async def relay_uncollected(response: str, *, key: str | None = None) -> Any:
+        """Deliver a message the app never collected, anywhere but the app.
+
+        `pick_target` prefers iOS, which is the whole reason this message is
+        stale — sending it there again would queue a second copy in the mailbox
+        he has not opened. So this deliberately skips the preference and takes
+        the remembered channel, which is the Discord DM.
+        """
+        enabled = set(channels.enabled_channels) - {"ios"}
+        remembered = target.recall(config.workspace_path, enabled)
+        if remembered is None:
+            logger.warning(
+                "App mailbox is stale and there is nowhere else to send it: {}",
+                response[:80],
+            )
+            return False
+        channel, chat_id = remembered
+        return await outbox.deliver(
+            key=key or f"relay:{int(_now_ms())}",
+            channel=channel, chat_id=chat_id, content=response, kind="unprompted",
+        )
+
+    maintenance = MaintenanceService(
+        config.workspace_path, fold_day_into_memory, on_relay=relay_uncollected
+    )
 
     async def on_check_in(prompt: str) -> str:
         """Generate a check-in candidate; ReminderService owns delivery policy."""
