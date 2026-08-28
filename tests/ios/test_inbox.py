@@ -72,6 +72,19 @@ def test_a_relayed_message_is_not_relayed_again():
     assert len(inbox.pending()) == 1
 
 
+def test_reading_the_thread_collects_the_mail():
+    """The app calls POST /v1/ios/read; that is the acknowledgement.
+
+    A separate ack endpoint would be a second way to say the same thing, and
+    the app was already written against this one.
+    """
+    row = inbox.put("Here is tonight.")
+
+    assert inbox.mark_fetched([r["id"] for r in inbox.pending()]) == 1
+    assert inbox.pending() == []
+    assert row["text"] in [m["text"] for m in inbox.recent()]
+
+
 def test_pending_mail_survives_the_trim():
     """Trimming keeps the mailbox bounded; an unfetched message is a promise."""
     promised = inbox.put("Do not lose me.")

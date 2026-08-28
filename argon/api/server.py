@@ -277,32 +277,55 @@ def chat() -> Any:
 @app.get("/v1/messages")
 @require_token
 def messages() -> Any:
-    """Unprompted messages waiting for the app.
+    """The conversation as the server holds it, newest last.
 
-    Collecting is not confirming. The app acks separately, because a response
-    lost on the way back would otherwise mark the brief delivered and he would
-    never see it — the same reason `argon.core.outbox` waits for the channel
-    rather than trusting the queue write.
+    Two sources, because unprompted messages never went through a turn: the
+    iOS session transcript is what he and Argon said to each other, and the
+    mailbox is what Argon started on its own. Merged by timestamp so the thread
+    reads in the order it happened.
     """
     from argon.ios import inbox
 
-    limit = min(int(request.args.get("limit", 20) or 20), 100)
-    return jsonify({
-        "pending": inbox.pending(),
-        "recent": inbox.recent(limit),
-    })
+    limit = min(int(request.args.get("limit", 50) or 50), 200)
+    rows: list[dict[str, Any]] = []
+
+    # A SessionManager needs a workspace and nothing else, so it is built here
+    # rather than threaded through the runtime shim for one read.
+    from argon.core.session import SessionManager
+
+    ws = _rt.config.workspace_path if _rt.config else argon_home()
+    try:
+        session = SessionManager(ws).get_or_create(IOS_SESSION)
+        # `session.messages`, not `get_history`: that one is shaped for LLM
+        # input and drops the timestamps, which is the only thing ordering this
+        # thread against the mailbox.
+        for turn in session.messages[-(limit * 2):]:
+            role, text = turn.get("role"), (turn.get("content") or "").strip()
+            # Tool traffic is not conversation, and an assistant turn with no
+            # content is the model calling a tool rather than speaking.
+            if role in ("user", "assistant") and text:
+                rows.append({"role": role, "text": text, "at": turn.get("timestamp")})
+    except Exception:  # noqa: BLE001 - a damaged transcript must not hide the mail
+        logger.exception("Could not read the iOS transcript")
+
+    for row in inbox.recent(limit):
+        rows.append({"role": "assistant", "text": row["text"], "at": row["created_at"]})
+
+    rows.sort(key=lambda r: r.get("at") or "")
+    return jsonify({"messages": rows[-limit:], "unread": len(inbox.pending())})
 
 
-@app.post("/v1/messages/ack")
+@app.post("/v1/ios/read")
 @require_token
-def messages_ack() -> Any:
-    """The app has these. This is the only thing that means delivered."""
+def messages_read() -> Any:
+    """He is looking at the thread, so the mailbox has been collected.
+
+    Reading *is* the acknowledgement. A separate ack endpoint would be a second
+    way to say the same thing, and the app already calls this one.
+    """
     from argon.ios import inbox
 
-    ids = _body().get("ids")
-    if not isinstance(ids, list):
-        return jsonify({"error": "ids must be a list"}), 400
-    return jsonify({"acknowledged": inbox.mark_fetched([str(i) for i in ids])})
+    return jsonify({"acknowledged": inbox.mark_fetched([r["id"] for r in inbox.pending()])})
 
 
 @app.post("/v1/webhook/<name>")
