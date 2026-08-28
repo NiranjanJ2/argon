@@ -55,3 +55,40 @@ struct ArgonMarkdownTests {
     #expect(first[1].id == "c:abc:1")
   }
 }
+
+struct ArgonActionTests {
+  @Test func aLineOfArgonLinksBecomesButtons() {
+    let blocks = ArgonMarkdown.blocks(
+      "[Start HW 9](argon:start/abc123) [Done](argon:complete/abc123)", messageID: "m")
+
+    guard case .actions(let row) = blocks[0] else {
+      Issue.record("expected buttons, got \(blocks)")
+      return
+    }
+    #expect(row.count == 2)
+    #expect(row[0] == ArgonAction(label: "Start HW 9", url: "argon:start/abc123"))
+    #expect(row[1].verb == "complete")
+    #expect(row[1].taskID == "abc123")
+  }
+
+  @Test func aSentenceContainingALinkStaysProse() {
+    // Otherwise a message ending in a link would lose its sentence.
+    let blocks = ArgonMarkdown.blocks(
+      "Ready when you are — [Start](argon:start/abc123)", messageID: "m")
+
+    #expect(blocks == [.paragraph("Ready when you are — [Start](argon:start/abc123)")])
+  }
+
+  @Test func anOrdinaryLinkIsNotAButton() {
+    let blocks = ArgonMarkdown.blocks("[Classroom](https://classroom.google.com)", messageID: "m")
+
+    #expect(blocks == [.paragraph("[Classroom](https://classroom.google.com)")])
+  }
+
+  @Test func aMalformedArgonLinkIsNotAnAction() {
+    // Better to render the raw text than to build a button that acts on nothing.
+    #expect(ArgonAction(label: "x", url: "argon:start") == nil)
+    #expect(ArgonAction(label: "x", url: "argon:/abc") == nil)
+    #expect(ArgonAction(label: "x", url: "argon:start/") == nil)
+  }
+}

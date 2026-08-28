@@ -125,7 +125,24 @@ struct ArgonChatView: View {
         // types is his own words and stays as he typed them, asterisks and all.
         Group {
           if message.role == .argon {
-            ArgonRichText(text: message.text, messageID: message.id.uuidString)
+            ArgonRichText(
+              text: message.text,
+              messageID: message.id.uuidString,
+              onAction: { action in
+                // Straight to the domain operation the dashboard already uses,
+                // so a tap here lands everywhere at once: mode, daily log, the
+                // check-in gate and both widgets.
+                guard let task = bridge.tasks.first(where: { $0.id == action.taskID })
+                else { return }
+                Task {
+                  switch action.verb {
+                  case "start": await bridge.startTask(task)
+                  case "complete", "done": await bridge.completeTask(task)
+                  default: break
+                  }
+                }
+              }
+            )
           } else {
             Text(message.text)
           }
