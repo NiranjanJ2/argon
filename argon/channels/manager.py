@@ -67,11 +67,13 @@ class ChannelManager:
             if not enabled:
                 continue
             try:
-                channel = (
-                    cls(section, self.bus, webhook_port=self.config.api.port)
-                    if name == "whatsapp"
-                    else cls(section, self.bus)
-                )
+                if name == "whatsapp":
+                    channel = cls(section, self.bus, webhook_port=self.config.api.port)
+                elif name == "ios":
+                    # The doorbell needs the whole Config to reach APNs.
+                    channel = cls(section, self.bus, config_root=self.config)
+                else:
+                    channel = cls(section, self.bus)
                 channel.transcription_api_key = groq_key
                 self.channels[name] = channel
                 logger.info("{} channel enabled", cls.display_name)
