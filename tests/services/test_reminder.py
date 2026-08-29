@@ -607,6 +607,28 @@ class TestTheOneFollowUp:
         DailyLog(tmp_path).log_task_started("HW 9")
         assert service.pick_occasion() is None
 
+    def test_work_started_yesterday_does_not_end_today(self, tmp_path, monkeypatch):
+        """DailyLog.read() appends yesterday's page when today's is thin, so a
+        task started last night read as "he has already begun" and the follow-up
+        could never fire again. Only today counts."""
+        from argon.productivity.log import DailyLog
+
+        service, clock = _service(tmp_path, monkeypatch, _at(19, 5))
+        self._after_the_brief(service, clock, monkeypatch)
+
+        yesterday = (clock.now - timedelta(days=1)).strftime("%Y-%m-%d")
+        (tmp_path / "daily").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "daily" / f"{yesterday}.md").write_text(
+            f"# Daily Log — {yesterday}\n\n**[21:38]** `task` Started: **HW 10**\n"
+        )
+
+        assert not service._has_started_today()
+        assert service.pick_occasion().kind == "start"
+
+        DailyLog(tmp_path).log_task_started("HW 11")
+        assert service._has_started_today()
+        assert service.pick_occasion() is None
+
     def test_a_session_in_flight_ends_it(self, tmp_path, monkeypatch):
         service, clock = _service(tmp_path, monkeypatch, _at(19, 5))
         self._after_the_brief(service, clock, monkeypatch)

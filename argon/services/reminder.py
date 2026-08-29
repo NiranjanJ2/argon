@@ -605,7 +605,11 @@ class ReminderService:
         try:
             from argon.productivity.log import DailyLog
 
-            return "Started:" in (DailyLog(self.workspace).read() or "")
+            # `get_path()`, not `read()`: read() appends yesterday's page when
+            # today's is thin, so a task started last night read as "he has
+            # already begun" and the follow-up could never fire again.
+            page = DailyLog(self.workspace).get_path()
+            return "Started:" in (page.read_text() if page.exists() else "")
         except Exception:  # noqa: BLE001 - if we cannot tell, do not chase
             return True
 
