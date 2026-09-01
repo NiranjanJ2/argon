@@ -59,7 +59,8 @@ def _now(monkeypatch, when: datetime) -> None:
 def _situation(watch, monkeypatch, **over):
     base = {"mode": "idle", "current_task": None, "started_today": False,
             "due_now": [{"title": "HW 12", "due_when": "Tue 09/01"}],
-            "shielded": False, "phone": "converged", "override": False}
+            "shielded": False, "phone": "converged", "override": False,
+            "before_start": False}
     base.update(over)
     monkeypatch.setattr(watch, "_situation", lambda: base)
     return base
@@ -200,3 +201,29 @@ async def test_an_emergency_override_stands_the_watch_down(watch, monkeypatch):
     await watch._tick()
 
     assert watch.ran == [] and watch.spoke == []
+
+
+@pytest.mark.asyncio
+async def test_it_does_not_push_him_before_his_own_start_time(watch, monkeypatch):
+    """He gets home at four and naps. Not working before the time he chose is
+    the plan, not a lapse.
+
+    `napping` cannot cover this: the mode has to be set by hand and has never
+    once been set in a month of running, so a guard resting on it is dead code.
+    """
+    _now(monkeypatch, _at(16, 30))
+    _situation(watch, monkeypatch, before_start=True)
+
+    await watch._tick()
+
+    assert watch.ran == [] and watch.spoke == []
+
+
+@pytest.mark.asyncio
+async def test_after_his_start_time_it_pushes(watch, monkeypatch):
+    _now(monkeypatch, _at(21, 0))
+    _situation(watch, monkeypatch, before_start=False)
+
+    await watch._tick()
+
+    assert len(watch.ran) == 1

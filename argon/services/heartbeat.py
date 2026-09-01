@@ -147,6 +147,7 @@ class HeartbeatService:
         out: dict[str, Any] = {
             "mode": "idle", "current_task": None, "started_today": False,
             "due_now": [], "shielded": False, "phone": "unknown", "override": False,
+            "before_start": False,
         }
         try:
             data = DailyState(self.workspace).get()
@@ -178,6 +179,18 @@ class HeartbeatService:
             pass
 
         try:
+            from argon import clock, planner
+
+            hhmm = planner.start_time() or planner.DEFAULT_START_HHMM
+            hour, minute = (int(x) for x in hhmm.split(":"))
+            now = clock.now()
+            out["before_start"] = now < now.replace(
+                hour=hour, minute=minute, second=0, microsecond=0
+            )
+        except Exception:  # noqa: BLE001 - a planner fault must not license a nudge
+            out["before_start"] = True
+
+        try:
             from argon.ios import mode as ios_mode
 
             out["shielded"] = bool(ios_mode.get_actual().get("shielded"))
@@ -197,6 +210,12 @@ class HeartbeatService:
         if situation["mode"] in ("working", "lock_in"):
             return None  # he is at it; the watch exists to leave him alone
         if situation["mode"] in ("napping", "done"):
+            return None
+        if situation["before_start"]:
+            # He gets home at four and naps; the evening he chose starts later.
+            # Not working before his own start time is the plan, not a lapse —
+            # and `napping` cannot cover this because it has to be set by hand
+            # and has never once been set in a month of running.
             return None
         if situation["override"]:
             # He pulled the emergency release. Without this the watch simply
