@@ -287,3 +287,20 @@ class TestTheExpensiveReadComesLast:
 
         assert crawls == [1]
         assert service._decide(situation) == "nothing is running and work is due"
+
+
+@pytest.mark.asyncio
+async def test_an_unplanned_day_is_not_pushed(watch, monkeypatch):
+    """He naps until six or seven, then plans, then starts around eight.
+
+    With no start time chosen there is nothing to be late for, and what he owes
+    at that hour is the plan, not the work. The phone lock at DEFAULT_START_HHMM
+    collects that debt; pushing him to work before he has decided what to work
+    on is the check-in nudge all over again.
+    """
+    _now(monkeypatch, _at(19, 0))
+    _situation(watch, monkeypatch, before_start=True)
+
+    await watch._tick()
+
+    assert watch.ran == [] and watch.spoke == []
