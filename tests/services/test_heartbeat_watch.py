@@ -227,3 +227,63 @@ async def test_after_his_start_time_it_pushes(watch, monkeypatch):
     await watch._tick()
 
     assert len(watch.ran) == 1
+
+
+class TestTheExpensiveReadComesLast:
+    """Classroom is cached for 120s and the tick is far longer, so every tick
+    that reaches the board pays for a fresh crawl. The local reads get to say
+    no first — otherwise halving the interval doubles the Google traffic for
+    answers that could not have changed the outcome."""
+
+    def _watch(self, tmp_path, monkeypatch, **state):
+        crawls = []
+        service = HeartbeatService(workspace=tmp_path, provider=None, model="x")
+        monkeypatch.setattr(service, "_due_now",
+                            lambda: crawls.append(1) or [{"title": "HW 12"}])
+        base = {"mode": "idle", "started_today": False, "override": False,
+                "before_start": False}
+        base.update(state)
+        for k, v in base.items():
+            monkeypatch.setattr(type(service), "_probe_" + k, property(lambda s, v=v: v),
+                                raising=False)
+        return service, crawls, base
+
+    @pytest.mark.parametrize("state", [
+        {"before_start": True},
+        {"override": True},
+        {"mode": "working"},
+        {"mode": "lock_in"},
+        {"mode": "napping"},
+        {"mode": "done"},
+    ])
+    def test_a_cheap_no_never_touches_the_board(self, tmp_path, monkeypatch, state):
+        service, crawls, base = self._watch(tmp_path, monkeypatch, **state)
+
+        # Drive the real _situation with the local reads stubbed out.
+        monkeypatch.setattr("argon.productivity.state.DailyState.get",
+                            lambda self: {"mode": base["mode"], "current_task": None})
+        monkeypatch.setattr("argon.ios.mode.override_status", lambda: (base["override"], None))
+        monkeypatch.setattr("argon.ios.mode.get_actual", lambda: {"shielded": False})
+        monkeypatch.setattr("argon.ios.mode.convergence", lambda: ("converged", ""))
+        monkeypatch.setattr("argon.planner.start_time",
+                            lambda: "23:59" if base["before_start"] else "00:01")
+
+        situation = service._situation()
+
+        assert crawls == [], f"{state} should not have crawled the board"
+        assert service._decide(situation) is None
+
+    def test_an_evening_that_could_act_does_read_the_board(self, tmp_path, monkeypatch):
+        service, crawls, base = self._watch(tmp_path, monkeypatch)
+
+        monkeypatch.setattr("argon.productivity.state.DailyState.get",
+                            lambda self: {"mode": "idle", "current_task": None})
+        monkeypatch.setattr("argon.ios.mode.override_status", lambda: (False, None))
+        monkeypatch.setattr("argon.ios.mode.get_actual", lambda: {"shielded": False})
+        monkeypatch.setattr("argon.ios.mode.convergence", lambda: ("converged", ""))
+        monkeypatch.setattr("argon.planner.start_time", lambda: "00:01")
+
+        situation = service._situation()
+
+        assert crawls == [1]
+        assert service._decide(situation) == "nothing is running and work is due"

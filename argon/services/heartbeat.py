@@ -165,20 +165,6 @@ class HeartbeatService:
             pass
 
         try:
-            from argon import clock
-            from argon.commitments import load_board
-
-            board = load_board(self.workspace)
-            if board.source("tasks").ok:
-                today = clock.today_key()
-                out["due_now"] = [
-                    r for r in board.as_dicts()
-                    if (r.get("due") or "")[:10] and (r.get("due") or "")[:10] <= today
-                ]
-        except Exception:  # noqa: BLE001 - never invent work from a failure
-            pass
-
-        try:
             from argon import clock, planner
 
             hhmm = planner.start_time() or planner.DEFAULT_START_HHMM
@@ -198,7 +184,36 @@ class HeartbeatService:
             out["override"] = ios_mode.override_status()[0]
         except Exception:  # noqa: BLE001
             pass
+
+        # The board is the only expensive read here — Classroom is cached for
+        # 120s and the tick is far longer than that, so every tick that reaches
+        # it pays for a fresh crawl. Everything above is a local file, so the
+        # cheap answers get to say no first: before his start time, mid-work, or
+        # under an override, what is due cannot change the outcome.
+        if not (
+            out["before_start"]
+            or out["override"]
+            or out["mode"] in ("working", "lock_in", "napping", "done")
+        ):
+            out["due_now"] = self._due_now()
         return out
+
+    def _due_now(self) -> list[dict[str, Any]]:
+        """Work due today or already overdue. Empty on any failure."""
+        try:
+            from argon import clock
+            from argon.commitments import load_board
+
+            board = load_board(self.workspace)
+            if not board.source("tasks").ok:
+                return []   # absence of evidence is not an empty board
+            today = clock.today_key()
+            return [
+                r for r in board.as_dicts()
+                if (due := (r.get("due") or "")[:10]) and due <= today
+            ]
+        except Exception:  # noqa: BLE001 - never invent work from a failure
+            return []
 
     def _decide(self, situation: dict[str, Any]) -> str | None:
         """Why the agent should wake, or None to stay quiet.
