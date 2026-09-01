@@ -9,15 +9,14 @@ import secrets
 import string
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import json_repair
 from openai import AsyncOpenAI
 
+from argon.providers import budget
 from argon.providers.base import LLMProvider, LLMResponse, ToolCallRequest
-
-if TYPE_CHECKING:
-    from argon.providers.registry import ProviderSpec
+from argon.providers.registry import ProviderSpec
 
 _ALLOWED_MSG_KEYS = frozenset({
     "role", "content", "tool_calls", "tool_call_id", "name",
@@ -629,6 +628,20 @@ class OpenAICompatProvider(LLMProvider):
         return any(k in msg for k in ("model not found", "no such model", "not available", "does not exist"))
 
     @staticmethod
+    def _meter(model: str, response: Any) -> None:
+        """Bank what the call cost. Never raises — a meter must not break a turn."""
+        try:
+            u = getattr(response, "usage", None) or {}
+            budget.record(
+                model,
+                int(u.get("prompt_tokens") or 0),
+                int(u.get("completion_tokens") or 0),
+                int(u.get("cached_tokens") or 0),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    @staticmethod
     def _is_provider_refusal(e: Exception) -> bool:
         """True when the *provider* is refusing, not the model or the request."""
         status = getattr(e, "status_code", None) or getattr(
@@ -657,7 +670,10 @@ class OpenAICompatProvider(LLMProvider):
             reasoning_effort, tool_choice,
         )
         try:
-            return self._parse(await self._client.chat.completions.create(**kwargs))
+            budget.check(kwargs.get("model") or "")
+            parsed = self._parse(await self._client.chat.completions.create(**kwargs))
+            self._meter(kwargs.get("model") or "", parsed)
+            return parsed
         except Exception as e:
             if self.fallback_model and model is None and self._is_model_unavailable(e):
                 from loguru import logger
