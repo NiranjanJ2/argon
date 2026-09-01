@@ -378,6 +378,8 @@ def build_runtime(config: Config) -> Runtime:
         interval_s=hb_cfg.interval_s,
         enabled=hb_cfg.enabled,
         timezone=config.agents.defaults.timezone,
+        active_from_hour=hb_cfg.active_from_hour,
+        active_until_hour=hb_cfg.active_until_hour,
     )
 
     async def fold_day_into_memory(journal, day: str) -> None:

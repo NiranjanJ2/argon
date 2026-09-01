@@ -132,6 +132,10 @@ class HeartbeatConfig(Base):
     keep_recent_messages: int = 8
     model: str | None = "openai/gpt-oss-120b"
     provider: str | None = None
+    #: The watch runs his evening only — home from school to midnight. Outside
+    #: it there is either nothing to watch or nothing he should be doing.
+    active_from_hour: int = 16
+    active_until_hour: int = 0
 
 
 class CheckInConfig(Base):

@@ -1,4 +1,20 @@
-"""Heartbeat service - periodic agent wake-up to check for tasks."""
+"""The evening watch: is he working, and if not, does something need to happen.
+
+This ran 1,531 times in August and spent zero model calls, because Phase 1 asked
+the model to review a HEARTBEAT.md that had never been written in. The service
+was alive and the agent inside it had never once woken up — which is why nothing
+ever reminded him about pending work or turned Screen Time on by itself.
+
+Two things changed. The window is now his evening rather than all day, and the
+decision to wake the agent is read from **state** instead of asked of a model
+looking at static markdown. `_situation` is ordinary Python over DailyState, the
+board and the phone: it is free, it cannot hallucinate, and it says no far more
+often than yes.
+
+The self-limiting property is the point. The watch fires only when he is *not*
+working; if it engages a focus session, the next tick sees `working` and stands
+down. Acting once and going quiet is the behaviour a nagging loop never had.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +24,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from loguru import logger
+
+from argon.services.reminder import extract_message, is_silence
 
 if TYPE_CHECKING:
     from argon.providers.base import LLMProvider
@@ -61,6 +79,8 @@ class HeartbeatService:
         interval_s: int = 30 * 60,
         enabled: bool = True,
         timezone: str | None = None,
+        active_from_hour: int = 16,
+        active_until_hour: int = 0,
     ):
         self.workspace = workspace
         self.provider = provider
@@ -70,6 +90,10 @@ class HeartbeatService:
         self.interval_s = interval_s
         self.enabled = enabled
         self.timezone = timezone
+        #: The evening only. Before he is home there is nothing to watch, and
+        #: after midnight the answer to "should you be working" is no.
+        self.active_from_hour = active_from_hour
+        self.active_until_hour = active_until_hour
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -100,31 +124,88 @@ class HeartbeatService:
         )
         return content if body.strip() else None
 
-    async def _decide(self, content: str) -> tuple[str, str]:
-        """Phase 1: ask LLM to decide skip/run via virtual tool call.
+    def _in_window(self) -> bool:
+        """His evening. Wraps past midnight if the hours are set that way."""
+        from argon import clock
 
-        Returns (action, tasks) where action is 'skip' or 'run'.
+        hour = clock.now().hour
+        a, b = self.active_from_hour, self.active_until_hour
+        if a == b:
+            return True
+        return a <= hour < b if a < b else (hour >= a or hour < b)
+
+    def _situation(self) -> dict[str, Any]:
+        """What is true right now. No model, no network beyond cached reads.
+
+        Everything here is a fact the rest of Argon already maintains. Asking a
+        model to infer it from prose was the old Phase 1, and it is how a watch
+        that should have said "he is working, leave him alone" instead said
+        nothing at all for a month.
         """
-        from argon.utils.helpers import current_time_str
+        from argon.productivity.state import DailyState
 
-        response = await self.provider.chat_with_retry(
-            messages=[
-                {"role": "system", "content": "You are a heartbeat agent. Call the heartbeat tool to report your decision."},
-                {"role": "user", "content": (
-                    f"Current Time: {current_time_str(self.timezone)}\n\n"
-                    "Review the following HEARTBEAT.md and decide whether there are active tasks.\n\n"
-                    f"{content}"
-                )},
-            ],
-            tools=_HEARTBEAT_TOOL,
-            model=self.model,
-        )
+        out: dict[str, Any] = {
+            "mode": "idle", "current_task": None, "started_today": False,
+            "due_now": [], "shielded": False, "phone": "unknown", "override": False,
+        }
+        try:
+            data = DailyState(self.workspace).get()
+            out["mode"] = data.get("mode", "idle")
+            out["current_task"] = data.get("current_task")
+        except Exception:  # noqa: BLE001 - a fault must not wake the agent
+            return out
 
-        if not response.has_tool_calls:
-            return "skip", ""
+        try:
+            from argon.productivity.log import DailyLog
 
-        args = response.tool_calls[0].arguments
-        return args.get("action", "skip"), args.get("tasks", "")
+            page = DailyLog(self.workspace).get_path()
+            out["started_today"] = "Started:" in (page.read_text() if page.exists() else "")
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            from argon import clock
+            from argon.commitments import load_board
+
+            board = load_board(self.workspace)
+            if board.source("tasks").ok:
+                today = clock.today_key()
+                out["due_now"] = [
+                    r for r in board.as_dicts()
+                    if (r.get("due") or "")[:10] and (r.get("due") or "")[:10] <= today
+                ]
+        except Exception:  # noqa: BLE001 - never invent work from a failure
+            pass
+
+        try:
+            from argon.ios import mode as ios_mode
+
+            out["shielded"] = bool(ios_mode.get_actual().get("shielded"))
+            out["phone"] = ios_mode.convergence()[0]
+            out["override"] = ios_mode.override_status()[0]
+        except Exception:  # noqa: BLE001
+            pass
+        return out
+
+    def _decide(self, situation: dict[str, Any]) -> str | None:
+        """Why the agent should wake, or None to stay quiet.
+
+        Deliberately narrow. Being mid-work is not an occasion — that is the one
+        lesson every removed nudge in this codebase taught — so the only thing
+        this watch acts on is an evening with work due and nothing running.
+        """
+        if situation["mode"] in ("working", "lock_in"):
+            return None  # he is at it; the watch exists to leave him alone
+        if situation["mode"] in ("napping", "done"):
+            return None
+        if situation["override"]:
+            # He pulled the emergency release. Without this the watch simply
+            # locks him again on the next tick, which turns "let me out" into a
+            # thing he has to keep saying — the nagging failure, with a shield.
+            return None
+        if not situation["due_now"]:
+            return None
+        return "nothing is running and work is due"
 
     async def start(self) -> None:
         """Start the heartbeat service."""
@@ -159,41 +240,88 @@ class HeartbeatService:
                 logger.error("Heartbeat error: {}", e)
 
     async def _tick(self) -> None:
-        """Execute a single heartbeat tick."""
-        from argon.utils.evaluator import evaluate_response
+        """One look at the evening."""
+        from argon import clock
 
-        content = self._read_heartbeat_file()
-        if not content:
-            # Headings and HTML comments are stripped, so the shipped template
-            # reads as empty. Saying "missing" sent me looking for a file that
-            # was sitting right there.
-            logger.debug("Heartbeat: no active tasks in HEARTBEAT.md, skipping")
+        if not self._in_window():
             return
 
-        logger.info("Heartbeat: checking for tasks...")
+        situation = self._situation()
+        reason = self._decide(situation)
+        if reason is None:
+            logger.debug(
+                "Heartbeat: standing down (mode={}, due={})",
+                situation["mode"], len(situation["due_now"]),
+            )
+            return
+
+        logger.info("Heartbeat: {}", reason)
+        if not self.on_execute:
+            return
 
         try:
-            action, tasks = await self._decide(content)
-
-            if action != "run":
-                logger.info("Heartbeat: OK (nothing to report)")
-                return
-
-            logger.info("Heartbeat: tasks found, executing...")
-            if self.on_execute:
-                response = await self.on_execute(tasks)
-
-                if response:
-                    should_notify = await evaluate_response(
-                        response, tasks, self.provider, self.model,
-                    )
-                    if should_notify and self.on_notify:
-                        logger.info("Heartbeat: completed, delivering response")
-                        await self.on_notify(response)
-                    else:
-                        logger.info("Heartbeat: silenced by post-run evaluation")
+            response = await self.on_execute(self._prompt(situation))
         except Exception:
             logger.exception("Heartbeat execution failed")
+            return
+        if not response:
+            return
+
+        text = extract_message(response)
+        if is_silence(text):
+            logger.info("Heartbeat: acted, nothing worth saying")
+            return
+        if self.on_notify is None:
+            return
+
+        # At most one heartbeat message an hour. The outbox dedupes on this key,
+        # so a watch that fires every 30 minutes cannot become the twelve-message
+        # evening the check-in nudges already were.
+        now = clock.now()
+        key = f"heartbeat:{clock.today_key()}:{now.hour}"
+        try:
+            await self.on_notify(text, key=key)
+        except TypeError:
+            await self.on_notify(text)
+        logger.info("Heartbeat spoke: {}", text[:80])
+
+    def _prompt(self, situation: dict[str, Any]) -> str:
+        """What the agent is woken with.
+
+        It is handed the state rather than told to go and look, for the same
+        reason the brief inlines the board: the model reliably skips an optional
+        tool call, and a watch that skipped `get_status` would be guessing about
+        the one thing it exists to know.
+        """
+        from argon.utils.helpers import current_time_str
+
+        due = situation["due_now"]
+        lines = "\n".join(
+            "- {}{}".format(r.get("title"), f" (due {r['due_when']})" if r.get("due_when") else "")
+            for r in due[:6]
+        ) or "- nothing"
+        phone = (
+            "shielded" if situation["shielded"]
+            else f"not shielded ({situation['phone']})"
+        )
+        return (
+            f"It is {current_time_str(self.timezone)} and this is the evening watch.\n\n"
+            f"He is not working on anything right now (mode: {situation['mode']}). "
+            f"He has {'started something' if situation['started_today'] else 'started nothing'} "
+            f"today. His phone is {phone}.\n\n"
+            f"Due today or overdue:\n{lines}\n\n"
+            "Your job is to get him working, not to ask him whether he will. "
+            "If a focus session would help, start one with set_focus_mode and say "
+            "one short line about what you did and why. If he is plainly not "
+            "available — out, eating, mid-conversation — do nothing.\n\n"
+            "Answer in exactly this form:\n"
+            "THINKING: <your reasoning — he never sees this>\n"
+            "MESSAGE: <one or two lines, or the single word SKIP>\n\n"
+            "Every task you name must appear above. Do not restate the whole "
+            "list, do not repeat what you said earlier today, and do not ask him "
+            "when he plans to start — that question has been asked thirteen times "
+            "and answered none."
+        )
 
     async def trigger_now(self) -> str | None:
         """Manually trigger a heartbeat."""
