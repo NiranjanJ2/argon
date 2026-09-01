@@ -72,3 +72,34 @@ def test_the_cap_is_per_calendar_month(monkeypatch):
     monkeypatch.setattr(budget, "_month", lambda: "2099-01")
     assert budget.spent() == 0.0
     budget.check("gpt-5.6-luna")   # a new month starts clean
+
+
+class TestReasoningEffortIsPerEndpoint:
+    """One global default, two providers that disagree about the vocabulary.
+
+    gpt-5.6-luna *requires* reasoning_effort="none" to use function tools; NIM
+    rejects "none" with a 400 whose text reached Niranjan as the message. An
+    unsupported value has to be dropped, not sent.
+    """
+
+    def _kwargs(self, provider_name, effort):
+        from argon.providers.openai_compat import OpenAICompatProvider
+        from argon.providers.registry import find_by_name
+
+        p = OpenAICompatProvider.__new__(OpenAICompatProvider)
+        p._spec = find_by_name(provider_name)
+        p.default_model = "m"
+        p.fallback_model = None
+        p.extra_headers = None
+        return OpenAICompatProvider._build_kwargs(
+            p, [{"role": "user", "content": "hi"}], None, None, 100, 0.1, effort, None
+        )
+
+    def test_nim_never_receives_none(self):
+        assert "reasoning_effort" not in self._kwargs("nim", "none")
+
+    def test_nim_still_receives_what_it_supports(self):
+        assert self._kwargs("nim", "medium")["reasoning_effort"] == "medium"
+
+    def test_openai_receives_none_because_luna_requires_it(self):
+        assert self._kwargs("openai", "none")["reasoning_effort"] == "none"

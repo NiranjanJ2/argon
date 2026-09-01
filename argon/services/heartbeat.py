@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from loguru import logger
 
-from argon.services.reminder import extract_message, is_silence
+from argon.services.reminder import extract_message, is_provider_error, is_silence
 
 if TYPE_CHECKING:
     from argon.providers.base import LLMProvider
@@ -147,7 +147,7 @@ class HeartbeatService:
         out: dict[str, Any] = {
             "mode": "idle", "current_task": None, "started_today": False,
             "due_now": [], "shielded": False, "phone": "unknown", "override": False,
-            "before_start": False,
+            "before_start": False, "attention": "", "distracted_now": False,
         }
         try:
             data = DailyState(self.workspace).get()
@@ -193,6 +193,18 @@ class HeartbeatService:
         except Exception:  # noqa: BLE001
             pass
 
+        try:
+            from argon.productivity import attention
+
+            out["attention"] = attention.describe()
+            # A crossing at four says nothing at nine, so only a recent one
+            # counts as "he is in it now".
+            out["distracted_now"] = any(
+                r["kind"] == "opened" for r in attention.since_minutes(20)
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         # The board is the only expensive read here — Classroom is cached for
         # 120s and the tick is far longer than that, so every tick that reaches
         # it pays for a fresh crawl. Everything above is a local file, so the
@@ -203,6 +215,7 @@ class HeartbeatService:
             or out["override"]
             or out["mode"] in ("working", "lock_in", "napping", "done")
         ):
+            # Same gate order as before: the local answers get to say no first.
             out["due_now"] = self._due_now()
         return out
 
@@ -245,6 +258,10 @@ class HeartbeatService:
             # locks him again on the next tick, which turns "let me out" into a
             # thing he has to keep saying — the nagging failure, with a shield.
             return None
+        if situation["distracted_now"]:
+            # He is in a distracting app with work outstanding. This is the one
+            # case worth acting on that absence alone would miss.
+            return "he is in a distracting app and work is due"
         if not situation["due_now"]:
             return None
         return "nothing is running and work is due"
@@ -310,6 +327,12 @@ class HeartbeatService:
             return
 
         text = extract_message(response)
+        if is_provider_error(text):
+            # The check-in learned this on 2026-08-22, when a 504 was delivered
+            # as the afternoon brief. The watch reused its extractors and not
+            # this guard, so the same failure arrived by a new road.
+            logger.warning("Heartbeat: upstream failed: {}", text[:120])
+            return
         if is_silence(text):
             logger.info("Heartbeat: acted, nothing worth saying")
             return
@@ -346,9 +369,11 @@ class HeartbeatService:
             "shielded" if situation["shielded"]
             else f"not shielded ({situation['phone']})"
         )
+        attention = situation.get("attention") or ""
         return (
             f"It is {current_time_str(self.timezone)} and this is the evening watch.\n\n"
-            f"He is not working on anything right now (mode: {situation['mode']}). "
+            + (f"His phone reports: {attention}.\n\n" if attention else "")
+            + f"He is not working on anything right now (mode: {situation['mode']}). "
             f"He has {'started something' if situation['started_today'] else 'started nothing'} "
             f"today. His phone is {phone}.\n\n"
             f"Due today or overdue:\n{lines}\n\n"

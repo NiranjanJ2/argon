@@ -280,7 +280,19 @@ class OpenAICompatProvider(LLMProvider):
                     break
 
         if reasoning_effort:
-            kwargs["reasoning_effort"] = reasoning_effort
+            spec = self._spec
+            allowed = spec.reasoning_efforts if spec else frozenset()
+            if allowed and reasoning_effort not in allowed:
+                # Asking NIM for "none" is a 400, and the error text reaches him
+                # as the message. Dropping it is the only harmless option.
+                from loguru import logger
+
+                logger.debug(
+                    "{} does not accept reasoning_effort={!r}; omitting",
+                    getattr(spec, "name", "provider"), reasoning_effort,
+                )
+            else:
+                kwargs["reasoning_effort"] = reasoning_effort
 
         if tools:
             kwargs["tools"] = tools

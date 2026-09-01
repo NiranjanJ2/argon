@@ -61,6 +61,9 @@ class _Runtime:
     # in tests and when the gateway is not running; the planner then records
     # the time without scheduling rather than failing the whole submission.
     cron: Any | None = None
+    # Asks the evening watch to evaluate now rather than at its next tick.
+    # Registered by the runtime; absent in tests and when the gateway is down.
+    on_attention: Any | None = None
 
 
 _rt = _Runtime()
@@ -69,6 +72,11 @@ _rt = _Runtime()
 def register_agent_handler(handler: AgentTurn) -> None:
     """Register the bridge that runs one agent turn from inside a Flask thread."""
     _rt.agent = handler
+
+
+def register_attention_trigger(fn: Any) -> None:
+    """Let a phone report wake the watch immediately."""
+    _rt.on_attention = fn
 
 
 def register_cron_service(service: Any) -> None:
@@ -730,6 +738,41 @@ def screentime_report() -> Any:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     logger.debug("Screen-time report stored for {}", day)
     return jsonify({"ok": True, "date": day})
+
+
+@app.post("/v1/screentime/event")
+@require_token
+def screentime_event() -> Any:
+    """One threshold the phone crossed.
+
+    `kind` is "opened" (the low threshold — he is in a distracting app now) or
+    "spent" (a usage budget was crossed). iOS cannot tell us which app, so
+    `label` is whatever the phone calls the selection.
+
+    An "opened" report asks the watch to look immediately rather than waiting up
+    to fifteen minutes for its next tick. It goes through the *same* decision
+    path as the timer, so every guard already there still applies: mid-work,
+    emergency override, before his start time, and the one-message-an-hour cap.
+    A second trigger with its own rules is how the twelve-message evening
+    happened.
+    """
+    from argon.productivity import attention
+
+    body = _body()
+    kind = str(body.get("kind") or "").strip()
+    if kind not in ("opened", "spent"):
+        return jsonify({"error": "kind must be 'opened' or 'spent'"}), 400
+    row = attention.record(
+        kind, label=str(body.get("label") or ""), minutes=int(body.get("minutes") or 0)
+    )
+
+    considered = False
+    if kind == "opened" and _rt.on_attention is not None:
+        try:
+            considered = bool(_rt.on_attention())
+        except Exception:  # noqa: BLE001 - the report is stored either way
+            logger.exception("Attention trigger failed")
+    return jsonify({"ok": True, "recorded": row, "considered": considered})
 
 
 @app.get("/v1/screentime")

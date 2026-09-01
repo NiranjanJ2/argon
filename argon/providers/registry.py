@@ -26,6 +26,13 @@ class ProviderSpec:
     env_extras: tuple[tuple[str, str], ...] = ()
     # per-model param overrides, e.g. (("gpt-oss", {"temperature": 1.0}),)
     model_overrides: tuple[tuple[str, dict[str, Any]], ...] = ()
+    #: Values this endpoint accepts for ``reasoning_effort``. Empty means "send
+    #: whatever was asked for". The setting is a single global default but the
+    #: providers disagree about the vocabulary: gpt-5.6-luna *requires* "none"
+    #: to use function tools, and NIM rejects "none" outright with a 400. One
+    #: default cannot be right for both, so an unsupported value is dropped
+    #: rather than sent and turned into an error the user reads.
+    reasoning_efforts: frozenset[str] = frozenset()
 
     @property
     def label(self) -> str:
@@ -38,6 +45,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         env_key="NVIDIA_API_KEY",
         display_name="NVIDIA NIM",
         default_api_base="https://integrate.api.nvidia.com/v1",
+        reasoning_efforts=frozenset({"low", "medium", "high"}),
     ),
     ProviderSpec(
         name="groq",

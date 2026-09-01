@@ -60,7 +60,7 @@ def _situation(watch, monkeypatch, **over):
     base = {"mode": "idle", "current_task": None, "started_today": False,
             "due_now": [{"title": "HW 12", "due_when": "Tue 09/01"}],
             "shielded": False, "phone": "converged", "override": False,
-            "before_start": False}
+            "before_start": False, "attention": "", "distracted_now": False}
     base.update(over)
     monkeypatch.setattr(watch, "_situation", lambda: base)
     return base
@@ -265,8 +265,10 @@ class TestTheExpensiveReadComesLast:
         monkeypatch.setattr("argon.ios.mode.override_status", lambda: (base["override"], None))
         monkeypatch.setattr("argon.ios.mode.get_actual", lambda: {"shielded": False})
         monkeypatch.setattr("argon.ios.mode.convergence", lambda: ("converged", ""))
+        # No start time chosen *is* the before-start case now, and it does not
+        # depend on what the wall clock happens to say when the suite runs.
         monkeypatch.setattr("argon.planner.start_time",
-                            lambda: "23:59" if base["before_start"] else "00:01")
+                            lambda: None if base["before_start"] else "00:01")
 
         situation = service._situation()
 
@@ -304,3 +306,48 @@ async def test_an_unplanned_day_is_not_pushed(watch, monkeypatch):
     await watch._tick()
 
     assert watch.ran == [] and watch.spoke == []
+
+
+class TestDistraction:
+    """Opening a distracting app is the one case absence alone would miss."""
+
+    @pytest.mark.asyncio
+    async def test_being_in_a_distracting_app_is_an_occasion(self, watch, monkeypatch):
+        _now(monkeypatch, _at(21))
+        _situation(watch, monkeypatch, distracted_now=True,
+                   attention="30+ minutes on distracting apps today; just opened Social")
+
+        await watch._tick()
+
+        assert len(watch.ran) == 1
+        assert "His phone reports:" in watch.ran[0]
+        assert "just opened Social" in watch.ran[0]
+
+    @pytest.mark.asyncio
+    async def test_it_still_never_interrupts_real_work(self, watch, monkeypatch):
+        """A distraction report from a phone he is not holding must not break a
+        session. The trigger reuses the timer's path precisely so this holds."""
+        _now(monkeypatch, _at(21))
+        _situation(watch, monkeypatch, distracted_now=True, mode="working")
+
+        await watch._tick()
+
+        assert watch.ran == []
+
+    @pytest.mark.asyncio
+    async def test_an_override_still_wins(self, watch, monkeypatch):
+        _now(monkeypatch, _at(21))
+        _situation(watch, monkeypatch, distracted_now=True, override=True)
+
+        await watch._tick()
+
+        assert watch.ran == []
+
+    @pytest.mark.asyncio
+    async def test_before_his_start_time_it_is_not_his_problem_yet(self, watch, monkeypatch):
+        _now(monkeypatch, _at(17))
+        _situation(watch, monkeypatch, distracted_now=True, before_start=True)
+
+        await watch._tick()
+
+        assert watch.ran == []

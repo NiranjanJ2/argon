@@ -61,6 +61,7 @@ def gateway(
     """Run the assistant: channels, cron, heartbeat, check-ins, HTTP API."""
     from argon.api.server import (
         register_agent_handler,
+        register_attention_trigger,
         register_cron_service,
         start_api_server,
     )
@@ -110,7 +111,19 @@ def gateway(
 
             return asyncio.run_coroutine_threadsafe(turn(), loop).result(timeout=timeout_s)
 
+        def consider_now() -> bool:
+            """A phone report asks the watch to look now, not at its next tick.
+
+            Deliberately the *same* path as the timer, so mid-work, the
+            emergency override, his start time and the one-message-an-hour cap
+            all still bind. A second trigger with rules of its own is how the
+            twelve-message evening happened the first time.
+            """
+            asyncio.run_coroutine_threadsafe(rt.heartbeat._tick(), loop)
+            return True
+
         register_agent_handler(agent_turn)
+        register_attention_trigger(consider_now)
         register_cron_service(rt.cron)
         try:
             start_api_server(cfg)
