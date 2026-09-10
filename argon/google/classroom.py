@@ -89,6 +89,7 @@ def upcoming_assignments(
     svc,
     days_ahead: int = 30,
     *,
+    days_back: int = 14,
     dispositions: ClassroomDispositionStore | None = None,
     include_suppressed: bool = False,
 ) -> tuple[list[dict], list[str]]:
@@ -96,11 +97,20 @@ def upcoming_assignments(
 
     Shared by ``get_all_assignments`` and the daily overview so both agree on
     what "upcoming" means.
+
+    *days_back* is why this is no longer "upcoming" in spirit. The window used
+    to open at ``now``, so an assignment stopped existing the moment it came
+    due: Chapter 5 Key Terms was on the board all of 09/09 and gone by 00:01 on
+    09/10, which is how Argon came to tell him it had never been posted.
+    Overdue work is the most important thing this board can show, so the window
+    reaches backwards and lets ``days_overdue`` do the talking. Anything turned
+    in or settled is still filtered out below.
     """
     from googleapiclient.errors import HttpError
 
     now = datetime.now(LOCAL_TZ)
     cutoff = now + timedelta(days=days_ahead)
+    floor = now - timedelta(days=days_back)
 
     assignments: list[dict] = []
     unreadable: list[str] = []
@@ -127,7 +137,7 @@ def upcoming_assignments(
             continue
         for cw in works:
             due = classroom_due(cw)
-            if due is None or not (now < due <= cutoff):
+            if due is None or not (floor < due <= cutoff):
                 continue
             item = _fmt_coursework(cw)
             item["course_id"] = course["id"]

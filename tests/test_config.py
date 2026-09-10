@@ -138,9 +138,16 @@ def test_explicit_never_reset_survives_migration():
 
 
 def test_background_model_defaults_to_the_interactive_model_explicitly():
+    """Null, so `hb_cfg.model or defaults.model` resolves to the chat model.
+
+    It used to pin openai/gpt-oss-120b here. That model was retired on 09/03;
+    chat ran on a different one and kept working, so the only symptom was every
+    background turn failing. One model to keep alive, not two.
+    """
     from argon.config import HeartbeatConfig
 
-    assert HeartbeatConfig().model == "openai/gpt-oss-120b"
+    assert HeartbeatConfig().model is None
+    assert HeartbeatConfig().provider is None
 
 
 

@@ -634,10 +634,17 @@ class OpenAICompatProvider(LLMProvider):
         status = getattr(e, "status_code", None) or getattr(
             getattr(e, "response", None), "status_code", None
         )
-        if status in (404, 422):
+        if status in (404, 410, 422):
             return True
         msg = str(e).lower()
-        return any(k in msg for k in ("model not found", "no such model", "not available", "does not exist"))
+        return any(k in msg for k in (
+            "model not found", "no such model", "not available", "does not exist",
+            # A retired model answers 410 with "has reached its end of life ...
+            # is no longer available" - which "not available" above does not
+            # match. gpt-oss-120b died on 09/03 and every background turn failed
+            # silently for a week.
+            "no longer available", "end of life", "retired", "decommissioned",
+        ))
 
     @staticmethod
     def _meter(model: str, response: Any) -> None:
@@ -687,7 +694,11 @@ class OpenAICompatProvider(LLMProvider):
             self._meter(kwargs.get("model") or "", parsed)
             return parsed
         except Exception as e:
-            if self.fallback_model and model is None and self._is_model_unavailable(e):
+            if (
+                self.fallback_model
+                and model != self.fallback_model
+                and self._is_model_unavailable(e)
+            ):
                 from loguru import logger
                 logger.warning("Primary model unavailable, falling back to {}", self.fallback_model)
                 kwargs["model"] = self.fallback_model
@@ -753,7 +764,11 @@ class OpenAICompatProvider(LLMProvider):
                 finish_reason="error",
             )
         except Exception as e:
-            if self.fallback_model and model is None and self._is_model_unavailable(e):
+            if (
+                self.fallback_model
+                and model != self.fallback_model
+                and self._is_model_unavailable(e)
+            ):
                 from loguru import logger
                 logger.warning("Primary model unavailable, falling back to {}", self.fallback_model)
                 kwargs["model"] = self.fallback_model

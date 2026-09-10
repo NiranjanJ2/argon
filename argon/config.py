@@ -41,11 +41,15 @@ class ProviderConfig(Base):
 
 
 class AgentDefaults(Base):
-    model: str = "openai/gpt-oss-120b"
-    fallback_model: str | None = None
-    provider: str = "groq"
+    model: str = "gpt-5.6-luna"
+    #: A second model on the *same* provider, tried when the primary turns out
+    #: to be gone. Cross-provider standby is separate and covers billing.
+    fallback_model: str | None = "gpt-5-mini"
+    provider: str = "openai"
     #: Provider to fall back to when the primary refuses on billing or quota.
-    fallback_provider: str | None = "nim"
+    #: None until a second provider actually holds a working key - nim's went
+    #: 403 and a standby that cannot answer only hides the outage.
+    fallback_provider: str | None = None
     max_tokens: int = 8192
     context_window_tokens: int = 65_536
     context_block_limit: int | None = None
@@ -123,14 +127,16 @@ class HeartbeatConfig(Base):
     """Background turns: the heartbeat and every check-in.
 
     The after-school brief is one of the most important messages Argon sends,
-    so background turns use the same 120b model by default. Set this only to
-    deliberately select a different background model.
+    so background turns default to the *same* model as chat: leaving both null
+    means there is only one model to keep alive. Pinning a separate one here is
+    how gpt-oss-120b stayed configured for a week after it was retired - chat
+    kept working, so nothing looked broken while every check-in died.
     """
 
     enabled: bool = True
     interval_s: int = 30 * 60
     keep_recent_messages: int = 8
-    model: str | None = "openai/gpt-oss-120b"
+    model: str | None = None
     provider: str | None = None
     #: The watch runs his evening only — home from school to midnight. Outside
     #: it there is either nothing to watch or nothing he should be doing.

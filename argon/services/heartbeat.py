@@ -30,6 +30,15 @@ from argon.services.reminder import extract_message, is_provider_error, is_silen
 if TYPE_CHECKING:
     from argon.providers.base import LLMProvider
 
+#: The watch's own block, kept distinct from ``task`` so starting a task takes
+#: it over cleanly and so releasing only ever lifts what the watch imposed.
+WATCH_SHIELD_SOURCE = "watch"
+
+#: Long enough to outlive the tick interval, short enough that a dead server
+#: means an unlocked phone within the hour. Renewed each tick while the reason
+#: still holds, so it never expires out from under him mid-evening.
+WATCH_SHIELD_MIN = 60
+
 _HEARTBEAT_TOOL = [
     {
         "type": "function",
@@ -266,6 +275,50 @@ class HeartbeatService:
             return None
         return "nothing is running and work is due"
 
+    def _engage_shield(self, reason: str) -> None:
+        """Impose the block the reason already justifies. Never raises."""
+        from argon.ios import mode as ios_mode
+
+        try:
+            current = ios_mode.get_mode()
+            source = current.get("source")
+            if current.get("mode") != "off":
+                if source == WATCH_SHIELD_SOURCE:
+                    # Ours and still warranted: push the expiry out rather than
+                    # bumping the version, or the phone re-applies every tick.
+                    ios_mode.renew(WATCH_SHIELD_MIN, source=WATCH_SHIELD_SOURCE)
+                # Anything else - a task focus, or a block he set himself - is
+                # already stricter than this one. Leave it alone.
+                return
+            ios_mode.set_mode(
+                "lock_in",
+                duration_min=WATCH_SHIELD_MIN,
+                reason=reason,
+                source=WATCH_SHIELD_SOURCE,
+            )
+        except ios_mode.OverrideActive:
+            return  # he pulled the release; do not argue with it
+        except Exception as exc:  # noqa: BLE001 - the watch must survive the phone
+            logger.warning("Heartbeat could not engage the shield: {}", exc)
+            return
+        logger.info("Heartbeat: shielded the phone ({})", reason)
+
+    def _release_shield(self) -> None:
+        """Lift only the watch's own block, once its reason is gone."""
+        from argon.ios import mode as ios_mode
+
+        try:
+            current = ios_mode.get_mode()
+            if current.get("mode") == "off":
+                return
+            if current.get("source") != WATCH_SHIELD_SOURCE:
+                return  # not ours to lift
+            ios_mode.set_mode("off", reason="nothing due", source=WATCH_SHIELD_SOURCE)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Heartbeat could not release the shield: {}", exc)
+            return
+        logger.info("Heartbeat: released its own shield")
+
     async def start(self) -> None:
         """Start the heartbeat service."""
         if not self.enabled:
@@ -308,6 +361,7 @@ class HeartbeatService:
         situation = self._situation()
         reason = self._decide(situation)
         if reason is None:
+            self._release_shield()
             logger.debug(
                 "Heartbeat: standing down (mode={}, due={})",
                 situation["mode"], len(situation["due_now"]),
@@ -315,6 +369,13 @@ class HeartbeatService:
             return
 
         logger.info("Heartbeat: {}", reason)
+        # Before the model, not through it. `_decide` is ordinary Python and has
+        # already ruled out working, napping, before-start and the emergency
+        # override, so the shield needs no further judgement - and routing it
+        # through the agent is why nothing blocked between 09/03 and 09/10, when
+        # every turn returned 410 and the watch fired twenty times an evening to
+        # no effect.
+        self._engage_shield(reason)
         if not self.on_execute:
             return
 

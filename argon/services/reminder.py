@@ -90,6 +90,28 @@ def is_provider_error(text: str) -> bool:
     return (text or "").strip().lower().startswith(_PROVIDER_ERROR_PREFIXES)
 
 
+def plain_board(workspace: Path, tz: Any) -> str:
+    """What is due, rendered without a model.
+
+    Every other message Argon sends is worded by an LLM. On 09/03 the background
+    model was retired, every check-in failed, and the only symptom was a WARNING
+    in a log nobody reads - so an assignment went by. This is the floor: if the
+    model is gone, the board still goes out.
+    """
+    from argon.commitments import load_board
+
+    today = datetime.now(tz).date().isoformat()
+    due = [c for c in load_board(workspace).commitments if c.due and c.due <= today]
+    if not due:
+        return ""
+    lines = ["Argon's model is unreachable, so here is the board as-is:"]
+    for c in sorted(due, key=lambda c: (c.due or "", c.title)):
+        subject = f"{c.subject} - " if c.subject else ""
+        late = "  (overdue)" if (c.due or "") < today else ""
+        lines.append(f"- {subject}{c.title}{late}")
+    return "\n".join(lines)
+
+
 def is_silence(text: str) -> bool:
     """Is this a refusal rather than a message worth sending?"""
     stripped = (text or "").strip().strip('"').strip()
@@ -360,6 +382,10 @@ class ReminderService:
         self._pending: dict[str, Any] | None = None
         self._running = False
         self._task: asyncio.Task | None = None
+        #: Consecutive turns the provider failed outright. One is a blip worth
+        #: retrying; a run of them means the model is not coming back.
+        self._provider_failures = 0
+        self._fallback_sent_on: str | None = None
 
     # -- policy ------------------------------------------------------------
 
@@ -881,7 +907,9 @@ class ReminderService:
             # so this retries; consuming it here would spend the day's brief on a
             # 504 - which is exactly what happened on 08/22.
             logger.warning("Check-in ({}) failed upstream: {}", occasion.kind, text[:120])
+            await self._unworded_fallback(now)
             return ""
+        self._provider_failures = 0
         if is_silence(text):
             # The model genuinely had nothing to say. That is a real outcome for
             # a discretionary check-in, so it consumes the occasion.
@@ -929,6 +957,39 @@ class ReminderService:
         self.ledger.record_said(occasion.kind, arrived, now)
         logger.info("Check-in spoke ({}): {}", occasion.kind, arrived[:80])
         return arrived
+
+    async def _unworded_fallback(self, now: datetime) -> None:
+        """Send the board unworded once a day while the model stays down.
+
+        A transient 504 recovers on the next tick, so the first failure stays
+        quiet. A retired model fails forever, and staying quiet forever is the
+        bug this exists to close.
+        """
+        self._provider_failures += 1
+        day = now.date().isoformat()
+        if self._provider_failures < 2 or self._fallback_sent_on == day:
+            return
+        if self.on_deliver is None:
+            return
+        try:
+            text = plain_board(self.workspace, self.tz)
+        except Exception as exc:  # a broken board must not silence the alarm
+            logger.warning("Unworded fallback could not read the board: {}", exc)
+            text = ""
+        text = text or "Argon's model is unreachable and the board could not be read."
+        # Stamped before the send: a deliverer that raises must not re-send all
+        # day, and the log below still records what happened.
+        self._fallback_sent_on = day
+        key = f"fallback:{day}"
+        try:
+            try:
+                await self.on_deliver(text, key=key, actions=[])
+            except TypeError:
+                await self.on_deliver(text, key=key)
+        except Exception as exc:
+            logger.error("Unworded fallback failed to deliver: {}", exc)
+            return
+        logger.info("Unworded fallback delivered ({} failures)", self._provider_failures)
 
     def _consume_pending(self, occasion: Occasion) -> None:
         """Mark the concrete thing this occasion was about as dealt with.

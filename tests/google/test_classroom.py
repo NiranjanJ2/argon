@@ -208,3 +208,38 @@ def test_upcoming_assignments_follows_course_and_coursework_pages():
     assert {item["classroom_key"] for item in assignments} == {
         "course-a:first", "course-a:second", "course-b:third"
     }
+
+
+def test_an_assignment_past_its_deadline_stays_on_the_board():
+    """The 09/09 miss.
+
+    The window opened at ``now``, so Chapter 5 Key Terms - due 23:59 and never
+    submitted - was on the board all day and gone by 00:01. Argon then told him
+    it had never been posted, because from where it was standing that was true.
+    """
+    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    service = _Service({"course": [_coursework("key-terms", yesterday)]}, {"key-terms": "NEW"})
+
+    assignments, _ = upcoming_assignments(service, days_ahead=7)
+
+    assert [a["id"] for a in assignments] == ["key-terms"]
+
+
+def test_overdue_work_he_already_turned_in_stays_off_it():
+    # The window reaching backwards must not resurrect a term's worth of work.
+    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    service = _Service({"course": [_coursework("done", yesterday)]}, {"done": "TURNED_IN"})
+
+    assignments, _ = upcoming_assignments(service, days_ahead=7)
+
+    assert assignments == []
+
+
+def test_the_lookback_has_a_floor():
+    # Last month's unsubmitted handout is not today's problem.
+    ancient = datetime.now(timezone.utc) - timedelta(days=40)
+    service = _Service({"course": [_coursework("ancient", ancient)]}, {"ancient": "NEW"})
+
+    assignments, _ = upcoming_assignments(service, days_ahead=7, days_back=14)
+
+    assert assignments == []
