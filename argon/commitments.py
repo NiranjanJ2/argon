@@ -59,6 +59,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +108,26 @@ def _when(value: Any) -> str | None:
     from argon.utils.helpers import when_label
 
     return when_label(value)
+
+
+def _days_late(due: Any) -> int | None:
+    """How many days past its date, or None if it is not late.
+
+    Classroom-only work has no task behind it to carry ``days_overdue``, so
+    without this every overdue assignment renders as though it were merely due
+    - which, now that overdue work reaches the board at all, is the difference
+    between "do this tonight" and "this is already late".
+    """
+    from argon import clock
+
+    day = _day(due)
+    if not day:
+        return None
+    try:
+        late = (clock.now().date() - date.fromisoformat(day)).days
+    except ValueError:
+        return None
+    return late if late > 0 else None
 
 
 def _normalized(value: Any) -> str:
@@ -390,7 +411,7 @@ def _from_assignment(
         priority=over.get("priority") or "medium",
         source="classroom",
         days_open=over.get("days_open"),
-        days_overdue=over.get("days_overdue"),
+        days_overdue=over.get("days_overdue") or _days_late(work_by or item.get("due")),
         time_estimate_min=over.get("time_estimate_min"),
         notes=over.get("notes"),
         link=item.get("link"),

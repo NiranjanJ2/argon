@@ -243,3 +243,24 @@ def test_the_lookback_has_a_floor():
     assignments, _ = upcoming_assignments(service, days_ahead=7, days_back=14)
 
     assert assignments == []
+
+
+
+def test_classroom_only_work_knows_it_is_late(monkeypatch):
+    """Overdue reaching the board is only half of it; it has to *say* it is late.
+
+    ``days_overdue`` came from the overlay task, and Classroom-only work has no
+    task behind it - so every one of them rendered as merely due.
+    """
+    from argon import clock
+    from argon.commitments import _days_late
+
+    monkeypatch.setattr(clock, "now", lambda: datetime(2026, 9, 10, 8, 0, tzinfo=LOCAL_TZ))
+
+    assert _days_late("2026-09-09T23:59:00-07:00") == 1
+    assert _days_late("2026-09-09") == 1
+    assert _days_late("2026-08-27") == 14
+    assert _days_late("2026-09-10") is None   # due today is not late
+    assert _days_late("2026-09-12") is None
+    assert _days_late(None) is None
+    assert _days_late("not-a-date") is None

@@ -33,14 +33,14 @@ class _Phone:
         self.calls.append(("renew", minutes, source))
 
 
-class _OverrideActive(ValueError):
+class _OverrideActiveError(ValueError):
     pass
 
 
 @pytest.fixture
 def watch(tmp_path, monkeypatch):
     phone = _Phone()
-    phone.OverrideActive = _OverrideActive
+    phone.OverrideActive = _OverrideActiveError
     # `from argon.ios import mode` takes the package attribute once anything
     # has imported it, so patching sys.modules alone works in isolation and
     # silently does nothing in a full run.
@@ -88,7 +88,7 @@ def test_the_emergency_release_wins(watch):
     service, phone = watch
 
     def refuse(*a, **k):
-        raise _OverrideActive("override")
+        raise _OverrideActiveError("override")
 
     phone.set_mode = refuse
     service._engage_shield("work is due")  # must not raise
