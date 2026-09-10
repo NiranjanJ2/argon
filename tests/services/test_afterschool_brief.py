@@ -136,7 +136,10 @@ class TestTheBriefCarriesClassroom:
         prompt = service.build_prompt(OCCASIONS["daily_brief"])
 
         assert "after-school brief" in prompt.lower()
-        assert "deadline order" in prompt.lower()
+        # Ordering and enumeration moved into code: the digest is appended to
+        # the delivered message, sorted by due date. The prompt's job is now to
+        # stop the model writing a second, shorter list of its own.
+        assert "do not list the assignments" in prompt.lower()
         # It reports; it does not run his evening. These are the shapes that
         # turned a brief into a planning interview.
         assert "set_day_plan" not in prompt

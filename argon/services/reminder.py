@@ -90,26 +90,63 @@ def is_provider_error(text: str) -> bool:
     return (text or "").strip().lower().startswith(_PROVIDER_ERROR_PREFIXES)
 
 
+def _due_day(value: Any) -> Any:
+    """The date half of a board due stamp, whatever shape it arrived in."""
+    from datetime import date
+
+    if not isinstance(value, str) or len(value) < 10:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def board_digest(workspace: Path, tz: Any, *, limit: int = 12) -> str:
+    """Everything he owes tonight and tomorrow, enumerated. No model involved.
+
+    The brief prompt already stated the whole board - and then asked for "two
+    or three items". On 09/09 five things were due, the model wrote the word
+    "APUSH" for three of them, and Chapter 5 Key Terms was never named and
+    never turned in. Choosing what to mention is not a judgement worth
+    delegating: the sentence around the list is the model's job, the list is
+    code's.
+    """
+    from argon.commitments import load_board
+
+    today = datetime.now(tz).date()
+    tomorrow = today + timedelta(days=1)
+
+    rows = []
+    for c in load_board(workspace).commitments:
+        day = _due_day(c.due)
+        if day is None or day > tomorrow:
+            continue
+        rows.append((day, c))
+    if not rows:
+        return ""
+
+    lines = []
+    for day, c in sorted(rows, key=lambda r: (r[0], r[1].title))[:limit]:
+        late = c.days_overdue or 0
+        when = f"{late}d late" if late > 0 else ("tonight" if day == today else "tomorrow")
+        subject = f"{c.subject}: " if c.subject else ""
+        lines.append(f"- {when} - {subject}{c.title.strip()}")
+    return "\n".join(lines)
+
+
 def plain_board(workspace: Path, tz: Any) -> str:
-    """What is due, rendered without a model.
+    """The digest with an outage preamble, for when the model cannot write one.
 
     Every other message Argon sends is worded by an LLM. On 09/03 the background
     model was retired, every check-in failed, and the only symptom was a WARNING
     in a log nobody reads - so an assignment went by. This is the floor: if the
     model is gone, the board still goes out.
     """
-    from argon.commitments import load_board
-
-    today = datetime.now(tz).date().isoformat()
-    due = [c for c in load_board(workspace).commitments if c.due and c.due <= today]
-    if not due:
+    digest = board_digest(workspace, tz)
+    if not digest:
         return ""
-    lines = ["Argon's model is unreachable, so here is the board as-is:"]
-    for c in sorted(due, key=lambda c: (c.due or "", c.title)):
-        subject = f"{c.subject} - " if c.subject else ""
-        late = "  (overdue)" if (c.due or "") < today else ""
-        lines.append(f"- {subject}{c.title}{late}")
-    return "\n".join(lines)
+    return "Argon's model is unreachable, so here is the board as-is:\n" + digest
 
 
 def is_silence(text: str) -> bool:
@@ -485,12 +522,17 @@ class ReminderService:
             overdue = self._overdue_lines()
             return (
                 "THIS IS THE AFTER-SCHOOL BRIEF. He is home and the evening is "
-                "his. Tell him what is actually on his plate tonight, the way a "
-                "person would say it out loud — group what belongs together, "
-                "lead with whatever is tightest, and let the rest be brief.\n\n"
+                "his.\n\n"
                 "His board, verified just now:\n{}\n\n{}"
-                "Put overdue items or real conflicts first; otherwise use "
-                "deadline order. Two or three items is usually right.\n\n"
+                "Do NOT list the assignments. The complete list is appended to "
+                "your message by code, so anything you leave out still reaches "
+                "him - and anything you summarise is a second, shorter list "
+                "competing with it. Asking for 'two or three items' here is how "
+                "five due items went out as the word 'APUSH' on 09/09 and one "
+                "of them was never turned in.\n"
+                "Write only the framing that goes above the list: what tonight "
+                "actually looks like, what is tightest, what to open first. One "
+                "or two sentences.\n\n"
             ).format(
                 self._schoolwork_lines(),
                 "Past due and still open:\n{}\n\n".format(overdue) if overdue else "",
@@ -931,6 +973,13 @@ class ReminderService:
         # there is no reachable channel or the send failed outright; recording
         # "said" regardless is how two days of check-ins were logged as spoken
         # while nothing left the machine.
+        if occasion.kind == "daily_brief":
+            # Appended after the reword check above, so the near-duplicate test
+            # still compares prose to prose rather than two identical lists.
+            digest = self._digest()
+            if digest:
+                text = f"{text}\n\n{digest}"
+
         delivered, arrived = True, text
         if self.on_deliver is not None:
             key = self._delivery_key(occasion, now)
@@ -957,6 +1006,14 @@ class ReminderService:
         self.ledger.record_said(occasion.kind, arrived, now)
         logger.info("Check-in spoke ({}): {}", occasion.kind, arrived[:80])
         return arrived
+
+    def _digest(self) -> str:
+        """The enumerated board for the brief. Never raises."""
+        try:
+            return board_digest(self.workspace, self.tz)
+        except Exception as exc:  # noqa: BLE001 - a brief without the list is
+            logger.warning("Board digest failed: {}", exc)  # still worth sending
+            return ""
 
     async def _unworded_fallback(self, now: datetime) -> None:
         """Send the board unworded once a day while the model stays down.
